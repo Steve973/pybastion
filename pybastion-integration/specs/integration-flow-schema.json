@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Steve973/project-resolution-engine/schemas/integration-flow.schema/1.0.0.json",
+  "title": "Integration Flow Specification",
+  "description": "Schema for integration flow testing artifacts",
+  "type": "object",
+  "comment": "To be completed as stages are implemented"
+}

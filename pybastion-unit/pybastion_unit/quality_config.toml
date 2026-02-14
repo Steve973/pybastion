@@ -1,0 +1,101 @@
+# Code Quality Analysis Configuration
+# Used by analyze_code_quality.py to evaluate Python source files
+
+[analyzers]
+# Which analyzers to run (comment out to disable)
+enabled = [
+    "radon_complexity",
+    "radon_maintainability", 
+    "radon_raw",
+    "type_hints",
+    "vulture",
+]
+
+[analyzers.radon_complexity]
+# Cyclomatic complexity analysis
+tool = "radon"
+command = "cc"
+# Radon outputs A-F grades, but we'll use numeric values for thresholds
+
+[analyzers.radon_maintainability]
+# Maintainability index (0-100 scale)
+tool = "radon"
+command = "mi"
+
+[analyzers.radon_raw]
+# Raw metrics: LOC, LLOC, SLOC, comments, etc.
+tool = "radon"
+command = "raw"
+
+[analyzers.type_hints]
+# Type annotation coverage via mypy
+tool = "mypy"
+# We'll parse mypy output to count annotated vs unannotated
+
+[analyzers.vulture]
+# Dead code detection
+tool = "vulture"
+min_confidence = 80  # only report findings with 80%+ confidence
+
+# =============================================================================
+# GRADING THRESHOLDS
+# =============================================================================
+
+[thresholds.cyclomatic_complexity]
+# Per-callable cyclomatic complexity
+excellent = 5
+good = 10
+fair = 20
+poor = 30
+# Anything > poor is "critical"
+
+[thresholds.maintainability_index]
+# Maintainability index (0-100, higher is better)
+excellent = 20
+good = 15
+fair = 10
+poor = 5
+
+[thresholds.function_length]
+# Lines of code per callable (LLOC)
+excellent = 20
+good = 40
+fair = 60
+poor = 80
+
+[thresholds.parameter_count]
+# Number of parameters per callable
+excellent = 3
+good = 5
+fair = 7
+poor = 10
+
+[thresholds.nesting_depth]
+# Maximum nesting/indentation depth
+excellent = 2
+good = 3
+fair = 4
+poor = 5
+
+[thresholds.type_coverage]
+# Percentage of parameters/returns with type hints
+excellent = 90
+good = 75
+fair = 50
+poor = 25
+
+[thresholds.comment_ratio]
+# Comments per line of code (%)
+excellent = 20
+good = 10
+fair = 5
+poor = 2
+
+# =============================================================================
+# OUTPUT CONFIGURATION
+# =============================================================================
+
+[output]
+format = "yaml"  # yaml or json
+include_raw_data = false  # include full analyzer outputs
+flag_critical = true  # highlight critical issues prominently

@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+poetry.lock
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Poetry
+dist/
+build/
+*.egg-info/
+
+# Ruff
+.ruff_cache/
+
+# IDEs
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

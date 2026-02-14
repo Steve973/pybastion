@@ -1,0 +1,43 @@
+[project]
+name = "pybastion"
+version = "0.1.0"
+description = "Comprehensive unit and integration testing through AST-based ledger generation"
+authors = [
+    { name = "Steve Storck", email = "steve973@gmail.com" }
+]
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10,<4.0"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Operating System :: Unix",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Testing",
+    "Topic :: Software Development :: Quality Assurance"
+]
+
+[tool.poetry]
+package-mode = false
+
+[tool.poetry.dependencies]
+pybastion-unit =        { path = "pybastion-unit", develop = true }
+pybastion-integration = { path = "pybastion-integration", develop = true }
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0.0"
+black = ">=24.0.0"
+ruff = ">=0.1.0"
+
+[build-system]
+requires = ["poetry-core>=2.2.1,<3.0.0"]
+build-backend = "poetry.core.masonry.api"

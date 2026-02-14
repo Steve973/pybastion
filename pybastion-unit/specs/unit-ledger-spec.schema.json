@@ -1,0 +1,948 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Steve973/project-resolution-engine/schemas/unit-ledger-spec.schema/1.0.0.json",
+  "title": "Unit Ledger File (strict, YAML multi-doc represented as JSON array)",
+  "type": "array",
+  "minItems": 3,
+  "maxItems": 3,
+  "prefixItems": [
+    {
+      "$ref": "#/$defs/DerivedIdsDoc"
+    },
+    {
+      "$ref": "#/$defs/LedgerDoc"
+    },
+    {
+      "$ref": "#/$defs/LedgerGenerationReviewDoc"
+    }
+  ],
+  "items": false,
+  "$defs": {
+    "SchemaVersion": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)$"
+    },
+    "NonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "NonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "NonEmptyStringArray": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/NonEmptyString"
+      }
+    },
+    "NonEmptyObject": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": true
+    },
+    "ExtraMap": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": true
+    },
+    "InferredMap": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": true
+    },
+    "Language": {
+      "$ref": "#/$defs/NonEmptyString"
+    },
+    "CallablesAnalyzed": {
+      "$ref": "#/$defs/NonEmptyString"
+    },
+    "TotalExeItems": {
+      "$ref": "#/$defs/NonEmptyString"
+    },
+    "InterunitIntegrations": {
+      "$ref": "#/$defs/NonEmptyString"
+    },
+    "ExtlibIntegrations": {
+      "$ref": "#/$defs/NonEmptyString"
+    },
+    "BoundaryIntegrations": {
+      "$ref": "#/$defs/NonEmptyString"
+    },
+    "Visibility": {
+      "type": "string",
+      "enum": ["public", "protected", "private", "package", "internal"]
+    },
+    "EntryKind": {
+      "type": "string",
+      "enum": [
+        "callable",
+        "class",
+        "constant",
+        "enum",
+        "field",
+        "interface",
+        "other",
+        "property",
+        "unit"
+      ]
+    },
+    "UnitId": {
+      "type": "string",
+      "const": "C000"
+    },
+    "ClassId": {
+      "type": "string",
+      "pattern": "^C(?!000)\\d{3}(?:N\\d{3})*$"
+    },
+    "UnitFunctionId": {
+      "type": "string",
+      "pattern": "^C000F\\d{3}(?:N\\d{3})*$"
+    },
+    "MethodId": {
+      "type": "string",
+      "pattern": "^C(?!000)\\d{3}(?:N\\d{3})*M\\d{3}(?:N\\d{3})*$"
+    },
+    "CallableId": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/UnitFunctionId"
+        },
+        {
+          "$ref": "#/$defs/MethodId"
+        }
+      ]
+    },
+    "EntryId": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/UnitId"
+        },
+        {
+          "$ref": "#/$defs/ClassId"
+        },
+        {
+          "$ref": "#/$defs/UnitFunctionId"
+        },
+        {
+          "$ref": "#/$defs/MethodId"
+        }
+      ]
+    },
+    "EiId": {
+      "oneOf": [
+        {
+          "type": "string",
+          "pattern": "^C000F\\d{3}(?:N\\d{3})*E\\d{4}$",
+          "description": "Unit function EI ID"
+        },
+        {
+          "type": "string",
+          "pattern": "^C(?!000)\\d{3}(?:N\\d{3})*M\\d{3}(?:N\\d{3})*E\\d{4}$",
+          "description": "Class method EI ID"
+        }
+      ]
+    },
+    "IntegrationId": {
+      "type": "string",
+      "pattern": "^I(?:C000F\\d{3}(?:N\\d{3})*E\\d{4}|C(?!000)\\d{3}(?:N\\d{3})*M\\d{3}(?:N\\d{3})*E\\d{4})$",
+      "description": "Integration ID: 'I' prefix + EI ID"
+    },
+    "Decorator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "args": {
+          "type": "array",
+          "minItems": 1
+        },
+        "kwargs": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": true
+        },
+        "notes": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "extra": {
+          "$ref": "#/$defs/ExtraMap"
+        }
+      }
+    },
+    "TypeRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "args": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/TypeRef"
+          }
+        },
+        "qualname": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "unit": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "notes": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "extra": {
+          "$ref": "#/$defs/ExtraMap"
+        }
+      }
+    },
+    "ParamSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "type": {
+          "$ref": "#/$defs/TypeRef"
+        },
+        "default": {},
+        "decorators": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/Decorator"
+          }
+        },
+        "modifiers": {
+          "$ref": "#/$defs/NonEmptyStringArray"
+        },
+        "notes": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "test": {
+          "$ref": "#/$defs/TestGuide"
+        },
+        "extra": {
+          "$ref": "#/$defs/ExtraMap"
+        }
+      }
+    },
+    "EiSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "condition", "outcome"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/EiId"
+        },
+        "condition": {
+          "type": "string",
+          "minLength": 1,
+          "not": {
+            "pattern": "^UNREACHABLE\\b"
+          }
+        },
+        "outcome": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "not": {
+                "pattern": "^UNREACHABLE\\b"
+              }
+            },
+            {
+              "type": "string",
+              "pattern": "^UNREACHABLE \\(reason: .+\\)$"
+            }
+          ]
+        },
+        "precondition": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "notes": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "test": {
+          "$ref": "#/$defs/TestGuide"
+        },
+        "extra": {
+          "$ref": "#/$defs/ExtraMap"
+        },
+        "inferred": {
+          "$ref": "#/$defs/InferredMap"
+        }
+      }
+    },
+    "IntegrationKind": {
+      "type": "string",
+      "enum": ["call", "construct", "import", "dispatch", "io", "other"]
+    },
+    "InteractionKind": {
+      "type": "string",
+      "enum": [
+        "request_response",
+        "fire_and_forget",
+        "stream_out",
+        "stream_in",
+        "pubsub",
+        "async_job",
+        "other"
+      ]
+    },
+    "ContractParam": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "type": {
+          "$ref": "#/$defs/TypeRef"
+        },
+        "notes": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "extra": {
+          "$ref": "#/$defs/ExtraMap"
+        }
+      }
+    },
+    "ContractSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "interaction": {
+          "$ref": "#/$defs/InteractionKind"
+        },
+        "signature": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "returnType": {
+          "$ref": "#/$defs/TypeRef"
+        },
+        "params": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/ContractParam"
+          }
+        },
+        "raises": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/TypeRef"
+          }
+        },
+        "notes": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "extra": {
+          "$ref": "#/$defs/ExtraMap"
+        }
+      }
+    },
+    "BoundaryKind": {
+      "type": "string",
+      "enum": [
+        "filesystem",
+        "database",
+        "network",
+        "subprocess",
+        "message_bus",
+        "clock",
+        "randomness",
+        "env",
+        "other"
+      ]
+    },
+    "BoundarySummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "$ref": "#/$defs/BoundaryKind"
+        },
+        "endpoint": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "operation": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "protocol": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "resource": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "system": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "notes": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "extra": {
+          "$ref": "#/$defs/ExtraMap"
+        }
+      }
+    },
+    "ExecutionPath": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/EiId"
+      },
+      "description": "Sequence of EI IDs leading to an integration point"
+    },
+    "IntegrationFact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "target", "executionPaths"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/IntegrationId"
+        },
+        "target": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "executionPaths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/ExecutionPath"
+          },
+          "description": "All EI ID sequences that can reach this integration"
+        },
+        "boundary": {
+          "$ref": "#/$defs/BoundarySummary"
+        },
+        "condition": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "contract": {
+          "$ref": "#/$defs/ContractSummary"
+        },
+        "kind": {
+          "$ref": "#/$defs/IntegrationKind"
+        },
+        "signature": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "via": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "test": {
+          "$ref": "#/$defs/TestGuide"
+        },
+        "notes": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "extra": {
+          "$ref": "#/$defs/ExtraMap"
+        },
+        "inferred": {
+          "$ref": "#/$defs/InferredMap"
+        }
+      }
+    },
+    "Integration": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "interunit": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/IntegrationFact"
+          }
+        },
+        "extlib": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/IntegrationFact"
+          }
+        },
+        "boundaries": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/IntegrationFact"
+          }
+        }
+      }
+    },
+    "TestGuide": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mock": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "stub": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "fixture": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "inputs": {
+          "type": "array",
+          "minItems": 1
+        },
+        "expected": {},
+        "setup": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "teardown": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "notes": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "extra": {
+          "$ref": "#/$defs/ExtraMap"
+        }
+      }
+    },
+    "CallableSpec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["branches"],
+      "properties": {
+        "params": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ParamSpec"
+          }
+        },
+        "returnType": {
+          "$ref": "#/$defs/TypeRef"
+        },
+        "raises": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/TypeRef"
+          }
+        },
+        "branches": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/EiSpec"
+          },
+          "description": "All execution items (EIs) in this callable"
+        },
+        "integration": {
+          "$ref": "#/$defs/Integration"
+        },
+        "test": {
+          "$ref": "#/$defs/TestGuide"
+        },
+        "notes": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "extra": {
+          "$ref": "#/$defs/ExtraMap"
+        }
+      }
+    },
+    "Entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "name"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/EntryId"
+        },
+        "kind": {
+          "$ref": "#/$defs/EntryKind"
+        },
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "children": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/Entry"
+          }
+        },
+        "decorators": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/Decorator"
+          }
+        },
+        "modifiers": {
+          "$ref": "#/$defs/NonEmptyStringArray"
+        },
+        "visibility": {
+          "$ref": "#/$defs/Visibility"
+        },
+        "signature": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "callable": {
+          "$ref": "#/$defs/CallableSpec"
+        },
+        "type": {
+          "$ref": "#/$defs/TypeRef"
+        },
+        "notes": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "test": {
+          "$ref": "#/$defs/TestGuide"
+        },
+        "extra": {
+          "$ref": "#/$defs/ExtraMap"
+        },
+        "inferred": {
+          "$ref": "#/$defs/InferredMap"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "callable"
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": {
+            "required": ["callable"],
+            "not": {
+              "anyOf": [
+                {
+                  "required": ["type"]
+                }
+              ]
+            }
+          },
+          "else": {
+            "not": {
+              "required": ["callable"]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "unit"
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": {
+            "properties": {
+              "id": {
+                "const": "C000"
+              }
+            },
+            "not": {
+              "anyOf": [
+                {
+                  "required": ["type"]
+                },
+                {
+                  "required": ["signature"]
+                },
+                {
+                  "required": ["callable"]
+                }
+              ]
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "not": {
+                  "const": "callable"
+                }
+              }
+            },
+            "required": ["kind"]
+          },
+          "then": {
+            "not": {
+              "anyOf": [
+                {
+                  "required": ["signature"]
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    "DerivedIdsEntryAssignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "name", "address"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/EntryId"
+        },
+        "kind": {
+          "$ref": "#/$defs/EntryKind"
+        },
+        "name": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "address": {
+          "$ref": "#/$defs/NonEmptyString"
+        }
+      }
+    },
+    "DerivedIdsEiAssignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "address", "summary"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/EiId"
+        },
+        "address": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "summary": {
+          "$ref": "#/$defs/NonEmptyString"
+        }
+      }
+    },
+    "DerivedIdsAssigned": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entries", "branches"],
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DerivedIdsEntryAssignment"
+          }
+        },
+        "branches": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/DerivedIdsEiAssignment"
+          },
+          "description": "All execution items (branches is legacy term, now called EIs)"
+        }
+      }
+    },
+    "DerivedIdsDoc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["docKind", "schemaVersion", "unit", "assigned"],
+      "properties": {
+        "docKind": {
+          "type": "string",
+          "const": "derived-ids"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "unit": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "language", "unitId"],
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "language": {
+              "$ref": "#/$defs/Language"
+            },
+            "unitId": {
+              "$ref": "#/$defs/UnitId"
+            }
+          }
+        },
+        "assigned": {
+          "$ref": "#/$defs/DerivedIdsAssigned"
+        }
+      }
+    },
+    "LedgerDoc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["docKind", "schemaVersion", "unit"],
+      "properties": {
+        "docKind": {
+          "type": "string",
+          "const": "ledger"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "unit": {
+          "$ref": "#/$defs/Entry"
+        }
+      },
+      "allOf": [
+        {
+          "properties": {
+            "unit": {
+              "properties": {
+                "id": {
+                  "const": "C000"
+                },
+                "kind": {
+                  "const": "unit"
+                }
+              },
+              "required": ["id", "kind"]
+            }
+          }
+        }
+      ]
+    },
+    "FindingSeverity": {
+      "type": "string",
+      "enum": ["info", "warn", "error"]
+    },
+    "FindingCategory": {
+      "type": "string",
+      "enum": ["deviation", "assumption", "ambiguity", "gap", "anomaly"]
+    },
+    "Evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "address": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "lineStart": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "lineEnd": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "snippet": {
+          "$ref": "#/$defs/NonEmptyString"
+        }
+      }
+    },
+    "FindingAppliesTo": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/NonEmptyString"
+          }
+        }
+      ]
+    },
+    "Finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "category", "message"],
+      "properties": {
+        "severity": {
+          "$ref": "#/$defs/FindingSeverity"
+        },
+        "category": {
+          "$ref": "#/$defs/FindingCategory"
+        },
+        "message": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "appliesTo": {
+          "$ref": "#/$defs/FindingAppliesTo"
+        },
+        "evidence": {
+          "$ref": "#/$defs/Evidence"
+        },
+        "recommendedAction": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "notes": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "extra": {
+          "$ref": "#/$defs/ExtraMap"
+        }
+      }
+    },
+    "LedgerGenerationReviewDoc": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["docKind", "schemaVersion", "unit"],
+      "properties": {
+        "docKind": {
+          "type": "string",
+          "const": "ledger-generation-review"
+        },
+        "schemaVersion": {
+          "$ref": "#/$defs/SchemaVersion"
+        },
+        "unit": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "language", "callablesAnalyzed", "totalExeItems", "interunitIntegrations", "extlibIntegrations", "boundaryIntegrations"],
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/NonEmptyString"
+            },
+            "language": {
+              "$ref": "#/$defs/Language"
+            },
+            "callablesAnalyzed":  {
+              "$ref": "#/$defs/CallablesAnalyzed"
+            },
+            "totalExeItems": {
+              "$ref": "#/$defs/TotalExeItems"
+            },
+            "interunitIntegrations": {
+              "$ref": "#/$defs/InterunitIntegrations"
+            },
+            "extlibIntegrations": {
+              "$ref": "#/$defs/ExtlibIntegrations"
+            },
+            "boundaryIntegrations": {
+              "$ref": "#/$defs/BoundaryIntegrations"
+            }
+          }
+        },
+        "notes": {
+          "$ref": "#/$defs/NonEmptyString"
+        },
+        "extra": {
+          "$ref": "#/$defs/ExtraMap"
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Finding"
+          },
+          "description": "Findings array (may be empty)"
+        }
+      }
+    }
+  }
+}

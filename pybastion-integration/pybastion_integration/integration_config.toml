@@ -1,0 +1,71 @@
+# Integration Flow Testing Configuration
+# Edit these values to match your project structure
+
+[paths]
+# Where unit ledgers are located relative to project root
+ledgers_root = "dist/ledgers"
+
+# Where integration flow outputs will be written
+integration_output_dir = "dist/integration-output"
+
+[discovery]
+# Ledger directory structure: "auto" | "flat" | "package"
+ledger_structure = "auto"
+
+# Optional namespace anchor to strip when resolving packages
+namespace_anchor = ""
+
+[stages]
+# Output filenames for each stage (relative to integration_output_dir)
+stage1_output = "stage1-integration-points.yaml"
+stage2_output = "stage2-classified-points.yaml"
+stage3_output = "stage3-integration-graph.yaml"
+stage4_output = "stage4-pattern-analysis.yaml"
+stage5_output = "stage5-flows.yaml"
+stage6_output = "stage6-windows.yaml"
+
+[processing]
+# Maximum depth when traversing flows (prevents infinite loops)
+max_flow_depth = 20
+
+# Minimum window length for sliding windows
+min_window_length = 2
+
+# Maximum window length (0 = use full flow length)
+max_window_length = 7
+
+# Treat boundary integrations as terminal nodes
+boundaries_are_terminal = true
+
+[pattern_analysis]
+# Maximum depth for pattern analysis traversal
+max_depth = 15
+
+# Flows at or above this threshold are considered "long" and analyzed
+long_flow_threshold = 8
+
+[output_format]
+# YAML formatting options
+yaml_width = 100
+yaml_indent = 2
+yaml_sort_keys = false
+
+# Include metadata sections in outputs
+include_metadata = true
+
+# Include debug information in outputs
+debug_output = false
+
+[logging]
+# Verbosity level: 0 (quiet) | 1 (normal) | 2 (verbose)
+verbosity = 1
+
+# Show progress bars for long-running operations
+show_progress = true
+
+[validation]
+# Path to JSON schema file in THIS repo, relative to root
+schema_path = "../specs/integration-flow-schema.json"
+
+# Validate outputs against schema
+validate_outputs = true
