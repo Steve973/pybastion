@@ -25,7 +25,7 @@ from pathlib import Path
 # Add integration directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from integration import config
+import config
 from ..shared.yaml_utils import yaml_load, yaml_dump
 from ..shared.ledger_reader import discover_ledgers, load_ledgers, find_ledger_doc
 from ..shared.data_structures import (

@@ -139,6 +139,35 @@ FILESYSTEM_OPERATIONS = {
         'can_raise': True,
         'exceptions': ['FileExistsError', 'PermissionError', 'OSError']
     },
+    'zipfile.ZipFile': {
+        'kind': 'filesystem',
+        'operation': 'read/write',
+        'can_raise': True,
+        'exceptions': ['BadZipFile', 'FileNotFoundError', 'PermissionError', 'OSError']
+    },
+    'zipfile.ZipFile.read': {
+        'kind': 'filesystem',
+        'operation': 'read',
+        'can_raise': True,
+        'exceptions': ['KeyError', 'BadZipFile', 'OSError']
+    },
+    'zipfile.ZipFile.open': {
+        'kind': 'filesystem',
+        'operation': 'read',
+        'can_raise': True,
+        'exceptions': ['KeyError', 'BadZipFile', 'OSError']
+    },
+    'zipfile.ZipFile.extractall': {
+        'kind': 'filesystem',
+        'operation': 'write',
+        'can_raise': True,
+        'exceptions': ['BadZipFile', 'PermissionError', 'OSError']
+    },
+    'zipfile.ZipFile.namelist': {
+        'kind': 'filesystem',
+        'operation': 'read',
+        'can_raise': False
+    },
 }
 
 
@@ -363,6 +392,9 @@ STDLIB_CLASSES = {
 
     # queue
     'Queue', 'LifoQueue', 'PriorityQueue', 'SimpleQueue',
+
+    # compression
+    'ZipFile', 'ZipExtFile', 'TarFile', 'TarInfo', 'gzip', 'bz2', 'lzma'
 
     # argparse
     'ArgumentParser', 'Namespace',

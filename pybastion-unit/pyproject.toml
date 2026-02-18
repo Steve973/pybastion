@@ -37,6 +37,7 @@ mypy = ">=1.19.1"
 pyyaml = ">=6.0.3"
 radon = ">=6.0.1"
 vulture = ">=2.14"
+z3-solver = ">=4.15.8.0"
 
 [tool.poetry-monoranger-plugin]
 enabled = true

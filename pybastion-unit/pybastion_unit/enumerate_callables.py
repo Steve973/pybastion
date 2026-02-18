@@ -19,6 +19,7 @@ from callable_id_generation import (
 )
 from knowledge_base import PYTHON_BUILTINS, BUILTIN_METHODS
 from models import Branch, TypeRef, ParamSpec, IntegrationCandidate, CallableEntry
+from smt_path_checker import filter_feasible_paths
 
 
 def load_callable_inventory(filepath: Path | None) -> dict[str, str]:
@@ -254,8 +255,42 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
                     if path not in unique_paths:
                         unique_paths.append(path)
 
-                # Attach to integration
-                integration['execution_paths'] = unique_paths
+                # === SMT FILTERING ===
+                feasible_paths, feasibility_results = filter_feasible_paths(
+                    unique_paths,
+                    branches,
+                    timeout_ms=5000
+                )
+
+                # Attach feasible paths to integration
+                integration['execution_paths'] = feasible_paths
+
+                # Store analysis metadata
+                integration['path_analysis'] = {
+                    'total_syntactic_paths': len(unique_paths),
+                    'feasible_paths': len(feasible_paths),
+                    'infeasible_paths': len(unique_paths) - len(feasible_paths),
+                    'filter_effectiveness': (
+                        100 * (1 - len(feasible_paths) / len(unique_paths))
+                        if unique_paths else 0
+                    ),
+                }
+
+                # Store witness values for test generation
+                if feasible_paths:
+                    witnesses = []
+                    for path in feasible_paths:
+                        path_id = '->'.join(path)
+                        if path_id in feasibility_results:
+                            result = feasibility_results[path_id]
+                            if result.witness_values:
+                                witnesses.append({
+                                    'path': path,
+                                    'witness': result.witness_values
+                                })
+
+                    if witnesses:
+                        integration['test_witnesses'] = witnesses
 
         # Recurse into children
         if 'children' in entry and entry['children']:
