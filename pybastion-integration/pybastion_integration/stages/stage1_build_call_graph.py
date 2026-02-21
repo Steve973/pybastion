@@ -72,7 +72,7 @@ class CallEdge:
     def __init__(self, edge_id, from_node_id, to_node_id, from_callable, to_callable,
                  target_raw, is_integration_seam, feasible_path_count, total_path_count,
                  integration_id, integration_kind, integration_type='unknown',
-                 signature=None, unknown=False):
+                 signature=None, unknown=False, execution_paths=None):
         self.edge_id = edge_id
         self.from_node_id = from_node_id
         self.to_node_id = to_node_id
@@ -87,6 +87,7 @@ class CallEdge:
         self.integration_type = integration_type
         self.signature = signature
         self.unknown = unknown
+        self.execution_paths = execution_paths or []
 
     def to_dict(self) -> dict:
         return {
@@ -104,6 +105,7 @@ class CallEdge:
             'integration_kind': self.integration_kind,
             'signature': self.signature,
             'unknown': self.unknown,
+            'execution_paths': self.execution_paths,
         }
 
 
@@ -435,6 +437,7 @@ def _emit_edge(
             integration_kind=integ_kind,
             signature=integ_sig,
             unknown=unknown,
+            execution_paths=exec_paths,
         )
     )
 

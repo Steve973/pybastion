@@ -606,6 +606,12 @@ BUILTIN_METHODS = {
 }
 
 
+NO_OP_CALLS = {
+    'typing.cast',
+    'typing_extensions.cast'
+}
+
+
 def get_operation_info(target: str) -> dict | None:
     """
     Get information about an operation from the knowledge base.

@@ -21,6 +21,8 @@ from __future__ import annotations
 
 import ast
 
+from pybastion_unit.shared.knowledge_base import NO_OP_CALLS
+
 # Type alias for a single EI outcome with its originating call node (if any)
 EIOutcome = tuple[str, ast.Call | None]
 
@@ -29,6 +31,18 @@ EIOutcome = tuple[str, ast.Call | None]
 # Core Helpers
 # ============================================================================
 
+def _is_no_op_call(node: ast.Call) -> bool:
+    """Return True if this call is a known no-op that should not generate EIs."""
+    func = node.func
+    if isinstance(func, ast.Name):
+        # Match by tail: 'cast' matches 'typing.cast'
+        return any(fqn.endswith(f'.{func.id}') for fqn in NO_OP_CALLS)
+    if isinstance(func, ast.Attribute):
+        # Match fully qualified: 'typing.cast'
+        return ast.unparse(func) in NO_OP_CALLS
+    return False
+
+
 def extract_all_operations(node: ast.AST) -> list[ast.Call]:
     """
     Extract ALL Call nodes from an AST in execution order.
@@ -36,6 +50,8 @@ def extract_all_operations(node: ast.AST) -> list[ast.Call]:
     For nested/chained calls like Path(fetch(url)).resolve():
     - Returns: [fetch(url), Path(...), Path(...).resolve()]
     - Execution order: innermost first (by depth), then left-to-right
+
+    Known no-op calls (e.g. typing.cast) are excluded.
     """
     operations: list[tuple[ast.Call, int, int, int]] = []
 
@@ -47,7 +63,7 @@ def extract_all_operations(node: ast.AST) -> list[ast.Call]:
 
     collect(node)
     operations.sort(key=lambda x: (-x[1], x[2], x[3]))
-    return [op[0] for op in operations]
+    return [op[0] for op in operations if not _is_no_op_call(op[0])]
 
 
 def operation_eis(expressions: list[ast.AST]) -> list[EIOutcome]:
@@ -341,6 +357,9 @@ class AugAssignDecomposer(StatementDecomposer):
         return [stmt.value]
 
     def semantic_eis(self, stmt: ast.AugAssign, source_lines: list[str]) -> list[EIOutcome]:
+        ops = extract_all_operations(stmt.value) if stmt.value else []
+        if ops:
+            return []
         line_text = source_lines[stmt.lineno - 1].strip() if stmt.lineno <= len(source_lines) else ast.unparse(stmt)
         return [semantic(f"executes → {line_text}")]
 
@@ -352,6 +371,9 @@ class AnnAssignDecomposer(StatementDecomposer):
         return [stmt.value] if stmt.value else []
 
     def semantic_eis(self, stmt: ast.AnnAssign, source_lines: list[str]) -> list[EIOutcome]:
+        ops = extract_all_operations(stmt.value) if stmt.value else []
+        if ops:
+            return []
         line_text = source_lines[stmt.lineno - 1].strip() if stmt.lineno <= len(source_lines) else ast.unparse(stmt)
         return [semantic(f"executes → {line_text}")]
 

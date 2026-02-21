@@ -231,6 +231,7 @@ class CallableFinder(ast.NodeVisitor):
         self.fqn_stack = [module_fqn] if module_fqn else []
         self.func_counter = 1
         self.assignment_counter = 1
+        self.function_depth = 0
 
     @staticmethod
     def _is_enum_class(node: ast.ClassDef) -> bool:
@@ -256,7 +257,8 @@ class CallableFinder(ast.NodeVisitor):
         self._process_assignment(node)
 
     def visit_AnnAssign(self, node) -> None:
-        self._process_assignment(node)
+        if self.function_depth == 0:
+            self._process_assignment(node)
 
     def visit_AugAssign(self, node) -> None:
         self._process_assignment(node)
@@ -275,10 +277,14 @@ class CallableFinder(ast.NodeVisitor):
         self.fqn_stack.pop()
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        self.function_depth += 1
         self._process_function(node)
+        self.function_depth -= 1
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        self.function_depth += 1
         self._process_function(node)
+        self.function_depth -= 1
 
     def _process_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
         # Skip if we're looking for a specific function
