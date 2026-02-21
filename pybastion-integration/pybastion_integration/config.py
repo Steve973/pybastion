@@ -297,11 +297,11 @@ def print_config_summary() -> None:
 # ============================================================================
 # Automatic Validation on Import
 # ============================================================================
-
-_VALIDATION_ERRORS = validate_config()
-if _VALIDATION_ERRORS:
-    print("Configuration validation failed:", file=sys.stderr)
-    for error in _VALIDATION_ERRORS:
-        print(f"  ✗ {error}", file=sys.stderr)
-    print(f"\nCheck configuration in: {_CONFIG_PATH}", file=sys.stderr)
-    sys.exit(1)
+def run_validation() -> None:
+    validation_errors = validate_config()
+    if validation_errors:
+        print("Configuration validation failed:", file=sys.stderr)
+        for error in validation_errors:
+            print(f"  ✗ {error}", file=sys.stderr)
+        print(f"\nCheck configuration in: {_CONFIG_PATH}", file=sys.stderr)
+        sys.exit(1)

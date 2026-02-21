@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import builtins
 import re
 import sys
 from pathlib import Path
@@ -902,7 +903,7 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
             if isinstance(child, ast.Call):
                 target = self._get_call_target(child)
                 if target and self._is_external_call(target):
-                    resolved_target: str = self._resolve_target(target, known_types)
+                    resolved_target, resolved_type = self._resolve_target(target, known_types)
 
                     # Walk up parent chain to find containing statement
                     current = child
@@ -918,8 +919,13 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
                     line = containing_stmt.lineno if containing_stmt else child.lineno
 
                     # If the resolved target is in the inventory and belongs to this unit, skip it
-                    if resolved_target in self.callable_inventory:
-                        inv_id = self.callable_inventory[resolved_target]
+                    lookup_val = (
+                        resolved_target if resolved_target in self.callable_inventory # Check the full resolved target first
+                        else resolved_type if (resolved_type and resolved_type in self.callable_inventory) # Fall back to checking by type
+                        else None
+                    )
+                    if lookup_val:
+                        inv_id = self.callable_inventory[lookup_val]
                         inv_unit = re.split(r'_[CFM]\d+', inv_id)[0]
                         if inv_unit == self.unit_id:
                             continue
@@ -934,7 +940,7 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
 
         return candidates
 
-    def _resolve_target(self, target: str, param_types: dict[str, str]) -> str:
+    def _resolve_target(self, target: str, param_types: dict[str, str]) -> tuple[str, str]:
         """
         Resolve target to FQN using import map and type annotations.
 
@@ -947,7 +953,7 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
         # Strategy 1: Import resolution
         if first_part in self.import_map:
             fqn_first = self.import_map[first_part]
-            return target.replace(first_part, fqn_first, 1)
+            return target.replace(first_part, fqn_first, 1), ''
 
         # Strategy 2: Type annotation resolution
         if first_part in param_types:
@@ -959,6 +965,17 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
             container = None
             if '::' in param_type:
                 container, param_type = param_type.split('::', 1)
+
+            # If we have a container type, check if the method belongs to it
+            if container:
+                method_name = target.split('.')[-1]
+                container_type = getattr(builtins, container, None)
+                if container_type and method_name in dir(container_type):
+                    # Method is on the container - resolve against container
+                    if container in self.import_map:
+                        fqn_container = self.import_map[container]
+                        return target.replace(first_part, fqn_container, 1), fqn_container
+                    return target.replace(first_part, container, 1), container
 
             # Strip | None in either position
             param_type = re.sub(r'\s*\|\s*None', '', param_type).strip()
@@ -978,23 +995,23 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
 
             # Don't resolve if type is Any - leave as variable name
             if base_type == 'Any':
-                return target
+                return target, ''
 
             # Try to find FQN for the type
             if base_type in self.import_map:
                 # Type was imported, use FQN from imports
                 fqn_type = self.import_map[base_type]
-                return target.replace(first_part, fqn_type, 1)
+                return target.replace(first_part, fqn_type, 1), fqn_type
 
             # Try to find in callable inventory (search for FQN ending with .TypeName)
             for fqn in self.callable_inventory.keys():
                 if fqn.endswith(f'.{base_type}'):
-                    return target.replace(first_part, fqn, 1)
+                    return target.replace(first_part, fqn, 1), fqn
 
             # Fallback: just use the short type name
-            return target.replace(first_part, base_type, 1)
+            return target.replace(first_part, base_type, 1), base_type
 
-        return target
+        return target, ''
 
     def _is_external_call(self, target: str) -> bool:
         """
@@ -1072,7 +1089,6 @@ def process_file(
         ei_root: Path | None = None,
 ) -> dict[str, Any]:
     """Process a Python file and generate inventory."""
-
     project_types: set[str] = set()
     with open(inventory_path, 'r', encoding='utf-8') as f:
         for line in f:

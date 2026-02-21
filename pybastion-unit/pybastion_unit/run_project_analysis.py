@@ -74,6 +74,7 @@ def analyze_project(
 
     project_root = project_root.absolute()
     source_path = project_root / source_root
+    output_path = project_root / output_root
 
     if not source_path.exists():
         print(f"Error: Source root not found: {source_path}")
@@ -81,11 +82,11 @@ def analyze_project(
 
     # Output directories
     script_stages_dir = Path(__file__).parent / "stages"
-    inspect_output = project_root / output_root / "inspect" / "callable-inventory.txt"
-    eis_output = project_root / output_root / "eis"
-    inventory_output = project_root / output_root / "inventory"
-    quality_output = project_root / output_root / "quality"
-    ledgers_output = project_root / output_root / "ledgers"
+    inspect_output = output_path / "inspect" / "callable-inventory.txt"
+    eis_output = output_path / "eis"
+    inventory_output = output_path / "inventory"
+    quality_output = output_path / "quality"
+    ledgers_output = output_path / "ledgers"
     log_dir = Path("/tmp/ledger")
 
     # Clean up old logs
@@ -112,8 +113,8 @@ def analyze_project(
         cmd = [
             sys.executable,
             str(inspect_script),
-            str(source_root),
-            "--output", str(inspect_output.relative_to(project_root))
+            str(source_path),
+            "--output", str(inspect_output)
         ]
         if not run_command(cmd, "Stage 1: Inspect Units"):
             return False
@@ -313,6 +314,7 @@ Example:
     parser.add_argument(
         'project_root',
         type=Path,
+        default=Path.cwd(),
         help='Project root directory'
     )
     parser.add_argument(

@@ -2,8 +2,10 @@
 # Edit these values to match your project structure
 
 [paths]
-# Where unit ledgers are located relative to project root
+# Where unit ledgers are located relative to the project root
 ledgers_root = "dist/ledgers"
+
+# Where the unit inventory YAML files are located relative to the project root
 inventories_root = "dist/inventory"
 
 # Where integration flow outputs will be written
