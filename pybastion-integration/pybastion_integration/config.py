@@ -26,14 +26,13 @@ else:
         print("Run ./integration-setup.sh to install dependencies", file=sys.stderr)
         sys.exit(1)
 
-
 # ============================================================================
 # Configuration Loading
 # ============================================================================
 
-# Find the config file relative to this module
 _MODULE_DIR = Path(__file__).parent
 _CONFIG_PATH = _MODULE_DIR / "integration_config.toml"
+
 
 def load_config(config_path: Path | None = None) -> dict[str, Any]:
     """
@@ -68,13 +67,12 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
 # Load configuration on import
 _CONFIG = load_config()
 
-
 # ============================================================================
 # Path Resolution
 # ============================================================================
 
-# Target root can be set by scripts (e.g., via --target-root argument)
 _TARGET_ROOT: Path | None = None
+
 
 def set_target_root(path: Path | str | None) -> None:
     """
@@ -88,48 +86,31 @@ def set_target_root(path: Path | str | None) -> None:
 
 
 def get_target_root() -> Path:
-    """
-    Get the current target root (or CWD if not set).
-
-    Returns:
-        Path to target root
-    """
+    """Get the current target root (or CWD if not set)."""
     return _TARGET_ROOT or Path.cwd()
 
 
 def resolve_path(
-    config_value: str,
-    relative_to_target: bool = True,
-    allow_absolute: bool = True
+        config_value: str,
+        relative_to_target: bool = True,
+        allow_absolute: bool = True
 ) -> Path:
     """
     Resolve a config path value.
 
     Resolution priority:
     1. If absolute path and allowed → use as-is
-    2. If relative_to_target and target_root set → target_root / config_value
-    3. If relative_to_target → cwd / config_value
-    4. Otherwise → relative to tool repo (module directory)
-
-    Args:
-        config_value: Path from config file
-        relative_to_target: If True, resolve relative to target project; if False, relative to tool repo
-        allow_absolute: If True, absolute paths are used as-is
-
-    Returns:
-        Resolved absolute path
+    2. If relative_to_target → target_root / config_value
+    3. Otherwise → relative to tool repo (module directory)
     """
     path = Path(config_value)
 
-    # Absolute paths pass through (if allowed)
     if allow_absolute and path.is_absolute():
         return path
 
-    # Relative to target project
     if relative_to_target:
         return get_target_root() / path
 
-    # Relative to tool repo
     return _MODULE_DIR / path
 
 
@@ -141,6 +122,14 @@ def get_ledgers_root() -> Path:
     """Get the root directory for ledger discovery (relative to target project)."""
     return resolve_path(
         _CONFIG.get('paths', {}).get('ledgers_root', 'dist/ledgers'),
+        relative_to_target=True
+    )
+
+
+def get_inventories_root() -> Path:
+    """Get the root directory for inventory discovery (relative to target project)."""
+    return resolve_path(
+        _CONFIG.get('paths', {}).get('inventories_root', 'dist/inventory'),
         relative_to_target=True
     )
 
@@ -177,7 +166,7 @@ def get_stage_output(stage: int) -> Path:
     Get the output file path for a given stage.
 
     Args:
-        stage: Stage number (1-5)
+        stage: Stage number (1-4)
 
     Returns:
         Full path to stage output file (in target project)
@@ -193,43 +182,18 @@ def get_stage_output(stage: int) -> Path:
 
 def get_stage_input(stage: int) -> Path:
     """
-    Get the expected input file for a given stage.
+    Get the expected input file for a given stage (output of previous stage).
 
     Args:
-        stage: Stage number (2-5)
+        stage: Stage number (2-4)
 
     Returns:
-        Path to expected input file (output of previous stage)
+        Path to expected input file
     """
-    if stage < 2 or stage > 5:
-        raise ValueError(f"Stage must be 2-5 (got {stage})")
+    if stage < 2 or stage > 4:
+        raise ValueError(f"Stage must be 2-4 (got {stage})")
 
     return get_stage_output(stage - 1)
-
-
-# ============================================================================
-# Processing Configuration
-# ============================================================================
-
-def get_max_flow_depth() -> int:
-    """Get maximum flow depth for cycle prevention."""
-    return _CONFIG.get('processing', {}).get('max_flow_depth', 20)
-
-
-def get_min_window_length() -> int:
-    """Get minimum window length for sliding windows."""
-    return _CONFIG.get('processing', {}).get('min_window_length', 2)
-
-
-def get_max_window_length() -> int | None:
-    """Get maximum window length (None = use full flow length)."""
-    max_len = _CONFIG.get('processing', {}).get('max_window_length', 0)
-    return max_len if max_len > 0 else None
-
-
-def boundaries_are_terminal() -> bool:
-    """Check if boundary integrations should be treated as terminal nodes."""
-    return _CONFIG.get('processing', {}).get('boundaries_are_terminal', True)
 
 
 # ============================================================================
@@ -276,40 +240,8 @@ def show_progress() -> bool:
 
 
 # ============================================================================
-# Validation Configuration
-# ============================================================================
-
-def get_schema_path() -> Path:
-    """Get path to JSON schema file (relative to tool repo)."""
-    return resolve_path(
-        _CONFIG.get('validation', {}).get(
-            'schema_path',
-            'integration/specs/integration-flow-schema.json'
-        ),
-        relative_to_target=False  # Schema is in tool repo, not target project
-    )
-
-
-def validate_outputs() -> bool:
-    """Check if outputs should be validated against schema."""
-    return _CONFIG.get('validation', {}).get('validate_outputs', True)
-
-
-# ============================================================================
 # Utility Functions
 # ============================================================================
-
-def get_pattern_analysis_max_depth() -> int:
-    return _CONFIG.get('pattern_analysis', {}).get('max_depth', 40)
-
-
-def get_long_flow_threshold() -> int:
-    return _CONFIG.get('pattern_analysis', {}).get('long_flow_threshold', 8)
-
-
-def get_pattern_analysis_output() -> Path:
-    return get_integration_output_dir() / 'stage4-pattern-analysis.yaml'
-
 
 def ensure_output_dir() -> None:
     """Ensure the integration output directory exists."""
@@ -322,51 +254,28 @@ def validate_config() -> list[str]:
 
     Returns:
         List of error messages (empty if valid)
-
-    Raises:
-        ValueError: If critical validation fails
     """
     errors = []
 
-    # Path existence checks
-    ledgers_root = get_ledgers_root()
-    if not ledgers_root.exists():
-        errors.append(f"Ledgers root does not exist: {ledgers_root}")
+    if not get_ledgers_root().exists():
+        errors.append(f"Ledgers root does not exist: {get_ledgers_root()}")
 
-    schema_path = get_schema_path()
-    if not schema_path.exists():
-        errors.append(f"Schema file does not exist: {schema_path}")
+    if not get_inventories_root().exists():
+        errors.append(f"Inventories root does not exist: {get_inventories_root()}")
 
-    # Enum validation
     structure = get_ledger_structure()
     if structure not in {'auto', 'flat', 'package'}:
         errors.append(f"Invalid ledger_structure: {structure} (must be 'auto', 'flat', or 'package')")
-
-    # Integer constraints
-    max_depth = get_max_flow_depth()
-    if max_depth < 2:
-        errors.append(f"max_flow_depth must be >= 2 (got {max_depth})")
-
-    min_window = get_min_window_length()
-    if min_window < 2:
-        errors.append(f"min_window_length must be >= 2 (got {min_window})")
-
-    max_window = get_max_window_length()
-    if max_window is not None and min_window > max_window:
-        errors.append(f"min_window_length ({min_window}) must be <= max_window_length ({max_window})")
 
     verbosity = get_verbosity()
     if verbosity not in {0, 1, 2}:
         errors.append(f"verbosity must be 0, 1, or 2 (got {verbosity})")
 
-    # YAML format validation
-    yaml_width = get_yaml_width()
-    if yaml_width <= 0:
-        errors.append(f"yaml_width must be > 0 (got {yaml_width})")
+    if get_yaml_width() <= 0:
+        errors.append(f"yaml_width must be > 0 (got {get_yaml_width()})")
 
-    yaml_indent = get_yaml_indent()
-    if yaml_indent <= 0:
-        errors.append(f"yaml_indent must be > 0 (got {yaml_indent})")
+    if get_yaml_indent() <= 0:
+        errors.append(f"yaml_indent must be > 0 (got {get_yaml_indent()})")
 
     return errors
 
@@ -374,20 +283,21 @@ def validate_config() -> list[str]:
 def print_config_summary() -> None:
     """Print a summary of current configuration."""
     print("Configuration Summary:")
-    print(f"  Target root: {get_target_root()}")
-    print(f"  Ledgers root: {get_ledgers_root()}")
-    print(f"  Output dir: {get_integration_output_dir()}")
-    print(f"  Structure: {get_ledger_structure()}")
-    print(f"  Stage 1 output: {get_stage_output(1)}")
-    print(f"  Max flow depth: {get_max_flow_depth()}")
-    print(f"  Window length: {get_min_window_length()}-{get_max_window_length() or 'N'}")
+    print(f"  Target root:      {get_target_root()}")
+    print(f"  Ledgers root:     {get_ledgers_root()}")
+    print(f"  Inventories root: {get_inventories_root()}")
+    print(f"  Output dir:       {get_integration_output_dir()}")
+    print(f"  Structure:        {get_ledger_structure()}")
+    print(f"  Stage 1 output:   {get_stage_output(1)}")
+    print(f"  Stage 2 output:   {get_stage_output(2)}")
+    print(f"  Stage 3 output:   {get_stage_output(3)}")
+    print(f"  Stage 4 output:   {get_stage_output(4)}")
 
 
 # ============================================================================
 # Automatic Validation on Import
 # ============================================================================
 
-# Validate configuration immediately when module is imported
 _VALIDATION_ERRORS = validate_config()
 if _VALIDATION_ERRORS:
     print("Configuration validation failed:", file=sys.stderr)

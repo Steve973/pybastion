@@ -15,10 +15,13 @@ from typing import Any
 
 import yaml
 
-from callable_id_generation import generate_function_id, generate_ei_id, generate_assignment_id
-from constraint_metadata_helper import enrich_outcome_with_constraint, populate_constraint_relationships
-from models import Branch
-from statement_decomposition import decompose_statement
+from pybastion_unit.helpers.constraint_metadata_helper import enrich_outcome_with_constraint, \
+    populate_constraint_relationships
+from pybastion_unit.helpers.statement_decomposition import decompose_statement
+from pybastion_unit.shared.callable_id_generation import generate_function_id, generate_ei_id, generate_assignment_id
+from pybastion_unit.shared.models import Branch
+
+ENUM_BASES = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag'}
 
 
 def load_callable_inventory(filepath: Path | None) -> dict[str, str]:
@@ -229,6 +232,26 @@ class CallableFinder(ast.NodeVisitor):
         self.func_counter = 1
         self.assignment_counter = 1
 
+    @staticmethod
+    def _is_enum_class(node: ast.ClassDef) -> bool:
+        for base in node.bases:
+            if isinstance(base, ast.Name) and base.id in ENUM_BASES:
+                return True
+            if isinstance(base, ast.Attribute) and base.attr in ENUM_BASES:
+                return True
+        return False
+
+    def _enumerate_and_record(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef, fqn: str) -> None:
+        callable_id = self.inventory.get(fqn)
+        if not callable_id:
+            callable_id = generate_function_id(self.unit_id, self.func_counter)
+            print(f"Warning: {fqn} not in inventory, generated {callable_id}")
+
+        result = enumerate_function_eis(node, self.source_lines, callable_id)
+        populate_constraint_relationships(result.branches)
+        self.results.append(result)
+        self.func_counter += 1
+
     def visit_Assign(self, node) -> None:
         self._process_assignment(node)
 
@@ -239,13 +262,16 @@ class CallableFinder(ast.NodeVisitor):
         self._process_assignment(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        # Push class onto FQN stack
         self.fqn_stack.append(node.name)
 
-        # Visit children (methods)
-        self.generic_visit(node)
+        if self._is_enum_class(node):
+            # Emit the enum class itself as an entry so it appears in the ledger
+            fqn = '.'.join(self.fqn_stack)
+            self._enumerate_and_record(node, fqn)
+            # Don't generic_visit — enum members aren't callable children
+        else:
+            self.generic_visit(node)
 
-        # Pop class
         self.fqn_stack.pop()
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
@@ -266,17 +292,7 @@ class CallableFinder(ast.NodeVisitor):
             fqn = node.name
 
         # Get callable ID from inventory or generate
-        callable_id = self.inventory.get(fqn)
-        if not callable_id:
-            callable_id = generate_function_id(self.unit_id, self.func_counter)
-            print(f"Warning: {fqn} not in inventory, generated {callable_id}")
-
-        # Enumerate EIs for this callable
-        result = enumerate_function_eis(node, self.source_lines, callable_id)
-        populate_constraint_relationships(result.branches)
-        self.results.append(result)
-
-        self.func_counter += 1
+        self._enumerate_and_record(node, fqn)
 
     def _process_assignment(self, node: ast.Assign | ast.AnnAssign | ast.AugAssign):
         if not isinstance(node.value, ast.Call):

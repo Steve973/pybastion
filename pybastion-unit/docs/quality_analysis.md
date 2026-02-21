@@ -29,15 +29,15 @@ Example showing how to integrate quality analysis into ledger generation workflo
 
 ```bash
 # Basic usage (outputs to stdout)
-python analyze_code_quality.py my_module.py
+python stage4_analyze_code_quality.py my_module.py
 
 # Specify config and output file
-python analyze_code_quality.py my_module.py \
+python stage4_analyze_code_quality.py my_module.py \
     --config quality_config.toml \
     --output my_module_quality.yaml
 
 # Override output format
-python analyze_code_quality.py my_module.py --format json
+python stage4_analyze_code_quality.py my_module.py --format json
 ```
 
 ### Integrated with Ledger Generation
@@ -52,7 +52,7 @@ subprocess.run(["python", "generate_ledger.py", "my_module.py"])
 
 # Analyze quality
 result = subprocess.run(
-    ["python", "analyze_code_quality.py", "my_module.py"],
+    ["python", "stage4_analyze_code_quality.py", "my_module.py"],
     capture_output=True,
     text=True
 )

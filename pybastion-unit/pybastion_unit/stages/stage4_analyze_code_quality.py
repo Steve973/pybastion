@@ -6,7 +6,7 @@ Runs configured analysis tools against Python source files and generates
 quality metrics with grades. Output can be merged into unit ledger reviews.
 
 Usage:
-    python analyze_code_quality.py <source_file> [--config quality_config.toml] [--output metrics.yaml]
+    python stage4_analyze_code_quality.py <source_file> [--config quality_config.toml] [--output metrics.yaml]
 """
 
 import argparse
@@ -398,9 +398,8 @@ class QualityAnalyzer:
 
 
 def main():
-    # Get script directory for default config path
-    script_dir = Path(__file__).parent
-    default_config = script_dir / "quality_config.toml"
+    # Get the default config path
+    default_config = Path(__file__).parent.parent / "quality_config.toml"
 
     parser = argparse.ArgumentParser(
         description="Analyze Python code quality and generate graded metrics"

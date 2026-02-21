@@ -1,5 +1,5 @@
 # Code Quality Analysis Configuration
-# Used by analyze_code_quality.py to evaluate Python source files
+# Used by stage4_analyze_code_quality.py to evaluate Python source files
 
 [analyzers]
 # Which analyzers to run (comment out to disable)

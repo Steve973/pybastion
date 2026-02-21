@@ -3,8 +3,8 @@
 Shared data models for the unit ledger analysis pipeline.
 
 These models define contracts between pipeline stages:
-- enumerate_callables.py (Stage 1)
-- enumerate_exec_items.py (Stage 2)  
+- stage3_enumerate_callables.py (Stage 1)
+- stage2_enumerate_exec_items.py (Stage 2)
 - CFG path enumeration (Stage 3)
 - Ledger transformation (Stage 4)
 """
@@ -15,8 +15,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from callable_id_generation import ei_id_to_integration_id
-from knowledge_base import (
+from pybastion_unit.shared.callable_id_generation import ei_id_to_integration_id
+from pybastion_unit.shared.knowledge_base import (
     BOUNDARY_OPERATIONS,
     BUILTIN_METHODS,
     COMMON_EXTLIB_MODULES,
@@ -442,7 +442,7 @@ class Branch:
     """
     Execution Item (EI) representation with constraint tracking.
 
-    Contract between enumerate_exec_items.py and downstream stages.
+    Contract between stage2_enumerate_exec_items.py and downstream stages.
     Called "Branch" in current code but represents an Execution Item.
 
     Enhanced with constraint metadata to enable path feasibility analysis.
@@ -698,7 +698,7 @@ class IntegrationCandidate:
     """
     Integration point before categorization.
 
-    Contract between enumerate_callables.py (Stage 1) and CFG enumeration (Stage 3).
+    Contract between stage3_enumerate_callables.py (Stage 1) and CFG enumeration (Stage 3).
     Stage 3 populates the execution_paths field.
     """
     type: str  # IntegrationType value
@@ -1043,73 +1043,8 @@ class CallableEntry:
 
     @staticmethod
     def _get_boundary_info(target: str) -> dict[str, Any] | None:
-        """
-        Get boundary information if this crosses a system boundary.
-
-        Returns:
-            dict with 'kind', 'operation', 'protocol' etc, or None if not a boundary
-        """
         if target in BOUNDARY_OPERATIONS:
             return BOUNDARY_OPERATIONS[target]
-
-        # Pattern matching for common boundary patterns
-
-        # Filesystem operations
-        if 'Path.read_text' in target or '.read_text' in target:
-            return {'kind': 'filesystem', 'operation': 'read'}
-        if 'Path.write_text' in target or '.write_text' in target:
-            return {'kind': 'filesystem', 'operation': 'write'}
-        if 'Path.mkdir' in target or '.mkdir' in target:
-            return {'kind': 'filesystem', 'operation': 'write'}
-        if 'Path.unlink' in target or '.unlink' in target:
-            return {'kind': 'filesystem', 'operation': 'write'}
-        if 'Path.open' in target or target.startswith('open('):
-            return {'kind': 'filesystem', 'operation': 'read/write'}
-        if 'Path.resolve' in target or '.resolve' in target:
-            return {'kind': 'filesystem', 'operation': 'read'}
-        if 'Path.relative_to' in target or '.relative_to' in target:
-            return {'kind': 'filesystem', 'operation': 'read'}
-        if '.as_posix' in target:
-            return {'kind': 'filesystem', 'operation': 'access'}
-
-        # Network operations
-        if 'requests.get' in target:
-            return {'kind': 'network', 'protocol': 'http', 'operation': 'read'}
-        if 'requests.post' in target or 'requests.put' in target:
-            return {'kind': 'network', 'protocol': 'http', 'operation': 'write'}
-        if 'requests.delete' in target:
-            return {'kind': 'network', 'protocol': 'http', 'operation': 'delete'}
-        if 'requests.' in target:
-            return {'kind': 'network', 'protocol': 'http', 'operation': 'request'}
-        if 'urllib.request' in target or 'urllib.urlopen' in target:
-            return {'kind': 'network', 'protocol': 'http', 'operation': 'request'}
-
-        # Environment operations
-        if 'os.getenv' in target or 'os.environ' in target:
-            return {'kind': 'env', 'operation': 'read'}
-
-        # Clock/time operations
-        if 'datetime.now' in target or 'datetime.utcnow' in target or 'datetime.today' in target:
-            return {'kind': 'clock', 'operation': 'read'}
-        if 'time.time' in target or 'time.monotonic' in target or 'time.perf_counter' in target:
-            return {'kind': 'clock', 'operation': 'read'}
-        if 'time.sleep' in target:
-            return {'kind': 'clock', 'operation': 'sleep'}
-
-        # Randomness operations
-        if target.startswith('random.') or '.random.' in target:
-            return {'kind': 'randomness', 'operation': 'generate'}
-
-        # Subprocess operations
-        if 'subprocess.run' in target or 'subprocess.call' in target or 'subprocess.Popen' in target:
-            return {'kind': 'subprocess', 'operation': 'execute'}
-
-        # Database operations
-        if 'cursor.execute' in target or '.execute(' in target:
-            return {'kind': 'database', 'operation': 'query'}
-        if 'sqlite3.connect' in target or '.connect(' in target:
-            return {'kind': 'database', 'operation': 'connect'}
-
         return None
 
     @staticmethod

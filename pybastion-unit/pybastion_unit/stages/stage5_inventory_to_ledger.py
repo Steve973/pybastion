@@ -15,7 +15,7 @@ import yaml
 from pathlib import Path
 from typing import Any
 
-from models import CallableEntry, IntegrationCategory
+from pybastion_unit.shared.models import CallableEntry, IntegrationCategory
 
 
 # =============================================================================

@@ -5,7 +5,7 @@ Provides a class hierarchy for decomposing Python AST statements into
 Execution Item (EI) outcome descriptions, with associated ast.Call nodes
 for operation_target population in BranchConstraint.
 
-Usage in enumerate_exec_items.py:
+Usage in stage2_enumerate_exec_items.py:
     from statement_decomposers import decompose_statement
 
 Each outcome is returned as a tuple:

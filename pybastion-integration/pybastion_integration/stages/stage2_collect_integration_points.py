@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Stage 1: Collect Integration Points
+Stage 2: Collect Integration Points
 
 Input: Collection of unit ledger files (auto-discovered or explicit)
 Output: Flat list of all integration points with resolved targets
@@ -19,7 +19,7 @@ Target Resolution:
 DEFAULT BEHAVIOR (no args):
   - Discovers ledgers in ./ledgers
   - Loads callable inventory from ./dist/inspect/callable-inventory.txt
-  - Outputs to ./integration-output/stage1-integration-points.yaml
+  - Outputs to ./integration-output/stage2-integration-points.yaml
 """
 
 from __future__ import annotations
@@ -29,14 +29,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Add integration directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-import config
-
-from shared.data_structures import IntegrationPoint, TargetRef, BoundarySummary, IntegrationPointCollection
-from shared.ledger_reader import discover_ledgers, load_ledgers, find_ledger_doc, extract_integration_facts
-from shared.yaml_utils import yaml_dump
+from pybastion_integration import config
+from pybastion_integration.shared.data_structures import IntegrationPoint, TargetRef, BoundarySummary, \
+    IntegrationPointCollection
+from pybastion_integration.shared.ledger_reader import discover_ledgers, load_ledgers, find_ledger_doc, \
+    extract_integration_facts
+from pybastion_integration.shared.yaml_utils import yaml_dump
 
 
 def load_callable_inventory(inventory_path: Path | None = None) -> dict[str, tuple[str, str]]:
@@ -311,8 +309,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         '--output',
         type=Path,
-        default=config.get_stage_output(1),
-        help=f'Output file (default: {config.get_stage_output(1)})'
+        default=config.get_stage_output(2),
+        help=f'Output file (default: {config.get_stage_output(2)})'
     )
     ap.add_argument(
         '-v', '--verbose',

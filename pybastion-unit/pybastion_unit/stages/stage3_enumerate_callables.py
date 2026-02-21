@@ -5,21 +5,22 @@ from __future__ import annotations
 
 import argparse
 import ast
+import re
 import sys
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from callable_id_generation import (
+from pybastion_unit.helpers.smt_path_checker import filter_feasible_paths
+from pybastion_unit.shared.callable_id_generation import (
     generate_class_id,
     generate_function_id,
     generate_nested_function_id,
     generate_method_id
 )
-from knowledge_base import PYTHON_BUILTINS, BUILTIN_METHODS
-from models import Branch, TypeRef, ParamSpec, IntegrationCandidate, CallableEntry
-from smt_path_checker import filter_feasible_paths
+from pybastion_unit.shared.knowledge_base import PYTHON_BUILTINS, BUILTIN_METHODS
+from pybastion_unit.shared.models import Branch, TypeRef, ParamSpec, IntegrationCandidate, CallableEntry
 
 
 def load_callable_inventory(filepath: Path | None) -> dict[str, str]:
@@ -385,6 +386,7 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 self.local_symbols.add(node.name)
                 # Also add nested functions
+                nested_item: ast.FunctionDef | ast.AsyncFunctionDef
                 for nested_item in ast.walk(node):
                     if isinstance(nested_item, (ast.FunctionDef, ast.AsyncFunctionDef)) and nested_item != node:
                         self.local_symbols.add(nested_item.name)
@@ -481,6 +483,7 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
         self.context_stack.append(method_id)
         if self.fqn_stack:
             self.fqn_stack.append(f"{'.'.join(self.fqn_stack)}.{node.name}")
+        item: ast.FunctionDef | ast.AsyncFunctionDef
         for item in ast.walk(node):
             if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item != node:
                 # This is a nested function
@@ -527,6 +530,7 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
             self.fqn_stack.append(f"{'.'.join(self.fqn_stack)}.{node.name}")
         elif self.module_fqn:
             self.fqn_stack.append(f"{self.module_fqn}.{node.name}")
+        item: ast.FunctionDef | ast.AsyncFunctionDef
         for item in ast.walk(node):
             if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item != node:
                 self._visit_nested_function(item, func_id)
@@ -552,6 +556,7 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
             self.fqn_stack.append(f"{'.'.join(self.fqn_stack)}.{node.name}")
         elif self.module_fqn:
             self.fqn_stack.append(f"{self.module_fqn}.{node.name}")
+        item: ast.FunctionDef | ast.AsyncFunctionDef
         for item in ast.walk(node):
             if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item != node:
                 self._visit_nested_function(item, func_id)
@@ -616,13 +621,31 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
         """Extract local variable types from the function body."""
         local_types: dict[str, str] = {}
 
-        for stmt in node.body:
+        for stmt in ast.walk(node):
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
-                type_ref = self._extract_type_ref(stmt.annotation)
-                if type_ref:
-                    # For simple types, use the name
-                    # For generics like list[WheelKey], you might want just the base or the full thing
-                    local_types[stmt.target.id] = type_ref.name
+                annotation = stmt.annotation
+                if isinstance(annotation, ast.Subscript):
+                    # Preserve container and inner type using delimiter
+                    # e.g. type[Foo] -> 'type::Foo', Optional[Foo] -> 'Optional::Foo'
+                    container = ast.unparse(annotation.value)
+                    inner_ref = self._extract_type_ref(annotation.slice)
+                    if inner_ref:
+                        local_types[stmt.target.id] = f'{container}::{inner_ref.name}'
+                elif isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+                    # X | None or None | X — extract the non-None side
+                    left = ast.unparse(annotation.left)
+                    right = ast.unparse(annotation.right)
+                    if right == 'None':
+                        inner = left
+                    elif left == 'None':
+                        inner = right
+                    else:
+                        inner = left  # multi-union, take left as best guess
+                    local_types[stmt.target.id] = inner
+                else:
+                    type_ref = self._extract_type_ref(annotation)
+                    if type_ref:
+                        local_types[stmt.target.id] = type_ref.name
 
         return local_types
 
@@ -802,14 +825,21 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
 
         Returns:
             dict mapping param_name -> type_name (e.g., {'path': 'Path', 'fmt': 'str'})
+            For subscript types, uses delimiter format: 'container::inner_type'
+            e.g. type[Foo] -> 'type::Foo', Optional[Foo] -> 'Optional::Foo'
         """
         type_map = {}
 
-        for arg in node.args.args:
+        for arg in node.args.args + node.args.kwonlyargs:
             if arg.annotation:
-                # Extract type name from annotation
-                type_str = ast.unparse(arg.annotation)
-                type_map[arg.arg] = type_str
+                annotation = arg.annotation
+                if isinstance(annotation, ast.Subscript):
+                    container = ast.unparse(annotation.value)
+                    inner_ref = self._extract_type_ref(annotation.slice)
+                    if inner_ref:
+                        type_map[arg.arg] = f'{container}::{inner_ref.name}'
+                else:
+                    type_map[arg.arg] = ast.unparse(annotation)
 
         return type_map
 
@@ -887,6 +917,13 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
                     # Use statement line if found, otherwise call line
                     line = containing_stmt.lineno if containing_stmt else child.lineno
 
+                    # If the resolved target is in the inventory and belongs to this unit, skip it
+                    if resolved_target in self.callable_inventory:
+                        inv_id = self.callable_inventory[resolved_target]
+                        inv_unit = re.split(r'_[CFM]\d+', inv_id)[0]
+                        if inv_unit == self.unit_id:
+                            continue
+
                     candidate = IntegrationCandidate(
                         type='call',
                         target=resolved_target,
@@ -915,6 +952,28 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
         # Strategy 2: Type annotation resolution
         if first_part in param_types:
             param_type = param_types[first_part]
+
+            # Extract container and inner type if delimiter present
+            # Container is unused at the moment, but available for
+            # future use, if needed.
+            container = None
+            if '::' in param_type:
+                container, param_type = param_type.split('::', 1)
+
+            # Strip | None in either position
+            param_type = re.sub(r'\s*\|\s*None', '', param_type).strip()
+            param_type = re.sub(r'None\s*\|\s*', '', param_type).strip()
+
+            # Extract from Optional[X]
+            optional_match = re.match(r'^Optional\[(.+)]$', param_type)
+            if optional_match:
+                param_type = optional_match.group(1).strip()
+
+            # Extract inner type from type[X] (for param_types path without delimiter)
+            type_match = re.match(r'^type\[(.+)]$', param_type)
+            if type_match:
+                param_type = type_match.group(1).strip()
+
             base_type = param_type.split('[')[0]
 
             # Don't resolve if type is Any - leave as variable name
@@ -944,7 +1003,7 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
         Returns False for:
         - super() calls
         - self.* calls (same class methods)
-        - cls.* calls (same class class methods)
+        - cls.* calls (same class methods)
         - Python builtins
         - Builtin collection methods
         - Same-unit function/method calls

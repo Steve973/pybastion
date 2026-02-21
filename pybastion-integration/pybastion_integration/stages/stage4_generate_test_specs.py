@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Stage 3: Generate Integration Test Specifications
+Stage 4: Generate Integration Test Specifications
 
-Input: Stage 2 output (categorized paths)
+Input: Stage 3 output (categorized paths)
 Output: Integration test specifications for AI test generation
 
 This stage takes categorized integration points and enriches them with:
@@ -18,9 +18,9 @@ Each spec contains:
 - Target's possible outcomes (from its EIs)
 
 DEFAULT BEHAVIOR (no args):
-  - Reads from ./integration-output/stage2-categorized-paths.yaml
+  - Reads from ./integration-output/stage3-categorized-paths.yaml
   - Loads ledgers from ./ledgers
-  - Outputs to ./integration-output/stage3-test-specs.yaml
+  - Outputs to ./integration-output/stage4-test-specs.yaml
 """
 
 from __future__ import annotations
@@ -30,13 +30,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Add integration directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-import config
-
-from shared.ledger_reader import discover_ledgers, load_ledgers, find_ledger_doc
-from shared.yaml_utils import yaml_dump, yaml_load
+from pybastion_integration import config
+from pybastion_integration.shared.ledger_reader import discover_ledgers, load_ledgers, find_ledger_doc
+from pybastion_integration.shared.yaml_utils import yaml_dump, yaml_load
 
 
 def find_target_callable(
@@ -321,7 +317,7 @@ def create_test_spec(
     Create an integration test specification from categorized integration.
 
     Args:
-        categorized_integration: Integration dict from stage2
+        categorized_integration: Integration dict from stage3
         ledgers: List of loaded ledger data
         fixture_maps: Dict with operation_callables, ei_to_signature, signature_to_callable
         all_integration_facts: Map of integration_id to integration fact data
@@ -384,17 +380,17 @@ def create_test_spec(
         'representative_count': len(representative_paths)
     }
 
-    # Build target info - try to load from stage1 data if available
+    # Build target info - try to load from stage2 data if available
     # For now, just use what we have from categorized integration
     target_info: dict[str, Any] = {
         'fqn': target_raw,
     }
 
     # Try to parse target from integration_id or other fields
-    # This is a simplified version - stage1 had better target resolution
+    # This is a simplified version - stage2 had better target resolution
     target_info['type'] = integration_type
 
-    # Add target analysis from stage2
+    # Add target analysis from stage3
     if target_analysis:
         target_info['outcome_analysis'] = target_analysis
 
@@ -463,7 +459,7 @@ def build_integration_facts_map(ledgers: list[dict[str, Any]]) -> dict[str, dict
 
 
 def generate_test_specs(
-        stage2_output: Path,
+        stage3_output: Path,
         ledger_paths: list[Path],
         verbose: bool = False
 ) -> list[dict[str, Any]]:
@@ -471,20 +467,20 @@ def generate_test_specs(
     Generate integration test specifications.
 
     Args:
-        stage2_output: Path to Stage 2 output file
+        stage3_output: Path to Stage 3 output file
         ledger_paths: Paths to ledger files
         verbose: Print progress information
 
     Returns:
         List of test specification dictionaries
     """
-    # Load Stage 2 categorized integrations
+    # Load Stage 3 categorized integrations
     if verbose:
-        print(f"Loading Stage 2 output: {stage2_output}")
+        print(f"Loading Stage 3 output: {stage3_output}")
 
-    stage2_data = yaml_load(stage2_output)
+    stage3_data = yaml_load(stage3_output)
 
-    categorized_integrations = stage2_data.get('categorized_integrations', [])
+    categorized_integrations = stage3_data.get('categorized_integrations', [])
 
     if verbose:
         print(f"Loaded {len(categorized_integrations)} categorized integrations")
@@ -546,8 +542,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         '--input',
         type=Path,
-        default=config.get_stage_output(2),
-        help=f'Stage 2 input file (default: {config.get_stage_output(2)})'
+        default=config.get_stage_output(3),
+        help=f'Stage 3 input file (default: {config.get_stage_output(3)})'
     )
     ap.add_argument(
         '--ledgers-root',
@@ -558,8 +554,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         '--output',
         type=Path,
-        default=config.get_stage_output(3),
-        help=f'Output file (default: {config.get_stage_output(3)})'
+        default=config.get_stage_output(4),
+        help=f'Output file (default: {config.get_stage_output(4)})'
     )
     ap.add_argument(
         '-v', '--verbose',

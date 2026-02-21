@@ -6,10 +6,10 @@ Walks all Python files, discovers all callables (functions, methods, nested func
 assigns IDs using callable_id_generation, and outputs FQN:ID mappings.
 
 Usage:
-    python inspect_units.py <source_root> --output <inventory_file>
+    python stage1_inspect_units.py <source_root> --output <inventory_file>
 
 Example:
-    python inspect_units.py src --output dist/inspect/callable-inventory.txt
+    python stage1_inspect_units.py src --output dist/inspect/callable-inventory.txt
 """
 
 import argparse
@@ -17,7 +17,7 @@ import ast
 import sys
 from pathlib import Path
 
-from callable_id_generation import (
+from pybastion_unit.shared.callable_id_generation import (
     generate_assignment_id,
     generate_unit_id,
     generate_class_id,

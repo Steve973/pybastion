@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Stage 2: Categorize Execution Paths
+Stage 3: Categorize Execution Paths
 
-Input: Stage 1 output (integration points with execution paths)
+Input: Stage 2 output (integration points with execution paths)
 Output: Categorized and reduced paths for test generation
 
 This stage analyzes execution paths to integration points and categorizes them into:
@@ -14,9 +14,9 @@ This stage analyzes execution paths to integration points and categorizes them i
 Reduces 1000+ paths into meaningful test categories (typically 80-90% reduction).
 
 DEFAULT BEHAVIOR (no args):
-  - Reads from ./integration-output/stage1-integration-points.yaml
+  - Reads from ./integration-output/stage2-integration-points.yaml
   - Loads EIS files from ./dist/eis
-  - Outputs to ./integration-output/stage2-categorized-paths.yaml
+  - Outputs to ./integration-output/stage3-categorized-paths.yaml
 """
 
 from __future__ import annotations
@@ -26,13 +26,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Add integration directory to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent))
+from pybastion_integration import config
 
-import config
-
-from shared.data_structures import IntegrationPoint
-from shared.yaml_utils import yaml_dump, yaml_load
+from pybastion_integration.shared.data_structures import IntegrationPoint
+from pybastion_integration.shared.yaml_utils import yaml_dump, yaml_load
 
 
 def load_eis_for_callable(callable_id: str, eis_files: dict[str, Any]) -> dict[str, dict]:
@@ -78,7 +75,7 @@ def find_target_callable_in_ledgers(
     Returns:
         Callable entry from ledger, or None if not found
     """
-    from shared.ledger_reader import find_ledger_doc
+    from pybastion_integration.shared.ledger_reader import find_ledger_doc
 
     # First, find the ledger for this unit_id
     target_ledger = None
@@ -321,7 +318,7 @@ def categorize_integration_point(
     Categorize all paths for a single integration point.
 
     Args:
-        integration_point: Integration point dict from stage1
+        integration_point: Integration point dict from stage2
         eis_files: Dict of loaded EIS files
         ledgers: List of loaded ledger data
 
@@ -403,7 +400,7 @@ def categorize_integration_point(
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Categorize paths from stage1 output."""
+    """Categorize paths from stage2 output."""
 
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -413,8 +410,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         '--input',
         type=Path,
-        default=config.get_stage_output(1),
-        help=f'Stage 1 input file (default: {config.get_stage_output(1)})'
+        default=config.get_stage_output(2),
+        help=f'Stage 2 input file (default: {config.get_stage_output(2)})'
     )
     ap.add_argument(
         '--eis-root',
@@ -431,8 +428,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         '--output',
         type=Path,
-        default=config.get_stage_output(2),
-        help=f'Output file (default: {config.get_stage_output(2)})'
+        default=config.get_stage_output(3),
+        help=f'Output file (default: {config.get_stage_output(3)})'
     )
     ap.add_argument(
         '--interunit-only',
@@ -452,14 +449,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR: Input file not found: {args.input}", file=sys.stderr)
         return 1
 
-    # Load stage1 data
+    # Load stage2 data
     if args.verbose:
-        print(f"Loading Stage 1 output: {args.input}")
+        print(f"Loading Stage 2 output: {args.input}")
 
-    stage1_data = yaml_load(args.input)
+    stage2_data = yaml_load(args.input)
 
     # Parse integration points
-    points_data = stage1_data.get('integration_points', [])
+    points_data = stage2_data.get('integration_points', [])
     integration_points = [IntegrationPoint.from_dict(p) for p in points_data]
 
     if args.verbose:
@@ -485,7 +482,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.verbose:
         print(f"Loading ledgers from {args.ledgers_root}")
 
-    from shared.ledger_reader import discover_ledgers, load_ledgers
+    from pybastion_integration.shared.ledger_reader import discover_ledgers, load_ledgers
 
     ledger_paths = discover_ledgers(args.ledgers_root)
     if not ledger_paths:

@@ -3,11 +3,11 @@
 Project Analysis Coordinator
 
 Orchestrates the multi-stage pipeline for analyzing Python projects:
-1. inspect_units.py - Basic unit structure
-2. enumerate_exec_items.py - EI enumeration
-3. enumerate_callables.py - Integration classification + EI merging
-4. analyze_code_quality.py - Code quality metrics
-5. inventory_to_ledger.py - Generate three-document ledgers with quality metrics
+1. stage1_inspect_units.py - Basic unit structure
+2. stage2_enumerate_exec_items.py - EI enumeration
+3. stage3_enumerate_callables.py - Integration classification + EI merging
+4. stage4_analyze_code_quality.py - Code quality metrics
+5. stage5_inventory_to_ledger.py - Generate three-document ledgers with quality metrics
 """
 
 import argparse
@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from callable_id_generation import generate_unit_id
+from pybastion_unit.shared.callable_id_generation import generate_unit_id
 
 
 def run_command(cmd: list[str], description: str, log_dir: Path = Path("/tmp/ledger"), append: bool = False) -> bool:
@@ -80,6 +80,7 @@ def analyze_project(
         return False
 
     # Output directories
+    script_stages_dir = Path(__file__).parent / "stages"
     inspect_output = project_root / output_root / "inspect" / "callable-inventory.txt"
     eis_output = project_root / output_root / "eis"
     inventory_output = project_root / output_root / "inventory"
@@ -106,7 +107,7 @@ def analyze_project(
     print(f"{'=' * 70}")
 
     # Stage 1: inspect_units (if it exists)
-    inspect_script = Path(__file__).parent / "inspect_units.py"
+    inspect_script = script_stages_dir / "stage1_inspect_units.py"
     if inspect_script.exists():
         cmd = [
             sys.executable,
@@ -117,12 +118,12 @@ def analyze_project(
         if not run_command(cmd, "Stage 1: Inspect Units"):
             return False
     else:
-        print(f"\nℹ  Skipping Stage 1: inspect_units.py not found")
+        print(f"\nℹ  Skipping Stage 1: stage1_inspect_units.py not found")
 
     # Stage 2: enumerate_exec_items
-    enumerate_eis_script = Path(__file__).parent / "enumerate_exec_items.py"
+    enumerate_eis_script = script_stages_dir / "stage2_enumerate_exec_items.py"
     if not enumerate_eis_script.exists():
-        print(f"Error: enumerate_exec_items.py not found at {enumerate_eis_script}")
+        print(f"Error: stage2_enumerate_exec_items.py not found at {enumerate_eis_script}")
         return False
 
     # Create output directory
@@ -159,9 +160,9 @@ def analyze_project(
     print(f"\n✓ Completed: Stage 2")
 
     # Stage 3: enumerate_callables (per-file processing)
-    enumerate_callables_script = Path(__file__).parent / "enumerate_callables.py"
+    enumerate_callables_script = script_stages_dir / "stage3_enumerate_callables.py"
     if not enumerate_callables_script.exists():
-        print(f"Error: enumerate_callables.py not found at {enumerate_callables_script}")
+        print(f"Error: stage3_enumerate_callables.py not found at {enumerate_callables_script}")
         return False
 
     # Create output directory
@@ -196,9 +197,9 @@ def analyze_project(
     print(f"\n✓ Completed: Stage 3")
 
     # Stage 4: Quality Analysis
-    analyze_quality_script = Path(__file__).parent / "analyze_code_quality.py"
+    analyze_quality_script = script_stages_dir / "stage4_analyze_code_quality.py"
     if not analyze_quality_script.exists():
-        print(f"\nℹ  Skipping Stage 4: analyze_code_quality.py not found")
+        print(f"\nℹ  Skipping Stage 4: stage4_analyze_code_quality.py not found")
     else:
         # Create quality output directory
         quality_output.mkdir(parents=True, exist_ok=True)
@@ -234,9 +235,9 @@ def analyze_project(
         print(f"\n✓ Completed: Stage 4")
 
     # Stage 5: Generate ledgers
-    inventory_to_ledger_script = Path(__file__).parent / "inventory_to_ledger.py"
+    inventory_to_ledger_script = script_stages_dir / "stage5_inventory_to_ledger.py"
     if not inventory_to_ledger_script.exists():
-        print(f"\nℹ  Skipping Stage 5: inventory_to_ledger.py not found")
+        print(f"\nℹ  Skipping Stage 5: stage5_inventory_to_ledger.py not found")
     else:
         # Create ledgers output directory
         ledgers_output.mkdir(parents=True, exist_ok=True)
@@ -298,11 +299,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Pipeline Stages:
-  1. inspect_units.py        - Generate basic unit structure (optional)
-  2. enumerate_exec_items.py - Enumerate execution items (EIs)
-  3. enumerate_callables.py  - Classify integrations + merge EI data
-  4. analyze_code_quality.py - Code quality metrics (optional)
-  5. inventory_to_ledger.py  - Generate three-document unit ledgers
+  1. stage1_inspect_units.py        - Generate basic unit structure (optional)
+  2. stage2_enumerate_exec_items.py - Enumerate execution items (EIs)
+  3. stage3_enumerate_callables.py  - Classify integrations + merge EI data
+  4. stage4_analyze_code_quality.py - Code quality metrics (optional)
+  5. stage5_inventory_to_ledger.py  - Generate three-document unit ledgers
 
 Example:
   %(prog)s /path/to/project --source-root src --output-root dist

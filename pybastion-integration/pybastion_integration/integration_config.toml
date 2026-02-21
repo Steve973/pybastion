@@ -4,6 +4,7 @@
 [paths]
 # Where unit ledgers are located relative to project root
 ledgers_root = "dist/ledgers"
+inventories_root = "dist/inventory"
 
 # Where integration flow outputs will be written
 integration_output_dir = "dist/integration-output"
@@ -17,9 +18,10 @@ namespace_anchor = ""
 
 [stages]
 # Output filenames for each stage (relative to integration_output_dir)
-stage1_output = "stage1-integration-points.yaml"
-stage2_output = "stage2-categorized-paths.yaml"
-stage3_output = "stage3-integration-test-specs.yaml"
+stage1_output = "stage1-call-graph.yaml"
+stage2_output = "stage2-integration-points.yaml"
+stage3_output = "stage3-categorized-paths.yaml"
+stage4_output = "stage4-integration-test-specs.yaml"
 
 [processing]
 # Maximum depth when traversing flows (prevents infinite loops)

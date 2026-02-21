@@ -2,7 +2,7 @@
 Constraint Metadata Extraction Helpers
 
 Functions to extract constraint metadata when creating Branch objects
-in enumerate_exec_items.py. These create BranchConstraint objects
+in stage2_enumerate_exec_items.py. These create BranchConstraint objects
 from outcome strings and AST statements.
 """
 
@@ -10,8 +10,8 @@ import ast
 import re
 from typing import Any
 
-from models import BranchConstraint
-from smt_path_checker import ConstraintExtractor
+from pybastion_unit.shared.models import BranchConstraint
+from pybastion_unit.helpers.smt_path_checker import ConstraintExtractor
 
 
 def _compute_smt_expr(expr: str, polarity: bool | None) -> str | None:
