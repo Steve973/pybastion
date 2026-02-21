@@ -3,16 +3,16 @@
 
 [paths]
 # Where unit ledgers are located relative to the project root
-ledgers_root = "dist/ledgers"
+ledgers_root = "dist/pybastion/ledgers"
 
 # Where the unit inventory YAML files are located relative to the project root
-inventories_root = "dist/inventory"
+inventories_root = "dist/pybastion/inventory"
 
 # Where integration flow outputs will be written
-integration_output_dir = "dist/integration-output"
+integration_output_dir = "dist/pybastion/integration-output"
 
 # Where the split integration spec files will be written
-spec_split_output_dir = "dist/integration-output/split-specs"
+spec_split_output_dir = "dist/pybastion/integration-output/split-specs"
 
 [discovery]
 # Ledger directory structure: "auto" | "flat" | "package"

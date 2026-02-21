@@ -326,7 +326,7 @@ Example:
     parser.add_argument(
         '--output-root',
         type=str,
-        default='dist',
+        default='dist/pybastion',
         help='Output root relative to project root (default: "dist")'
     )
 

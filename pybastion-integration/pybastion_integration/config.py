@@ -121,7 +121,7 @@ def resolve_path(
 def get_ledgers_root() -> Path:
     """Get the root directory for ledger discovery (relative to target project)."""
     return resolve_path(
-        _CONFIG.get('paths', {}).get('ledgers_root', 'dist/ledgers'),
+        _CONFIG.get('paths', {}).get('ledgers_root', 'dist/pybastion/ledgers'),
         relative_to_target=True
     )
 
@@ -129,7 +129,7 @@ def get_ledgers_root() -> Path:
 def get_inventories_root() -> Path:
     """Get the root directory for inventory discovery (relative to target project)."""
     return resolve_path(
-        _CONFIG.get('paths', {}).get('inventories_root', 'dist/inventory'),
+        _CONFIG.get('paths', {}).get('inventories_root', 'dist/pybastion/inventory'),
         relative_to_target=True
     )
 
@@ -137,7 +137,7 @@ def get_inventories_root() -> Path:
 def get_integration_output_dir() -> Path:
     """Get the output directory for integration flow artifacts (relative to target project)."""
     return resolve_path(
-        _CONFIG.get('paths', {}).get('integration_output_dir', 'dist/integration-output'),
+        _CONFIG.get('paths', {}).get('integration_output_dir', 'dist/pybastion/integration-output'),
         relative_to_target=True
     )
 
@@ -145,7 +145,7 @@ def get_integration_output_dir() -> Path:
 def get_spec_split_output_dir() -> Path:
     """Get the output directory for split spec files (relative to target project)."""
     return resolve_path(
-        _CONFIG.get('paths', {}).get('spec_split_output_dir', 'dist/integration-output/split-specs'),
+        _CONFIG.get('paths', {}).get('spec_split_output_dir', 'dist/pybastion/integration-output/split-specs'),
         relative_to_target=True
     )
 

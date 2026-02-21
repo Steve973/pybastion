@@ -44,10 +44,10 @@ ALL_STAGE_NUMS = [1, 2, 3]
 
 def derive_paths(target_root: Path) -> dict:
     """Derive all pipeline paths from the target root."""
-    output_dir = target_root / 'dist' / 'integration-output'
+    output_dir = target_root / 'dist' / 'pybastion' / 'integration-output'
     return {
-        'ledgers_root': target_root / 'dist' / 'ledgers',
-        'inventories_root': target_root / 'dist' / 'inventory',
+        'ledgers_root': target_root / 'dist' / 'pybastion' / 'ledgers',
+        'inventories_root': target_root / 'dist' / 'pybastion' / 'inventory',
         'spec_split_output_dir': output_dir / 'split-specs',
         'output_dir': output_dir,
         'stage1_output': output_dir / 'stage1-call-graph.yaml',
