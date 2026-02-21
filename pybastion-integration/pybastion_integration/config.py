@@ -142,6 +142,13 @@ def get_integration_output_dir() -> Path:
     )
 
 
+def get_spec_split_output_dir() -> Path:
+    """Get the output directory for split spec files (relative to target project)."""
+    return resolve_path(
+        _CONFIG.get('paths', {}).get('spec_split_output_dir', 'dist/integration-output/split-specs'),
+        relative_to_target=True
+    )
+
 # ============================================================================
 # Discovery Configuration
 # ============================================================================
@@ -291,7 +298,6 @@ def print_config_summary() -> None:
     print(f"  Stage 1 output:   {get_stage_output(1)}")
     print(f"  Stage 2 output:   {get_stage_output(2)}")
     print(f"  Stage 3 output:   {get_stage_output(3)}")
-    print(f"  Stage 4 output:   {get_stage_output(4)}")
 
 
 # ============================================================================

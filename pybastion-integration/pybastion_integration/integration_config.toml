@@ -11,6 +11,9 @@ inventories_root = "dist/inventory"
 # Where integration flow outputs will be written
 integration_output_dir = "dist/integration-output"
 
+# Where the split integration spec files will be written
+spec_split_output_dir = "dist/integration-output/split-specs"
+
 [discovery]
 # Ledger directory structure: "auto" | "flat" | "package"
 ledger_structure = "auto"
@@ -22,6 +25,7 @@ namespace_anchor = ""
 # Output filenames for each stage (relative to integration_output_dir)
 stage1_output = "stage1-call-graph.yaml"
 stage2_output = "stage2-integration-test-specs.yaml"
+stage3_output = "{source_unit}__{target_unit}.yaml (multiple files)"
 
 [processing]
 # Maximum depth when traversing flows (prevents infinite loops)

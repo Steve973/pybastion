@@ -39,7 +39,7 @@ import sys
 from pathlib import Path
 
 STAGES_DIR = Path(__file__).parent / 'stages'
-ALL_STAGE_NUMS = [1, 2]
+ALL_STAGE_NUMS = [1, 2, 3]
 
 
 def derive_paths(target_root: Path) -> dict:
@@ -48,9 +48,11 @@ def derive_paths(target_root: Path) -> dict:
     return {
         'ledgers_root': target_root / 'dist' / 'ledgers',
         'inventories_root': target_root / 'dist' / 'inventory',
+        'spec_split_output_dir': output_dir / 'split-specs',
         'output_dir': output_dir,
         'stage1_output': output_dir / 'stage1-call-graph.yaml',
         'stage2_output': output_dir / 'stage2-integration-test-specs.yaml',
+        'stage3_output': output_dir / 'split-specs' / '*.yaml',
     }
 
 
@@ -58,7 +60,8 @@ def build_stage_cmd(stage_num: int, target_root: Path, paths: dict, verbose: boo
     """Build the command for a given stage."""
     script = STAGES_DIR / {
         1: 'stage1_build_call_graph.py',
-        2: 'stage2_generate_test_specs.py'
+        2: 'stage2_generate_test_specs.py',
+        3: 'stage3_split_specs.py'
     }[stage_num]
 
     cmd = [sys.executable, str(script)]
@@ -76,6 +79,12 @@ def build_stage_cmd(stage_num: int, target_root: Path, paths: dict, verbose: boo
             '--input', str(paths['stage1_output']),
             '--output', str(paths['stage2_output']),
         ]
+    elif stage_num == 3:
+        cmd += [
+            '--target-root', str(target_root),
+            '--input', str(paths['stage2_output']),
+            '--output-dir', str(paths['spec_split_output_dir']),
+        ]
 
     if verbose:
         cmd.append('-v')
@@ -88,9 +97,8 @@ def run_stage(stage_num: int, target_root: Path, paths: dict,
               verbose: bool = False, dry_run: bool = False) -> int:
     stage_names = {
         1: 'Build Call Graph',
-        2: 'Collect Integration Points',
-        3: 'Categorize Execution Paths',
-        4: 'Generate Test Specifications',
+        2: 'Generate Test Specifications',
+        3: 'Split Integration Test Specs'
     }
 
     print(f"\n{'=' * 70}")
@@ -124,9 +132,14 @@ def clean_outputs(paths: dict, verbose: bool = False) -> None:
 
     print(f"\nCleaning outputs in: {output_dir}")
 
-    for key in ('stage1_output', 'stage2_output'):
+    for key in ('stage1_output', 'stage2_output', 'stage3_output'):
         p = paths[key]
-        if p.exists():
+        if '*' in str(p):
+            for f in p.parent.glob(p.name):
+                if verbose:
+                    print(f"  Removing: {f}")
+                f.unlink()
+        elif p.exists():
             if verbose:
                 print(f"  Removing: {p}")
             p.unlink()
@@ -134,7 +147,7 @@ def clean_outputs(paths: dict, verbose: bool = False) -> None:
     print("✓ Outputs cleaned")
 
 
-def validate_prerequisites(target_root: Path, paths: dict, verbose: bool = False) -> bool:
+def validate_prerequisites(paths: dict, verbose: bool = False) -> bool:
     errors = []
 
     if not paths['ledgers_root'].exists():
@@ -187,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
         help='Run only a specific stage'
     )
     ap.add_argument(
-        '--clean',
+        '--no-clean',
         action='store_true',
         help='Clean output files before running'
     )
@@ -216,10 +229,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Target root: {target_root}")
 
     if not args.skip_validation:
-        if not validate_prerequisites(target_root, paths, verbose=args.verbose):
+        if not validate_prerequisites(paths, verbose=args.verbose):
             return 1
 
-    if args.clean:
+    if not args.no_clean:
         clean_outputs(paths, verbose=args.verbose)
 
     # Determine which stages to run
@@ -240,6 +253,7 @@ def main(argv: list[str] | None = None) -> int:
         # Check that required input exists before running
         stage_input = {
             2: paths['stage1_output'],
+            3: paths['stage2_output'],
         }.get(stage_num)
 
         if stage_input and not stage_input.exists():
@@ -260,6 +274,7 @@ def main(argv: list[str] | None = None) -> int:
         final_output = {
             1: paths['stage1_output'],
             2: paths['stage2_output'],
+            3: paths['stage3_output'],
         }[max(stages_to_run)]
         print(f"\nFinal output: {final_output}")
 
