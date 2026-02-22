@@ -312,19 +312,66 @@ def build_callable_index(
 # Target resolution
 # =============================================================================
 
+def load_callable_inventory(path: Path) -> dict[str, str]:
+    """Load FQN -> callable_id mapping from callable-inventory.txt."""
+    inventory = {}
+    if not path.exists():
+        return inventory
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line or ':' not in line:
+                continue
+            fqn, callable_id = line.split(':', 1)
+            inventory[fqn] = callable_id
+    return inventory
+
+
+def build_fqn_suffix_index(
+        nodes_by_callable_id: dict[str, CallableNode],
+        inventory: dict[str, str],
+) -> dict[str, CallableNode]:
+    """
+    Build a FQN suffix -> CallableNode index from the callable inventory.
+    Keyed by every suffix of the dotted FQN so resolve_fqn_to_node
+    can do a direct lookup instead of an O(n) scan.
+    """
+    index: dict[str, CallableNode] = {}
+    for fqn, callable_id in inventory.items():
+        node = nodes_by_callable_id.get(callable_id)
+        if not node:
+            continue
+        parts = fqn.split('.')
+        for i in range(len(parts)):
+            suffix = '.'.join(parts[i:])
+            if suffix not in index:
+                index[suffix] = node
+    return index
+
+
 def resolve_fqn_to_node(
         fqn_target: str,
         nodes_by_fqn: dict[str, CallableNode],
+        fqn_suffix_index: dict[str, CallableNode] | None = None,
 ) -> CallableNode | None:
-    """
-    Resolve a FQN target to a CallableNode by trying progressively shorter suffixes.
-
-    e.g. "project_resolution_engine.model.keys.WheelKey.set_dependency_ids"
-    matches node keyed as "keys::WheelKey.set_dependency_ids"
-    """
     if not fqn_target:
         return None
 
+    # Fast path: direct suffix lookup from callable inventory
+    if fqn_suffix_index is not None:
+        node = fqn_suffix_index.get(fqn_target)
+        if node:
+            return node
+        # Try progressively shorter suffixes
+        parts = fqn_target.split('.')
+        for i in range(1, len(parts)):
+            suffix = '.'.join(parts[i:])
+            node = fqn_suffix_index.get(suffix)
+            if node:
+                return node
+        return None
+
+    # Fallback: original O(n) scan if no index available
     parts = fqn_target.split('.')
     for i in range(len(parts)):
         suffix = '.'.join(parts[i:])
@@ -337,7 +384,6 @@ def resolve_fqn_to_node(
                 first, rest = suffix.split('.', 1)
                 if fqn == f"{first}::{rest}":
                     return node
-
     return None
 
 
@@ -445,11 +491,13 @@ def _emit_edge(
 def build_call_graph(
         ledger_paths: list[Path],
         inventory_index: InventoryIndex,
+        callable_inventory: dict[str, str] = dict,
         verbose: bool = False
 ) -> CallGraph:
     """Build the feasibility-weighted call graph from ledgers + inventories."""
 
     nodes_by_fqn, _ = build_callable_index(ledger_paths, verbose=verbose)
+    build_fqn_suffix_index(nodes_by_fqn, callable_inventory)
 
     graph = CallGraph()
     # Note: graph.nodes is rebuilt after edge processing to include
@@ -639,6 +687,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.verbose:
         print(f"Found {len(ledger_paths)} ledger(s)")
 
+    inventory_path = (args.target_root or Path.cwd()) / 'dist' / 'pybastion' / 'inspect' / 'callable-inventory.txt'
+    callable_inventory = load_callable_inventory(inventory_path)
+
     # Load inventories
     inventory_index = InventoryIndex()
     if args.inventories_root.exists():
@@ -654,7 +705,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.verbose:
         print("\nBuilding call graph...")
 
-    graph = build_call_graph(ledger_paths, inventory_index, verbose=args.verbose)
+    graph = build_call_graph(ledger_paths, inventory_index, callable_inventory, verbose=args.verbose)
 
     # Write output
     args.output.parent.mkdir(parents=True, exist_ok=True)

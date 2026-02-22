@@ -24,8 +24,8 @@ EXAMPLES:
   # Run with verbose output
   ./run_integration_analysis.py --target-root /path/to/project -v
 
-  # Clean outputs and run fresh
-  ./run_integration_analysis.py --target-root /path/to/project --clean
+  # Do not clean outputs before running
+  ./run_integration_analysis.py --target-root /path/to/project --no-clean
 
   # Dry run - print commands without executing
   ./run_integration_analysis.py --target-root /path/to/project --dry-run
@@ -76,6 +76,7 @@ def build_stage_cmd(stage_num: int, target_root: Path, paths: dict, verbose: boo
     elif stage_num == 2:
         cmd += [
             '--target-root', str(target_root),
+            '--ledgers-root', str(paths['ledgers_root']),
             '--input', str(paths['stage1_output']),
             '--output', str(paths['stage2_output']),
         ]

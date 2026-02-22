@@ -199,15 +199,7 @@ def categorize_path(
         if constraint_type == 'condition':
             has_alternative_branch = True
 
-    target_can_raise = target_outcomes.get('has_exceptions', False)
-
-    if target_can_raise:
-        category = 'error_handling'
-        subcategory = (
-            'triggers_target_validation_error' if has_validation_failure
-            else 'triggers_target_exception'
-        )
-    elif has_empty_iteration or has_boundary_condition:
+    if has_empty_iteration or has_boundary_condition:
         category = 'edge_cases'
         subcategory = 'empty_collection' if has_empty_iteration else 'boundary_condition'
     elif has_alternative_branch:
@@ -222,7 +214,7 @@ def categorize_path(
         'subcategory': subcategory,
         'has_validation_failure': has_validation_failure,
         'has_boundary_condition': has_boundary_condition,
-        'target_can_raise': target_can_raise,
+        'target_can_raise': target_outcomes.get('has_exceptions', False),  # metadata only
         'path_length': len(path_eis),
     }
 
@@ -333,6 +325,53 @@ def make_spec_id(integration_id: str, counter: int) -> str:
     return f"ITEST_{counter:04d}_{h}"
 
 
+def build_synthetic_error_representative(target_outcomes: dict[str, Any]) -> dict[str, Any] | None:
+    """
+    Build a synthetic error_handling representative when the target can raise
+    but no existing path exercises the exception condition.
+
+    Pulls the precondition directly from the target's exception branches so
+    the agent has explicit setup instructions rather than having to infer.
+    """
+    exception_branches = target_outcomes.get('exception_branches', [])
+    if not exception_branches:
+        return None
+
+    # Prefer branches with a real condition (terminates_via: raise, non-trivial condition)
+    primary = next(
+        (b for b in exception_branches if b.get('terminates_via') == 'raise' and b.get('condition')),
+        exception_branches[0],
+    )
+
+    constraint = primary.get('constraint') or {}
+
+    return {
+        'path_id': 'PATH_SYNTHETIC_ERROR',
+        'eis': [],
+        'eis_original': [],
+        'category': 'error_handling',
+        'subcategory': 'triggers_target_exception',
+        'synthetic': True,
+        'has_validation_failure': False,
+        'has_boundary_condition': False,
+        'target_can_raise': True,
+        'path_length': 0,
+        'represents_count': 1,
+        'representative_of': 'error_handling/triggers_target_exception',
+        'precondition': {
+            'description': (
+                'Arrange target object state to satisfy the exception condition '
+                'before invoking the source callable'
+            ),
+            'condition': primary.get('condition'),
+            'outcome': primary.get('outcome'),
+            'constraint_expr': constraint.get('expr'),
+            'constraint_type': constraint.get('constraint_type'),
+            'variables_read': constraint.get('variables_read', []),
+        },
+    }
+
+
 def build_spec(
         edge: dict,
         nodes_by_id: dict[str, dict],
@@ -366,6 +405,18 @@ def build_spec(
         })
 
     representative_paths = find_representative_paths(categorized) if categorized else []
+
+    # If the target can raise but no path exercised the exception condition,
+    # synthesize an explicit error_handling representative so the agent has
+    # clear instructions rather than missing coverage entirely.
+    if target_outcomes.get('has_exceptions'):
+        has_error_representative = any(
+            p['category'] == 'error_handling' for p in representative_paths
+        )
+        if not has_error_representative:
+            synthetic = build_synthetic_error_representative(target_outcomes)
+            if synthetic:
+                representative_paths.append(synthetic)
 
     path_summary = {
         'happy_path': sum(1 for p in categorized if p['category'] == 'happy_path'),
