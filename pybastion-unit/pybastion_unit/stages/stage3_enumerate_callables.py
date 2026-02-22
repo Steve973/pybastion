@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-
+from pybastion_unit.helpers.decorator_processing import (
+    extract_decorators_from_node,
+    has_effect,
+    validate_feature_co_occurrences
+)
 from pybastion_unit.helpers.smt_path_checker import filter_feasible_paths
 from pybastion_unit.shared.callable_id_generation import (
     generate_class_id,
@@ -163,7 +167,7 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
         skip_entry = False
         if entry.get('decorators'):
             for decorator in entry['decorators']:
-                if decorator.get('name') in ['MechanicalOperation', 'UtilityOperation']:
+                if has_effect(decorator, 'exclude_from_flow'):
                     # Don't enumerate paths for mechanical operations
                     for integration in entry.get('ast_analysis', {}).get('integration_candidates', []):
                         integration['execution_paths'] = []
@@ -578,7 +582,7 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
 
         # Extract decorators (both regular and operation metadata)
         decorators = self._extract_decorators(node.decorator_list)
-        op_metadata_decorators = self._extract_operation_metadata_decorators(node)
+        op_metadata_decorators = extract_decorators_from_node(node, self.source_lines)
         all_decorators = decorators + op_metadata_decorators
 
         # Extract modifiers
@@ -704,78 +708,6 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
             decorators.append(decorator_info)
 
         return decorators
-
-    def _extract_operation_metadata_decorators(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[
-        dict[str, Any]]:
-        """Extract operation metadata decorators from comments."""
-        decorators: list[dict[str, Any]] = []
-
-        # Scan upward from line before function/first decorator
-        if node.lineno > 1:
-            # Start from line before the function/first decorator
-            for line_idx in range(node.lineno - 2, -1, -1):  # -2 because lineno is 1-indexed, -1 to go before
-                line = self.source_lines[line_idx].strip()
-
-                # If it's an operation metadata decorator comment, grab it
-                if line.startswith('#') and '::' in line:
-                    decorator = self._parse_decorator_comment(line)
-                    if decorator:
-                        decorators.append(decorator)
-                # If it's a Python decorator, continue (we'll skip it)
-                elif line.startswith('@'):
-                    continue
-                # Stop at anything else (blank line, code, other comment, top of file)
-                else:
-                    break
-
-        # Check docstring for decorators
-        if (node.body and
-                isinstance(node.body[0], ast.Expr) and
-                isinstance(node.body[0].value, ast.Constant) and
-                isinstance(node.body[0].value.value, str)):
-
-            docstring = node.body[0].value.value
-            for line in docstring.split('\n'):
-                line = line.strip()
-                if '::' in line:
-                    decorator = self._parse_decorator_comment(line)
-                    if decorator:
-                        decorators.append(decorator)
-
-        return decorators
-
-    def _parse_decorator_comment(self, line: str) -> dict[str, Any] | None:
-        """Parse operation metadata decorator from comment line."""
-        # Format: # :: DecoratorName | type=value | field=value ...
-        if '::' not in line:
-            return None
-
-        # Remove comment markers and leading/trailing whitespace
-        line = line.lstrip('#').strip()
-        if not line.startswith('::'):
-            return None
-
-        # Remove :: marker
-        line = line[2:].strip()
-
-        # Split by pipe
-        parts = [p.strip() for p in line.split('|')]
-        if not parts:
-            return None
-
-        decorator_name = parts[0]
-        kwargs: dict[str, str] = {}
-
-        # Parse field=value pairs
-        for part in parts[1:]:
-            if '=' in part:
-                key, value = part.split('=', 1)
-                kwargs[key.strip()] = value.strip().strip('"').strip("'")
-
-        return {
-            'name': decorator_name,
-            'kwargs': kwargs
-        }
 
     def _extract_modifiers(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
         """Extract modifiers (async, static, class, property, etc.)."""
@@ -920,8 +852,9 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
 
                     # If the resolved target is in the inventory and belongs to this unit, skip it
                     lookup_val = (
-                        resolved_target if resolved_target in self.callable_inventory # Check the full resolved target first
-                        else resolved_type if (resolved_type and resolved_type in self.callable_inventory) # Fall back to checking by type
+                        resolved_target if resolved_target in self.callable_inventory  # Check the full resolved target first
+                        else resolved_type if (
+                                    resolved_type and resolved_type in self.callable_inventory)  # Fall back to checking by type
                         else None
                     )
                     if lookup_val:
@@ -1178,6 +1111,11 @@ def process_file(
 
     # Add execution paths to integration candidates
     add_execution_paths(entries)
+
+    co_occurrence_errors = validate_feature_co_occurrences(entries)
+    if co_occurrence_errors:
+        for err in co_occurrence_errors:
+            print(f"Warning: {err}")
 
     # Count entries
     def count_all_entries(entries_list: list[dict[str, Any]]) -> int:

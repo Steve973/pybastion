@@ -8,7 +8,6 @@ Contains known patterns for:
 - Standard library modules
 """
 
-
 # Operations that ALWAYS can raise specific exceptions
 OPERATIONS_THAT_RAISE = {
     'int': {
@@ -33,7 +32,6 @@ OPERATIONS_THAT_RAISE = {
     },
 }
 
-
 # String methods that can raise
 STRING_METHODS_THAT_RAISE = {
     'index': {
@@ -47,7 +45,6 @@ STRING_METHODS_THAT_RAISE = {
         'ei_count': 2
     },
 }
-
 
 # JSON operations
 JSON_OPERATIONS = {
@@ -63,7 +60,6 @@ JSON_OPERATIONS = {
     },
 }
 
-
 # Operations that are ALWAYS deterministic (never raise)
 DETERMINISTIC_OPERATIONS = {
     'str',  # str() never raises
@@ -75,7 +71,6 @@ DETERMINISTIC_OPERATIONS = {
     'bytes',
     'bytearray',
 }
-
 
 # Boundary operations - filesystem
 FILESYSTEM_OPERATIONS = {
@@ -170,7 +165,6 @@ FILESYSTEM_OPERATIONS = {
     },
 }
 
-
 # Boundary operations - network (HTTP)
 NETWORK_HTTP_OPERATIONS = {
     'requests.get': {
@@ -216,7 +210,6 @@ NETWORK_HTTP_OPERATIONS = {
     },
 }
 
-
 # Boundary operations - database
 DATABASE_OPERATIONS = {
     'cursor.execute': {
@@ -239,7 +232,6 @@ DATABASE_OPERATIONS = {
     },
 }
 
-
 # Boundary operations - environment
 ENVIRONMENT_OPERATIONS = {
     'os.getenv': {
@@ -254,7 +246,6 @@ ENVIRONMENT_OPERATIONS = {
         'exceptions': ['KeyError']
     },
 }
-
 
 # Boundary operations - clock/time
 CLOCK_OPERATIONS = {
@@ -290,7 +281,6 @@ CLOCK_OPERATIONS = {
     },
 }
 
-
 # Boundary operations - randomness
 RANDOMNESS_OPERATIONS = {
     'random.random': {
@@ -316,7 +306,6 @@ RANDOMNESS_OPERATIONS = {
     },
 }
 
-
 # Boundary operations - subprocess
 SUBPROCESS_OPERATIONS = {
     'subprocess.run': {
@@ -338,7 +327,6 @@ SUBPROCESS_OPERATIONS = {
         'exceptions': ['OSError']
     },
 }
-
 
 # Combine all boundary operations
 BOUNDARY_OPERATIONS = {
@@ -397,7 +385,7 @@ STDLIB_CLASSES = {
     'ZipFile', 'ZipExtFile', 'TarFile', 'TarInfo', 'gzip', 'bz2', 'lzma'
 
     # argparse
-    'ArgumentParser', 'Namespace',
+                                                                  'ArgumentParser', 'Namespace',
 
     # logging
     'Logger', 'Handler', 'Formatter', 'Filter', 'LogRecord',
@@ -451,7 +439,6 @@ STDLIB_CLASSES = {
     # types (commonly used)
     'SimpleNamespace', 'MappingProxyType',
 }
-
 
 # Python standard library modules
 STDLIB_MODULES = {
@@ -520,7 +507,6 @@ STDLIB_MODULES = {
     'pkgutil', 'modulefinder', 'runpy', 'site', 'sysconfig',
 }
 
-
 PYTHON_BUILTINS = {
     # Built-in functions
     'abs', 'all', 'any', 'ascii', 'bin', 'bool', 'breakpoint', 'bytearray',
@@ -555,7 +541,6 @@ PYTHON_BUILTINS = {
     # Special
     'cls', 'self',  # Not actually builtins but should never be integrations
 }
-
 
 COMMON_EXTLIB_MODULES = {
     'aiohttp',
@@ -595,16 +580,14 @@ COMMON_EXTLIB_MODULES = {
     'yaml',
 }
 
-
 BUILTIN_METHODS = {
     # Known builtin method patterns (never integrations)
-    'items', 'keys', 'values',           # dict methods
-    'get', 'setdefault', 'update',       # dict methods
-    'append', 'extend', 'pop',           # list methods
-    'add', 'remove', 'discard',          # set methods
-    'split', 'join', 'strip',            # str methods
+    'items', 'keys', 'values',  # dict methods
+    'get', 'setdefault', 'update',  # dict methods
+    'append', 'extend', 'pop',  # list methods
+    'add', 'remove', 'discard',  # set methods
+    'split', 'join', 'strip',  # str methods
 }
-
 
 NO_OP_CALLS = {
     'typing.cast',
