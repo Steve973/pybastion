@@ -32,8 +32,10 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
+networkx = "^3.6.1"
 python = "^3.10"
 pyyaml = "^6.0"
+z3-solver = ">=4.15.8.0"
 
 [tool.poetry-monoranger-plugin]
 enabled = true

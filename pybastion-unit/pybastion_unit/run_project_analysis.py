@@ -146,7 +146,7 @@ def analyze_project(
             sys.executable,
             str(enumerate_eis_script),
             str(py_file),
-            "--callable-inventory", str(inspect_output.relative_to(project_root)),
+            "--callable-inventory", str(inspect_output),
             "--source-root", str(source_path),
             "--unit-id", generate_unit_id(derive_fqn(py_file, source_path)),
             "--output", str(output_file)

@@ -14,6 +14,9 @@ integration_output_dir = "dist/pybastion/integration-output"
 # Where the split integration spec files will be written
 spec_split_output_dir = "dist/pybastion/integration-output/split-specs"
 
+# The text file with lines in the format of FQN:ID
+project_inventory_file = "dist/pybastion/inspect/callable-inventory.txt"
+
 [discovery]
 # Ledger directory structure: "auto" | "flat" | "package"
 ledger_structure = "auto"

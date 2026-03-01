@@ -17,6 +17,7 @@ import yaml
 
 from pybastion_unit.helpers.constraint_metadata_helper import enrich_outcome_with_constraint, \
     populate_constraint_relationships
+from pybastion_unit.helpers.decorator_processing import extract_statement_decorators
 from pybastion_unit.helpers.statement_decomposition import decompose_statement
 from pybastion_unit.shared.callable_id_generation import generate_function_id, generate_ei_id, generate_assignment_id
 from pybastion_unit.shared.models import Branch
@@ -181,16 +182,15 @@ def enumerate_function_eis(
     for stmt in statements:
         outcomes = decompose_statement(stmt, source_lines)
 
-        if outcomes:  # Skip empty (like docstrings)
+        # Extract decorators for this statement
+        stmt_decorators = extract_statement_decorators(stmt, source_lines)
+
+        if outcomes:
             for outcome, call_node in outcomes:
                 ei_id = generate_ei_id(callable_id, ei_counter)
 
                 condition, result, constraint = enrich_outcome_with_constraint(
-                    outcome,
-                    call_node,
-                    stmt,
-                    ei_id,
-                    stmt.lineno
+                    outcome, call_node, stmt, ei_id, stmt.lineno
                 )
 
                 branches.append(
@@ -199,7 +199,8 @@ def enumerate_function_eis(
                         line=stmt.lineno,
                         condition=condition,
                         outcome=result,
-                        constraint=constraint
+                        constraint=constraint,
+                        decorators=stmt_decorators  # <- Add here
                     )
                 )
 

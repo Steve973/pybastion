@@ -13,7 +13,7 @@ from typing import Any
 
 import yaml
 from pybastion_unit.helpers.decorator_processing import (
-    extract_decorators_from_node,
+    extract_callable_decorators,
     has_effect,
     validate_feature_co_occurrences
 )
@@ -582,7 +582,7 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
 
         # Extract decorators (both regular and operation metadata)
         decorators = self._extract_decorators(node.decorator_list)
-        op_metadata_decorators = extract_decorators_from_node(node, self.source_lines)
+        op_metadata_decorators = extract_callable_decorators(node, self.source_lines)
         all_decorators = decorators + op_metadata_decorators
 
         # Extract modifiers

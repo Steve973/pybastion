@@ -14,7 +14,6 @@ from __future__ import annotations
 import ast
 from typing import Any
 
-
 # =============================================================================
 # Schema
 # =============================================================================
@@ -93,6 +92,15 @@ ANALYSIS_DECORATORS: dict[str, Any] = {
         'FeatureStart': {
             'effect': 'mark_flow_boundary',
             'scope': 'codebase',
+            'common_fields': ['name', 'comment'],
+            'fields': {
+                'variants': {
+                    'required': False,
+                    'strict': False,
+                    'value_cardinality': '1..N',
+                    'exclusive': False,
+                },
+            },
             'co_occurrence': {
                 'required': {
                     'one_of': {
@@ -123,15 +131,6 @@ ANALYSIS_DECORATORS: dict[str, Any] = {
                         'correlation': {'field': 'name', 'operator': 'eq'},
                         'repeatable': True,
                     },
-                },
-            },
-            'common_fields': ['name', 'comment'],
-            'fields': {
-                'variants': {
-                    'required': False,
-                    'strict': False,
-                    'value_cardinality': '1..N',
-                    'exclusive': False,
                 },
             },
         },
@@ -277,7 +276,37 @@ def _resolve_common_fields(schema: dict[str, Any]) -> dict[str, Any]:
 # Parsing
 # =============================================================================
 
-def extract_decorators_from_node(
+def extract_statement_decorators(
+        stmt: ast.stmt,
+        source_lines: list[str],
+) -> list[dict[str, Any]]:
+    """
+    Extract analysis decorators from comments preceding a statement.
+
+    Scans upward from the statement, collecting all # :: patterns
+    until hitting a blank line or code.
+    """
+    decorators: list[dict[str, Any]] = []
+
+    if stmt.lineno > 1:
+        # Scan upward from the line before the statement
+        for line_idx in range(stmt.lineno - 2, -1, -1):
+            line = source_lines[line_idx].strip()
+            if line.startswith('# :: '):
+                decorator = parse_decorator_comment(line)
+                if decorator:
+                    decorators.append(decorator)
+            elif line.startswith('#'):
+                continue  # Regular comment, keep scanning
+            elif not line:
+                break  # Blank line, stop
+            else:
+                break  # Code line, stop
+
+    return decorators
+
+
+def extract_callable_decorators(
         node: ast.FunctionDef | ast.AsyncFunctionDef,
         source_lines: list[str],
 ) -> list[dict[str, Any]]:

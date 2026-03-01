@@ -7,6 +7,7 @@ convenient access to all configuration values with proper path resolution.
 
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,19 @@ else:
         print("Install with: pip install tomli", file=sys.stderr)
         print("Run ./integration-setup.sh to install dependencies", file=sys.stderr)
         sys.exit(1)
+
+
+class StoreInConfig(argparse.Action):
+    def __init__(self, option_strings, dest, config_obj, setter_method, **kwargs):
+        self.config_obj = config_obj
+        self.setter_method = setter_method
+        super().__init__(option_strings, dest, **kwargs)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        # Call the setter method for the property
+        method = getattr(self.config_obj, self.setter_method)
+        method(values)
+
 
 # ============================================================================
 # Configuration Loading
@@ -148,6 +162,15 @@ def get_spec_split_output_dir() -> Path:
         _CONFIG.get('paths', {}).get('spec_split_output_dir', 'dist/pybastion/integration-output/split-specs'),
         relative_to_target=True
     )
+
+
+def get_callable_inventory_path() -> Path:
+    """Get the callable inventory file path (relative to target project)."""
+    return resolve_path(
+        _CONFIG.get('paths', {}).get('project_inventory_file', 'dist/pybastion/inspect/callable-inventory.txt'),
+        relative_to_target=True
+    )
+
 
 # ============================================================================
 # Discovery Configuration
