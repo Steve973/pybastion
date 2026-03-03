@@ -116,12 +116,32 @@ def extract_all_operations(node: ast.AST) -> list[ast.Call]:
 # ============================================================================
 
 def get_all_statements(node: ast.AST) -> list[ast.stmt]:
-    """Get all statements in an AST node, including nested ones."""
+    """Get all statements in a function's body, respecting callable boundaries."""
     statements: list[ast.stmt] = []
 
-    for child in ast.walk(node):
-        if isinstance(child, ast.stmt):
-            statements.append(child)
+    # Start from the function body, not the function node itself
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        body_nodes = node.body
+    else:
+        body_nodes = [node]
+
+    def collect_statements(n: ast.AST) -> None:
+        """Recursively collect statements, stopping at nested callables."""
+        # If this is a nested function/method definition, stop here
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return
+
+        # If this is a statement, collect it
+        if isinstance(n, ast.stmt):
+            statements.append(n)
+
+        # Recurse into children
+        for child in ast.iter_child_nodes(n):
+            collect_statements(child)
+
+    # Start collecting from the body
+    for stmt in body_nodes:
+        collect_statements(stmt)
 
     # Sort by line number
     statements.sort(key=lambda s: s.lineno)
@@ -300,6 +320,14 @@ class CallableFinder(ast.NodeVisitor):
 
         # Get callable ID from inventory or generate
         self._enumerate_and_record(node, fqn)
+
+        # NEW: Process nested functions
+        self.fqn_stack.append(node.name)
+        for item in ast.walk(node):
+            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item != node:
+                # This is a nested function - process it recursively
+                self._process_function(item)
+        self.fqn_stack.pop()
 
     def _process_assignment(self, node: ast.Assign | ast.AnnAssign | ast.AugAssign):
         if not isinstance(node.value, ast.Call):

@@ -334,6 +334,8 @@ class AssignDecomposer(StatementDecomposer):
             return ComprehensionDecomposer().decompose_comp(stmt.value, "set", "set()")
         if isinstance(stmt.value, ast.IfExp):
             return TernaryDecomposer().decompose_ternary(stmt.value)
+        if isinstance(stmt.value, ast.BoolOp):
+            return BoolOpDecomposer().decompose_boolop(stmt.value)
 
         ops = extract_all_operations(stmt.value)
 
@@ -431,6 +433,81 @@ class TernaryDecomposer:
             semantic(f"true branch: assigns {true_val}"),
             semantic(f"false branch: assigns {false_val}"),
         ])
+
+        return results
+
+
+class BoolOpDecomposer:
+    """Helper for short-circuit boolean expression (or/and) EI generation."""
+
+    def decompose_boolop(self, boolop: ast.BoolOp) -> list[EIOutcome]:
+        """
+        Decompose `x or y` and `x and y` into short-circuit branches.
+
+        For `x or y`:
+            - Operations in x
+            - x is truthy → uses x
+            - x is falsy → continues to y
+            - Operations in y
+            - All operations succeed → uses y
+
+        For `x and y`:
+            - Operations in x
+            - x is falsy → uses x (short-circuits)
+            - x is truthy → continues to y
+            - Operations in y
+            - All operations succeed → uses y
+        """
+        results: list[EIOutcome] = []
+
+        # BoolOp has: op (Or | And) and values (list of expressions)
+        # For simplicity, handle binary case: x op y
+        # Multi-operand like x or y or z would need recursive handling
+
+        if len(boolop.values) == 2:
+            left = boolop.values[0]
+            right = boolop.values[1]
+
+            # Operations in left operand
+            results.extend(operation_eis([left]))
+
+            left_str = ast.unparse(left)
+            right_str = ast.unparse(right)
+
+            if isinstance(boolop.op, ast.Or):
+                # x or y: if x is truthy, use x; else evaluate y
+                results.extend([
+                    semantic(f"{left_str} is true → uses {left_str}"),
+                    semantic(f"{left_str} is false → continues to {right_str}"),
+                ])
+
+                # Operations in right operand
+                results.extend(operation_eis([right]))
+
+                # If we get here, both evaluated
+                right_ops = extract_all_operations(right)
+                if right_ops:
+                    results.append(semantic(f"all operations succeed → uses {right_str}"))
+
+            elif isinstance(boolop.op, ast.And):
+                # x and y: if x is falsy, use x; else evaluate y
+                results.extend([
+                    semantic(f"{left_str} is false → uses {left_str}"),
+                    semantic(f"{left_str} is true → continues to {right_str}"),
+                ])
+
+                # Operations in right operand
+                results.extend(operation_eis([right]))
+
+                # If we get here, both evaluated
+                right_ops = extract_all_operations(right)
+                if right_ops:
+                    results.append(semantic(f"all operations succeed → uses {right_str}"))
+
+        else:
+            # Multi-operand case: x or y or z
+            # For now, fall back to treating the whole thing as one expression
+            results.extend(operation_eis([boolop]))
 
         return results
 

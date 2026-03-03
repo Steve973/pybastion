@@ -156,6 +156,71 @@ def enumerate_paths(
     return paths
 
 
+def mark_terminal_exits(entries: list[dict[str, Any]]) -> None:
+    """
+    Mark implicit returns and yields as terminal exits.
+
+    Processes all entries recursively to ensure:
+    1. Yields are marked as terminal (they return control to caller)
+    2. Last non-terminal EI in a callable is marked as implicit return
+    """
+
+    def process_entry(entry: dict[str, Any]) -> None:
+        # Only process callables with branches
+        if not entry.get('needs_callable_analysis', False):
+            return
+
+        branches = entry.get('branches', [])
+        if not branches:
+            return
+
+        # Detect stubs - single EI with ellipsis or just pass
+        if len(branches) == 1:
+            outcome = branches[0].get('outcome', '')
+            if '...' in outcome or outcome.strip() in ('pass', 'pass '):
+                entry['is_stub'] = True
+                return  # Don't mark implicit return for stubs
+
+        # Sort by line number to find last EI
+        sorted_branches = sorted(branches, key=lambda b: b['line'])
+
+        for i, branch in enumerate(sorted_branches):
+            outcome = branch.get('outcome', '').lower()
+
+            # Mark yields as terminal
+            if any(indicator in outcome for indicator in ['→ yields', 'yields ', '→ yield ', 'yield from']):
+                branch['is_terminal'] = True
+                branch['terminates_via'] = 'yield'
+
+        # If there is an implicit return, we need to recognize it and designate it
+        # as an implicit return. To find these cases, we work backward from the last
+        # EI in the callable:
+        #  1. If the line is already designated as terminal, see if it is an exception
+        #    - If it is an exception, skip it and go to the next line.
+        #    - If it is not an exception, then it is an explicit return and we're done.
+        #  2. If the line is not designated as terminal, then it is an implicit return.
+        #    - Mark it as terminal and set the terminates_via to 'implicit-return'.
+        for branch in reversed(sorted_branches):
+            if branch.get('is_terminal', False):
+                terminates_via = branch.get('terminates_via', '')
+                if terminates_via in ('exception', 'raise'):
+                    continue
+                else:
+                    break
+            else:
+                branch['is_terminal'] = True
+                branch['terminates_via'] = 'implicit-return'
+                break
+
+    # Process all entries recursively
+    for entry in entries:
+        process_entry(entry)
+
+        # Recurse into children
+        if 'children' in entry and entry['children']:
+            mark_terminal_exits(entry['children'])
+
+
 def add_execution_paths(entries: list[dict[str, Any]]) -> None:
     """
     Add execution_paths to integration_candidates in all callables.
@@ -1108,6 +1173,9 @@ def process_file(
                                 merge_ei_recursive(entry['children'], current_ei_func or parent_ei_func)
 
                     merge_ei_recursive(entries)
+
+    # Mark implicit returns and yields BEFORE path enumeration
+    mark_terminal_exits(entries)
 
     # Add execution paths to integration candidates
     add_execution_paths(entries)

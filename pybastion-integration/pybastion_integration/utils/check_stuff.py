@@ -137,7 +137,7 @@ def find_exit_eis(cfg: nx.DiGraph, callable_id: str):
         terminates_via = node_data.get('terminates_via', '')
         outcome = node_data.get('outcome', '')
 
-        if is_terminal and terminates_via == 'return':
+        if is_terminal and terminates_via in ('return', 'implicit-return', 'yield'):
             exits.append({
                 'ei_id': node_id,
                 'type': 'return',
@@ -153,194 +153,388 @@ def find_exit_eis(cfg: nx.DiGraph, callable_id: str):
     return exits
 
 
-def check_return_edges(cfg: nx.DiGraph, exit_ei_id: str):
-    """Check what return edges exist from an exit EI."""
-    edges = []
+def check_callable_integrity(cfg, callable_id):
+    """Check if a callable has valid internal structure."""
+    entry = f"{callable_id}_E0001"
 
-    for _, target, data in cfg.out_edges(exit_ei_id, data=True):
-        if data.get('edge_type') == 'return':
-            edges.append({
-                'target': target,
-                'returns_from': data.get('returns_from'),
-                'call_site': data.get('original_call_site')
+    # Check entry exists
+    if not cfg.has_node(entry):
+        return {
+            'callable_id': callable_id,
+            'valid': False,
+            'issue': 'no_entry_node',
+            'entry': entry
+        }
+
+    # Find exit EIs (terminal returns)
+    exits = []
+    for nid, ndata in cfg.nodes(data=True):
+        if (ndata.get('callable_id') == callable_id and
+                ndata.get('is_terminal') and
+                ndata.get('terminates_via') in ('return', 'implicit-return', 'yield')):
+            exits.append(nid)
+
+    if not exits:
+        return {
+            'callable_id': callable_id,
+            'valid': False,
+            'issue': 'no_exit_nodes',
+            'entry': entry
+        }
+
+    # Check if path exists from entry to any exit
+    has_path = False
+    reachable_exit = None
+    for exit_node in exits:
+        try:
+            nx.shortest_path(cfg, entry, exit_node)
+            has_path = True
+            reachable_exit = exit_node
+            break
+        except nx.NetworkXNoPath:
+            pass
+
+    if not has_path:
+        return {
+            'callable_id': callable_id,
+            'valid': False,
+            'issue': 'no_internal_path',
+            'entry': entry,
+            'exits': exits
+        }
+
+    return {
+        'callable_id': callable_id,
+        'valid': True,
+        'entry': entry,
+        'exits': exits,
+        'reachable_exit': reachable_exit
+    }
+
+
+def check_return_edges(cfg, callable_id):
+    """Check if callable's exits have return edges back to callers."""
+    # Find all exit EIs
+    exits = []
+    for nid, ndata in cfg.nodes(data=True):
+        if (ndata.get('callable_id') == callable_id and
+                ndata.get('is_terminal') and
+                ndata.get('terminates_via') in ('return', 'implicit-return', 'yield')):
+            exits.append(nid)
+
+    if not exits:
+        return {
+            'callable_id': callable_id,
+            'has_exits': False,
+            'exits': []
+        }
+
+    # Check each exit for return edges
+    exit_info = []
+    for exit_ei in exits:
+        out_edges = list(cfg.out_edges(exit_ei, data=True))
+        return_edges = [e for e in out_edges if e[2].get('edge_type') == 'return']
+
+        exit_info.append({
+            'exit_ei': exit_ei,
+            'has_return_edges': len(return_edges) > 0,
+            'return_count': len(return_edges),
+            'returns_to': [tgt for _, tgt, _ in return_edges]
+        })
+
+    all_have_returns = all(e['has_return_edges'] for e in exit_info)
+
+    return {
+        'callable_id': callable_id,
+        'has_exits': True,
+        'exits': exit_info,
+        'all_exits_have_returns': all_have_returns
+    }
+
+
+def check_call_coverage(cfg, callable_id):
+    """Check if callable is ever called (has incoming call edges)."""
+    entry = f"{callable_id}_E0001"
+
+    if not cfg.has_node(entry):
+        return {
+            'callable_id': callable_id,
+            'entry_exists': False
+        }
+
+    in_edges = list(cfg.in_edges(entry, data=True))
+    call_edges = [e for e in in_edges if e[2].get('edge_type') == 'call']
+
+    callers = []
+    for src, _, _ in call_edges:
+        caller_callable = cfg.nodes[src].get('callable_id')
+        callers.append({
+            'call_site': src,
+            'caller_callable': caller_callable
+        })
+
+    return {
+        'callable_id': callable_id,
+        'entry_exists': True,
+        'is_called': len(call_edges) > 0,
+        'call_count': len(call_edges),
+        'callers': callers
+    }
+
+
+def diagnose_all_callables(cfg):
+    """Run all diagnostic checks on all callables in the graph."""
+    # Get unique callable IDs
+    callables = set()
+    for _, node_data in cfg.nodes(data=True):
+        cid = node_data.get('callable_id')
+        if cid:
+            callables.add(cid)
+
+    results = []
+    for callable_id in sorted(callables):
+        integrity = check_callable_integrity(cfg, callable_id)
+        returns = check_return_edges(cfg, callable_id)
+        coverage = check_call_coverage(cfg, callable_id)
+
+        results.append({
+            'callable_id': callable_id,
+            'integrity': integrity,
+            'returns': returns,
+            'coverage': coverage,
+            'is_broken': not integrity['valid']
+        })
+
+    return results
+
+
+def diagnose_callable_detail(cfg, callable_id):
+    """
+    Show detailed diagnostics for a single callable.
+
+    Returns dict with:
+    - all EIs (with their properties)
+    - edges between them
+    - entry/exit identification
+    - path existence
+    """
+    # Gather all EIs for this callable
+    eis = []
+    for node_id, node_data in cfg.nodes(data=True):
+        if node_data.get('callable_id') == callable_id:
+            eis.append({
+                'id': node_id,
+                'is_terminal': node_data.get('is_terminal', False),
+                'terminates_via': node_data.get('terminates_via', ''),
+                'outcome': node_data.get('outcome', ''),
+                'condition': node_data.get('condition', '')
             })
 
-    return edges
+    # Sort by EI number
+    eis.sort(key=lambda e: int(e['id'].split('_E')[-1]))
+
+    # Find entry (E0001)
+    entry = f"{callable_id}_E0001"
+
+    # Find exits
+    exits = []
+    for ei in eis:
+        if (ei['is_terminal'] and
+                ei['terminates_via'] in ('return', 'implicit-return', 'yield')):
+            exits.append(ei['id'])
+
+    # Get edges between EIs in this callable
+    internal_edges = []
+    for ei in eis:
+        for _, target, edge_data in cfg.out_edges(ei['id'], data=True):
+            target_callable = cfg.nodes[target].get('callable_id')
+            edge_type = edge_data.get('edge_type')
+            internal_edges.append({
+                'from': ei['id'],
+                'to': target,
+                'edge_type': edge_type,
+                'target_callable': target_callable,
+                'is_internal': target_callable == callable_id
+            })
+
+    external_edges = []
+    for node_id in cfg.nodes():
+        if node_id.startswith('EXTERNAL'):
+            node_callable = cfg.nodes[node_id].get('called_from', '')
+            if callable_id in node_callable:
+                for _, target, edge_data in cfg.out_edges(node_id, data=True):
+                    external_edges.append({
+                        'from': node_id,
+                        'to': target,
+                        'edge_type': edge_data.get('edge_type')
+                    })
+
+    # Get incoming edges to entry
+    entry_in_edges = []
+    if cfg.has_node(entry):
+        for src, _, edge_data in cfg.in_edges(entry, data=True):
+            src_callable = cfg.nodes[src].get('callable_id')
+            entry_in_edges.append({
+                'from': src,
+                'from_callable': src_callable,
+                'edge_type': edge_data.get('edge_type')
+            })
+
+    return {
+        'callable_id': callable_id,
+        'entry': entry,
+        'exits': exits,
+        'entry_incoming': entry_in_edges,
+        'eis': eis,
+        'edges': internal_edges,
+        'external_edges': external_edges
+    }
+
+
+def analyze_broken_callable(cfg, callable_id):
+    """
+    Analyze why a callable is broken - look for same-line EIs without edges.
+    """
+    # Get all EIs
+    eis = []
+    for node_id, node_data in cfg.nodes(data=True):
+        if node_data.get('callable_id') == callable_id:
+            constraint = node_data.get('constraint', {})
+            eis.append({
+                'id': node_id,
+                'line': constraint.get('line') if isinstance(constraint, dict) else None,
+                'is_terminal': node_data.get('is_terminal', False),
+                'polarity': constraint.get('polarity') if isinstance(constraint, dict) else None,
+                'expr': constraint.get('expr') if isinstance(constraint, dict) else None
+            })
+
+    # Group by line
+    from collections import defaultdict
+    by_line = defaultdict(list)
+    for ei in eis:
+        if ei['line']:
+            by_line[ei['line']].append(ei)
+
+    # Find lines with multiple EIs
+    multi_ei_lines = {line: eis for line, eis in by_line.items() if len(eis) > 1}
+
+    # Check which ones are connected
+    results = []
+    for line, line_eis in multi_ei_lines.items():
+        # Check if these EIs are reachable from entry
+        entry = f"{callable_id}_E0001"
+        reachable = set()
+        if cfg.has_node(entry):
+            try:
+                for ei in line_eis:
+                    if nx.has_path(cfg, entry, ei['id']):
+                        reachable.add(ei['id'])
+            except:
+                pass
+
+        results.append({
+            'line': line,
+            'total_eis': len(line_eis),
+            'reachable': len(reachable),
+            'unreachable': [ei['id'] for ei in line_eis if ei['id'] not in reachable],
+            'eis': line_eis
+        })
+
+    return results
+
+
+def print_callable_detail(detail):
+    """Pretty print callable detail."""
+    print(f"\n{'=' * 80}")
+    print(f"Callable: {detail['callable_id']}")
+    print(f"Entry: {detail['entry']}")
+    print(f"Exits: {detail['exits']}")
+    print(f"\nEIs ({len(detail['eis'])}):")
+    for ei in detail['eis']:
+        term = f"[TERM:{ei['terminates_via']}]" if ei['is_terminal'] else ""
+        print(f"  {ei['id']}")
+        print(f"    condition: {ei['condition']}")
+        print(f"    outcome: {ei['outcome']} {term}")
+
+    print(f"\nEdges ({len(detail['edges'])}):")
+    for edge in detail['edges']:
+        internal = "INTERNAL" if edge['is_internal'] else f"EXTERNAL->{edge['target_callable']}"
+        print(f"  {edge['from']} --[{edge['edge_type']}]--> {edge['to']} ({internal})")
+
+    if detail.get('external_edges'):
+        print(f"\nExternal node edges ({len(detail['external_edges'])}):")
+        for edge in detail['external_edges']:
+            print(f"  {edge['from']} --[{edge['edge_type']}]--> {edge['to']}")
+
+    print(f"\nIncoming edges to entry ({len(detail['entry_incoming'])}):")
+    for edge in detail['entry_incoming']:
+        print(f"  {edge['from']} ({edge['from_callable']}) --[{edge['edge_type']}]--> {detail['entry']}")
+
+
+def print_diagnostic_summary(results):
+    """Print a summary of diagnostic results."""
+    broken = [r for r in results if r['is_broken']]
+    no_returns = [r for r in results if r['returns']['has_exits'] and not r['returns']['all_exits_have_returns']]
+    never_called = [r for r in results if r['coverage']['entry_exists'] and not r['coverage']['is_called']]
+
+    print(f"\n=== Diagnostic Summary ===")
+    print(f"Total callables: {len(results)}")
+    print(f"Broken callables (no internal path): {len(broken)}")
+    print(f"Missing return edges: {len(no_returns)}")
+    print(f"Never called: {len(never_called)}")
+
+    if broken:
+        print(f"\n=== Broken Callables ===")
+        for r in broken[:10]:
+            print(f"{r['callable_id']}: {r['integrity']['issue']}")
+
+    if no_returns:
+        print(f"\n=== Callables Missing Return Edges ===")
+        for r in no_returns[:10]:
+            exits_without_returns = [e for e in r['returns']['exits'] if not e['has_return_edges']]
+            print(f"{r['callable_id']}: {len(exits_without_returns)} exits without returns")
+
+    if never_called:
+        print(f"\n=== Callables Never Called ===")
+        for r in never_called[:10]:
+            print(f"{r['callable_id']}")
 
 
 def main():
-    if len(sys.argv) < 4:
-        print("Usage: diagnose_cfg_path.py <cfg.pkl> <start_ei> <target_ei>")
+    if len(sys.argv) < 2:
+        print("Usage: diagnose_cfg.py <cfg.pkl> [start_ei] [target_ei]")
         return 1
 
     cfg_path = Path(sys.argv[1])
-    start = sys.argv[2]
-    target = sys.argv[3]
-
     print(f"Loading CFG from {cfg_path}...")
     cfg = load_cfg(cfg_path)
     print(f"  {cfg.number_of_nodes()} nodes, {cfg.number_of_edges()} edges\n")
 
-    # Trace forward
-    print(f"=== Tracing from {start} to {target} ===")
-    result = trace_forward(cfg, start, target, max_steps=200)
+    # Run full diagnostics
+    print("Running diagnostics...")
+    results = diagnose_all_callables(cfg)
+    print_diagnostic_summary(results)
 
-    if result['reached_target']:
-        print(f"✓ Path found! {result['steps']} steps")
-        print(f"  Path length: {len(result['path'])}")
-    else:
-        print(f"✗ Path NOT found")
-        print(f"  Dead end at: {result['dead_end']}")
-        print(f"  Reason: {result['dead_end_reason']}")
-        if result['dead_end_reason'] == 'no_outgoing_edges':
-            print(f"  is_terminal: {result['is_terminal']}")
-            print(f"  terminates_via: {result['terminates_via']}")
-            print(f"  outcome: {result['outcome']}")
-        print(f"  Path so far: {len(result['path'])} steps")
+    # If specific path requested, trace it
+    if len(sys.argv) >= 4:
+        start = sys.argv[2]
+        target = sys.argv[3]
 
-    # Extract callable IDs from start and target
-    start_callable = '_'.join(start.split('_')[:-1])
-    target_callable = '_'.join(target.split('_')[:-1])
+        print(f"\n=== Tracing Path: {start} → {target} ===")
+        result = trace_forward(cfg, start, target, max_steps=200)
 
-    if start_callable == target_callable:
-        print(f"\n=== Analyzing EI sequence in {start_callable} ===")
-        start_num = int(start.split('_E')[-1])
-        target_num = int(target.split('_E')[-1])
+        if result['reached_target']:
+            print(f"✓ Path found! {result['steps']} steps")
+        else:
+            print(f"✗ Path NOT found")
+            print(f"  Dead end at: {result['dead_end']}")
+            print(f"  Reason: {result['dead_end_reason']}")
 
-        eis = analyze_ei_sequence(cfg, start_callable, start_num, min(target_num, start_num + 40))
-
-        for ei in eis:
-            if not ei['exists']:
-                print(f"{ei['ei_id']}: DOES NOT EXIST")
-                continue
-
-            term_info = ""
-            if ei['is_terminal']:
-                term_info = f" [TERMINAL: {ei['terminates_via']}]"
-
-            edges_info = ""
-            if ei['outgoing_edges']:
-                edge_strs = [f"{e['target']} ({e['edge_type']})" for e in ei['outgoing_edges']]
-                edges_info = f" -> {', '.join(edge_strs)}"
-            else:
-                edges_info = " -> NONE"
-
-            outcome = ei['outcome'][:80] if ei['outcome'] else ''
-            print(f"{ei['ei_id']}: {outcome}{term_info}{edges_info}")
-
-    # If we hit a dead end, analyze what happened
-    if not result['reached_target'] and result['path']:
-        last_ei = result['dead_end']
-
-        # Check if it's a terminal return without return edges
-        if result.get('is_terminal') and result.get('terminates_via') == 'return':
-            node = cfg.nodes[last_ei]
-            callable_id = node.get('callable_id')
-
-            print(f"\n=== Dead end is a terminal return ===")
-            print(f"  Callable: {callable_id}")
-            print(f"  EI: {last_ei}")
-
-            # Find who called this callable
-            print(f"\n  Looking for calls TO this callable's entry...")
-            entry_ei = None
-            for nid in cfg.nodes():
-                nd = cfg.nodes[nid]
-                if nd.get('callable_id') == callable_id:
-                    entry_ei = nid
-                    break
-
-            if entry_ei:
-                print(f"  Entry EI: {entry_ei}")
-                in_edges = list(cfg.in_edges(entry_ei, data=True))
-                call_edges = [e for e in in_edges if e[2].get('edge_type') == 'call']
-                print(f"  Call edges TO entry: {len(call_edges)}")
-                for src, _, data in call_edges[:5]:
-                    print(f"    Called from: {src}")
-                    caller_callable = cfg.nodes[src].get('callable_id')
-                    print(f"      Caller callable: {caller_callable}")
-
-            # Check return edges FROM this exit
-            print(f"\n  Return edges FROM this exit EI:")
-            out_edges = list(cfg.out_edges(last_ei, data=True))
-            return_edges = [e for e in out_edges if e[2].get('edge_type') == 'return']
-            if return_edges:
-                for _, tgt, data in return_edges:
-                    print(f"    -> {tgt}")
-            else:
-                print(f"    NONE - this is the bug!")
-
-        # Original call analysis
-        edges = list(cfg.out_edges(last_ei, data=True))
-
-        for _, target_node, data in edges:
-            if data.get('edge_type') == 'call':
-                target_callable = cfg.nodes[target_node].get('callable_id')
-                if target_callable:
-                    print(f"\n=== Call from {last_ei} to {target_callable} ===")
-                    print(f"  Target entry: {target_node}")
-
-                    exits = find_exit_eis(cfg, target_callable)
-                    print(f"  Exit EIs: {len(exits)}")
-                    for exit_info in exits:
-                        print(f"    {exit_info['ei_id']} ({exit_info['type']}): {exit_info['outcome'][:60]}")
-
-                        returns = check_return_edges(cfg, exit_info['ei_id'])
-                        if returns:
-                            for ret in returns:
-                                print(f"      -> returns to {ret['target']}")
-                        else:
-                            print(f"      -> NO RETURN EDGES")
-
-    broken = []
-    checked = set()
-
-    for node_id, node_data in cfg.nodes(data=True):
-        cid = node_data.get('callable_id')
-        if not cid or cid in checked:
-            continue
-        checked.add(cid)
-
-        entry = f"{cid}_E0001"
-        if not cfg.has_node(entry):
-            continue
-
-        exits = []
-        for nid, ndata in cfg.nodes(data=True):
-            if (ndata.get('callable_id') == cid and
-                    ndata.get('is_terminal') and
-                    ndata.get('terminates_via') == 'return'):
-                exits.append(nid)
-
-        if not exits:
-            continue
-
-        has_path = False
-        for exit_node in exits:
-            try:
-                nx.shortest_path(cfg, entry, exit_node)
-                has_path = True
-                break
-            except nx.NetworkXNoPath:
-                pass
-
-        if not has_path:
-            broken.append(cid)
-
-    print(f"Broken: {len(broken)}")
-    for cid in broken[:15]:
-        print(f"  {cid}")
-
-    f033_f001_nodes = []
-    for node_id, node_data in cfg.nodes(data=True):
-        if node_data.get('callable_id') == 'U5DABDB7A65_F033.F001':
-            f033_f001_nodes.append(node_id)
-
-    print(f"F033.F001 nodes in graph: {len(f033_f001_nodes)}")
-    if f033_f001_nodes:
-        print(f"Node IDs: {f033_f001_nodes[:5]}")
-    else:
-        print("F033.F001 has NO nodes in the graph at all!")
+    if len(sys.argv) >= 3 and sys.argv[2].startswith('U'):
+        # Specific callable requested
+        callable_id = sys.argv[2]
+        detail = diagnose_callable_detail(cfg, callable_id)
+        print_callable_detail(detail)
 
     return 0
 

@@ -529,6 +529,15 @@ class Branch:
         ]):
             return True, 'return'
 
+        # Check for explicit yield (YIELDS ARE TERMINAL - they return control to caller)
+        if any(indicator in outcome_lower for indicator in [
+            '→ yields',
+            'yields ',
+            '→ yield ',
+            'yield from',
+        ]):
+            return True, 'yield'
+
         # Check for explicit raise
         if any(indicator in outcome_lower for indicator in [
             '→ raises',
@@ -815,6 +824,7 @@ class CallableEntry:
     branches: list[Branch] = field(default_factory=list)
     integration_candidates: list[IntegrationCandidate] = field(default_factory=list)
     total_eis: int = 0
+    is_stub: bool = False
     needs_callable_analysis: bool = False  # True for functions/methods
 
     @classmethod
@@ -869,6 +879,7 @@ class CallableEntry:
             branches=branches,
             integration_candidates=integration_candidates,
             total_eis=data.get('total_eis', len(branches)),
+            is_stub=data.get('is_stub', False),
             needs_callable_analysis=data.get('needs_callable_analysis', False)
         )
 
@@ -879,7 +890,7 @@ class CallableEntry:
             'kind': self.kind,
             'name': self.name,
             'line_start': self.line_start,
-            'line_end': self.line_end
+            'line_end': self.line_end,
         }
 
         if self.signature:
@@ -902,6 +913,9 @@ class CallableEntry:
 
         if self.needs_callable_analysis:
             result['needs_callable_analysis'] = self.needs_callable_analysis
+
+        if self.is_stub:
+            result['is_stub'] = self.is_stub
 
         if self.params:
             result['params'] = [p.to_dict() for p in self.params]

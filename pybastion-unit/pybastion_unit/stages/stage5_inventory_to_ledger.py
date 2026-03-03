@@ -150,6 +150,9 @@ def transform_entry_to_ledger(
         'name': entry.name
     }
 
+    if entry.is_stub:
+        ledger_entry['is_stub'] = entry.is_stub
+
     # Add optional fields
     if entry.visibility:
         ledger_entry['visibility'] = entry.visibility

@@ -207,6 +207,18 @@ def add_ei_node(
 # =============================================================================
 # Exit EI Identification
 # =============================================================================
+def find_exception_exit_eis(branches: list[dict[str, Any]]) -> list[str]:
+    """Find EIs that exit via exceptions/raises."""
+    exit_eis = []
+    for branch in branches:
+        is_terminal = branch.get('is_terminal', False)
+        terminates_via = branch.get('terminates_via', '')
+
+        if is_terminal and terminates_via in ('exception', 'raise'):
+            exit_eis.append(branch['id'])
+
+    return exit_eis
+
 
 def find_successful_exit_eis(branches: list[dict[str, Any]]) -> list[str]:
     """
@@ -231,7 +243,7 @@ def find_successful_exit_eis(branches: list[dict[str, Any]]) -> list[str]:
         outcome = branch.get('outcome', '').lower()
 
         # Terminal returns are successful exits
-        if is_terminal and terminates_via == 'return':
+        if is_terminal and terminates_via in ('return', 'implicit-return', 'yield'):
             exit_eis.append(branch['id'])
             continue
 
@@ -400,6 +412,7 @@ def handle_external_call(
         integration_type=external_type.value,
         operation_target=operation_target
     )
+    print(f"DEBUG: In handle_external_call: added call edge {ei_id} -> {external_node_id} ")
 
     # Create return edge directly (if there's a next EI)
     if next_ei_id:
@@ -409,6 +422,7 @@ def handle_external_call(
             edge_type='return',
             returns_from_external=True
         )
+        print(f"DEBUG: In handle_external_call: added return edge {external_node_id} -> {next_ei_id} ")
 
 
 # =============================================================================
@@ -451,15 +465,60 @@ def handle_call_ei(
         return
 
     # Find next sequential EI for return destination
-    # Skip over the immediate exception branch (next EI after call)
     next_ei_id = None
+    next_ei_index = None
     for j in range(ei_index + 1, len(all_branches)):
         next_branch = all_branches[j]
         # Skip terminal exception branches
         if next_branch.get('is_terminal') and next_branch.get('terminates_via') in ('exception', 'raise'):
             continue
         next_ei_id = next_branch['id']
+        next_ei_index = j
         break
+
+    # Check if next_ei_id is part of a conditional group and collect all alternatives
+    next_ei_ids = []
+
+    if next_ei_id:
+        next_branch = all_branches[next_ei_index]
+        next_constraint = next_branch.get('constraint', {})
+
+        if next_constraint and next_constraint.get('polarity') is not None:
+            # Collect all alternatives with same expr
+            expr = next_constraint.get('expr')
+            next_ei_ids = []
+
+            # Look backward from next_idx to find earlier alternatives
+            for j in range(next_ei_index - 1, -1, -1):
+                alt = all_branches[j]
+                alt_constraint = alt.get('constraint', {})
+                if (alt_constraint and
+                        alt_constraint.get('expr') == expr and
+                        alt_constraint.get('polarity') is not None):
+                    next_ei_ids.insert(0, alt['id'])  # Insert at front to maintain order
+                else:
+                    break
+
+            # Add current
+            next_ei_ids.append(next_ei_id)
+
+            # Look forward from next_idx to find later alternatives
+            for j in range(next_ei_index + 1, len(all_branches)):
+                alt = all_branches[j]
+                alt_constraint = alt.get('constraint', {})
+                if (alt_constraint and
+                        alt_constraint.get('expr') == expr and
+                        alt_constraint.get('polarity') is not None):
+                    next_ei_ids.append(alt['id'])
+                else:
+                    break
+        else:
+            # Not a conditional - just single target
+            next_ei_ids = [next_ei_id]
+    else:
+        next_ei_ids = []
+
+    print(f"DEBUG: For {ei_id}, collected next_ei_ids: {next_ei_ids}")
 
     # Check if this is an integration
     integration_info = find_integration_for_ei(ei_id, integration_data)
@@ -467,13 +526,13 @@ def handle_call_ei(
     if integration_info:
         category, int_point = integration_info
         handle_integration_call(
-            cfg, ei_id, category, int_point, next_ei_id,
+            cfg, ei_id, category, int_point, next_ei_ids,
             callable_inventory, ei_registry, stub_queue
         )
     else:
         # Local call
         handle_local_call(
-            cfg, ei_id, operation_target, next_ei_id,
+            cfg, ei_id, operation_target, next_ei_ids,
             current_unit_callables, unit_name,
             ei_registry, stub_queue
         )
@@ -484,228 +543,250 @@ def handle_integration_call(
         ei_id: str,
         category: str,
         int_point: dict[str, Any],
-        next_ei_id: str | None,
+        next_ei_ids: list[str] | None,
         callable_inventory: dict[str, str],
         ei_registry: dict[str, list[str]],
         stub_queue: dict[str, list[dict[str, Any]]]
 ) -> None:
     """Handle integration call (interunit/stdlib/extlib/boundary)."""
+    print(f"DEBUG: handle_integration_call called with next_ei_ids: {next_ei_ids}")
     target_fqn = int_point.get('target', '')
 
-    if category == 'interunit':
-        # Interunit call - this is a CALL_NODE that may need stub queueing
-        target_callable_id = callable_inventory.get(target_fqn)
+    for next_ei_id in next_ei_ids:
+        if category == 'interunit':
+            # Interunit call - this is a CALL_NODE that may need stub queueing
+            target_callable_id = callable_inventory.get(target_fqn)
 
-        if target_callable_id:
-            # Look up entry EI from pre-built registry
-            if target_callable_id not in ei_registry:
-                # Callable not in inventory - might be external or missing
-                # Treat as external unknown
-                handle_external_call(
-                    cfg, ei_id, target_fqn,
-                    ExternalNodeType.UNKNOWN, next_ei_id, int_point
+            if target_callable_id:
+                # Look up entry EI from pre-built registry
+                if target_callable_id not in ei_registry:
+                    # Callable not in inventory - might be external or missing
+                    # Treat as external unknown
+                    handle_external_call(
+                        cfg, ei_id, target_fqn,
+                        ExternalNodeType.UNKNOWN, next_ei_id, int_point
+                    )
+                    continue
+
+                target_entry = ei_registry[target_callable_id][0]
+
+                # Create entry node if it doesn't exist
+                if not cfg.has_node(target_entry):
+                    cfg.add_node(target_entry)
+
+                # Create call edge
+                cfg.add_edge(
+                    ei_id,
+                    target_entry,
+                    edge_type='call',
+                    integration_type='interunit',
+                    target_fqn=target_fqn,
+                    target_callable=target_callable_id,
+                    signature=int_point.get('signature', ''),
+                    execution_paths=int_point.get('execution_paths', [])
                 )
-                return
 
-            target_entry = ei_registry[target_callable_id][0]
+                # Mark this EI as interunit call
+                cfg.nodes[ei_id]['type'] = CallNodeType.INTERUNIT.value
 
-            # Create entry node if it doesn't exist
-            if not cfg.has_node(target_entry):
-                cfg.add_node(target_entry)
+                # Wire up return edge
+                if next_ei_id:
+                    # Check if the target callable has already been processed
+                    entry_node_data = cfg.nodes[target_entry]
 
-            # Create call edge
-            cfg.add_edge(
-                ei_id,
-                target_entry,
-                edge_type='call',
-                integration_type='interunit',
-                target_fqn=target_fqn,
-                target_callable=target_callable_id,
-                signature=int_point.get('signature', ''),
-                execution_paths=int_point.get('execution_paths', [])
+                    if 'callable_id' in entry_node_data:
+                        print(f"DEBUG: Immediate wiring for {target_callable_id}")
+                        # Already processed - wire up return immediately
+
+                        # Reconstruct branches from graph nodes
+                        branches = []
+                        for node_id in cfg.nodes():
+                            node_data = cfg.nodes[node_id]
+                            if node_data.get('callable_id') == target_callable_id:
+                                branches.append({
+                                    'id': node_id,
+                                    'is_terminal': node_data.get('is_terminal', False),
+                                    'terminates_via': node_data.get('terminates_via', ''),
+                                    'outcome': node_data.get('outcome', '')
+                                })
+
+                        success_exit_eis = find_successful_exit_eis(branches)
+                        exception_exit_eis = find_exception_exit_eis(branches)
+
+                        print(f"DEBUG: In handle_integration_call: Found {len(success_exit_eis)} "
+                              f"success-path exits for {target_callable_id}: {success_exit_eis}")
+                        print(f"DEBUG: In handle_integration_call: Found {len(exception_exit_eis)} "
+                              f"exception-path exits for {target_callable_id}: {exception_exit_eis}")
+
+                        # Create return edges from each exit EI
+                        if success_exit_eis:
+                            for exit_ei in success_exit_eis:
+                                cfg.add_edge(
+                                    exit_ei,
+                                    next_ei_id,
+                                    edge_type='return',
+                                    success_outcome=True,
+                                    returns_from=target_callable_id,
+                                    original_call_site=ei_id
+                                )
+                                print("DEBUG: In handle_integration_call: Created success-case "
+                                      f"return edge {exit_ei} -> {next_ei_id}")
+
+                        if exception_exit_eis:
+                            for exit_ei in exception_exit_eis:
+                                cfg.add_edge(
+                                    exit_ei,
+                                    next_ei_id,
+                                    edge_type='return',
+                                    success_outcome=False,
+                                    returns_from=target_callable_id,
+                                    original_call_site=ei_id
+                                )
+                                print("DEBUG: In handle_integration_call: Created exception-case "
+                                      f"return edge {exit_ei} -> {next_ei_id}")
+                    else:
+                        # Not processed yet - queue for later
+                        if target_entry not in stub_queue:
+                            stub_queue[target_entry] = []
+                        stub_queue[target_entry].append({
+                            'return_to': next_ei_id,
+                            'call_site': ei_id
+                        })
+
+        else:
+            # External call (stdlib/extlib/boundary) - create EXTERNAL_NODE
+            external_type = ExternalNodeType.from_integration_category(category)
+
+            handle_external_call(
+                cfg, ei_id, int_point.get('target', ''),
+                external_type, next_ei_id, int_point
             )
-
-            # Mark this EI as interunit call
-            cfg.nodes[ei_id]['type'] = CallNodeType.INTERUNIT.value
-
-            # Wire up return edge
-            if next_ei_id:
-                # Check if the target callable has already been processed
-                entry_node_data = cfg.nodes[target_entry]
-
-                if 'callable_id' in entry_node_data:
-                    print(f"DEBUG: Immediate wiring for {target_callable_id}")
-                    # Already processed - wire up return immediately
-                    exit_eis = []
-                    for node_id in cfg.nodes():
-                        node_data = cfg.nodes[node_id]
-                        if (node_data.get('callable_id') == target_callable_id and
-                                node_data.get('is_terminal') and
-                                node_data.get('terminates_via') == 'return'):
-                            exit_eis.append(node_id)
-                        elif (node_data.get('callable_id') == target_callable_id and
-                              'yield' in node_data.get('outcome', '').lower()):
-                            exit_eis.append(node_id)
-
-                    # Reconstruct branches from graph nodes
-                    branches = []
-                    for node_id in cfg.nodes():
-                        node_data = cfg.nodes[node_id]
-                        if node_data.get('callable_id') == target_callable_id:
-                            branches.append({
-                                'id': node_id,
-                                'is_terminal': node_data.get('is_terminal', False),
-                                'terminates_via': node_data.get('terminates_via', ''),
-                                'outcome': node_data.get('outcome', '')
-                            })
-
-                    # Now use find_successful_exit_eis
-                    exit_eis = find_successful_exit_eis(branches)
-                    print(f"DEBUG: In handle_integration_call: Found {len(exit_eis)} exits for {target_callable_id}: {exit_eis}")
-
-                    for exit_ei in exit_eis:
-                        cfg.add_edge(
-                            exit_ei,
-                            next_ei_id,
-                            edge_type='return',
-                            returns_from=target_callable_id,
-                            original_call_site=ei_id
-                        )
-                        print(f"DEBUG: In handle_integration_call: Created return edge {exit_ei} -> {next_ei_id}")
-                else:
-                    # Not processed yet - queue for later
-                    if target_entry not in stub_queue:
-                        stub_queue[target_entry] = []
-                    stub_queue[target_entry].append({
-                        'return_to': next_ei_id,
-                        'call_site': ei_id
-                    })
-
-    else:
-        # External call (stdlib/extlib/boundary) - create EXTERNAL_NODE
-        external_type = ExternalNodeType.from_integration_category(category)
-
-        handle_external_call(
-            cfg, ei_id, int_point.get('target', ''),
-            external_type, next_ei_id, int_point
-        )
 
 
 def handle_local_call(
         cfg: nx.DiGraph,
         ei_id: str,
         operation_target: str,
-        next_ei_id: str | None,
+        next_ei_ids: list[str] | None,
         current_unit_callables: dict[str, str],
         unit_name: str,
         ei_registry: dict[str, list[str]],
         stub_queue: dict[str, list[dict[str, Any]]]
 ) -> None:
     """Handle local function call within same unit."""
+    print(f"DEBUG: handle_local_call called with next_ei_ids: {next_ei_ids}")
     target_callable_id = find_local_callable_id(
         operation_target,
         current_unit_callables,
         unit_name
     )
 
-    if not target_callable_id:
-        # Can't find target - it's an unresolved call (method, builtin, etc.)
-        # Create external node for it
-        external_type = categorize_unresolved_call(operation_target)
+    for next_ei_id in next_ei_ids:
+        if not target_callable_id:
+            # Can't find target - it's an unresolved call (method, builtin, etc.)
+            # Create external node for it
+            external_type = categorize_unresolved_call(operation_target)
 
-        handle_external_call(
-            cfg, ei_id, operation_target,
-            external_type, next_ei_id
+            handle_external_call(
+                cfg, ei_id, operation_target,
+                external_type, next_ei_id
+            )
+            continue
+
+        # Found local callable - this is a CALL_NODE
+        # Look up entry EI from pre-built registry
+        if target_callable_id not in ei_registry:
+            # Not in inventory - shouldn't happen for local but treat as external unknown
+            handle_external_call(
+                cfg, ei_id, operation_target,
+                ExternalNodeType.UNKNOWN, next_ei_id
+            )
+            continue
+
+        target_entry = ei_registry[target_callable_id][0]
+
+        # Create entry node if it doesn't exist
+        if not cfg.has_node(target_entry):
+            cfg.add_node(target_entry)
+
+        # Create call edge
+        cfg.add_edge(
+            ei_id,
+            target_entry,
+            edge_type='call',
+            integration_type='local',
+            target_callable=target_callable_id,
+            operation_target=operation_target
         )
-        return
 
-    # Found local callable - this is a CALL_NODE
-    # Look up entry EI from pre-built registry
-    if target_callable_id not in ei_registry:
-        # Not in inventory - shouldn't happen for local but treat as external unknown
-        handle_external_call(
-            cfg, ei_id, operation_target,
-            ExternalNodeType.UNKNOWN, next_ei_id
-        )
-        return
+        # Mark this EI as local call
+        cfg.nodes[ei_id]['type'] = CallNodeType.LOCAL.value
 
-    target_entry = ei_registry[target_callable_id][0]
+        # Wire up return edge
+        if next_ei_id:
+            # Check if the target callable has already been processed
+            # If the entry node has full attributes (category, callable_id), it's been processed
+            entry_node_data = cfg.nodes[target_entry]
 
-    # Create entry node if it doesn't exist
-    if not cfg.has_node(target_entry):
-        cfg.add_node(target_entry)
+            if 'callable_id' in entry_node_data:
+                print(f"DEBUG: Immediate wiring for {target_callable_id}")
+                # Already processed - wire up return immediately
 
-    # Create call edge
-    cfg.add_edge(
-        ei_id,
-        target_entry,
-        edge_type='call',
-        integration_type='local',
-        target_callable=target_callable_id,
-        operation_target=operation_target
-    )
+                # Reconstruct branches from graph nodes
+                branches = []
+                for node_id in cfg.nodes():
+                    node_data = cfg.nodes[node_id]
+                    if node_data.get('callable_id') == target_callable_id:
+                        branches.append({
+                            'id': node_id,
+                            'is_terminal': node_data.get('is_terminal', False),
+                            'terminates_via': node_data.get('terminates_via', ''),
+                            'outcome': node_data.get('outcome', '')
+                        })
 
-    # Mark this EI as local call
-    cfg.nodes[ei_id]['type'] = CallNodeType.LOCAL.value
+                # Now use find_successful_exit_eis
+                success_exit_eis = find_successful_exit_eis(branches)
+                exception_exit_eis = find_exception_exit_eis(branches)
 
-    # Wire up return edge
-    if next_ei_id:
-        # Check if the target callable has already been processed
-        # If the entry node has full attributes (category, callable_id), it's been processed
-        entry_node_data = cfg.nodes[target_entry]
+                print(f"DEBUG: In handle_local_call: Found {len(success_exit_eis)} "
+                      f"success-path exits for {target_callable_id}: {success_exit_eis}")
+                print(f"DEBUG: In handle_local_call: Found {len(exception_exit_eis)} "
+                      f"exception-path exits for {target_callable_id}: {exception_exit_eis}")
 
-        if 'callable_id' in entry_node_data:
-            print(f"DEBUG: Immediate wiring for {target_callable_id}")
-            # Already processed - wire up return immediately
-            # Need to find exit EIs for this callable
-            # We can't easily get branches here, so we need to check the graph
-            # Look for terminal return nodes from this callable
-            exit_eis = []
-            for node_id in cfg.nodes():
-                node_data = cfg.nodes[node_id]
-                if (node_data.get('callable_id') == target_callable_id and
-                        node_data.get('is_terminal') and
-                        node_data.get('terminates_via') == 'return'):
-                    exit_eis.append(node_id)
-                # Also check for yields
-                elif (node_data.get('callable_id') == target_callable_id and
-                      'yield' in node_data.get('outcome', '').lower()):
-                    exit_eis.append(node_id)
+                # Create return edges from each exit EI
+                if success_exit_eis:
+                    for exit_ei in success_exit_eis:
+                        cfg.add_edge(
+                            exit_ei,
+                            next_ei_id,
+                            edge_type='return',
+                            success_outcome=True,
+                            returns_from=target_callable_id,
+                            original_call_site=ei_id
+                        )
+                        print("DEBUG: In handle_local_call: Created success-case "
+                              f"return edge {exit_ei} -> {next_ei_id}")
 
-            # Reconstruct branches from graph nodes
-            branches = []
-            for node_id in cfg.nodes():
-                node_data = cfg.nodes[node_id]
-                if node_data.get('callable_id') == target_callable_id:
-                    branches.append({
-                        'id': node_id,
-                        'is_terminal': node_data.get('is_terminal', False),
-                        'terminates_via': node_data.get('terminates_via', ''),
-                        'outcome': node_data.get('outcome', '')
-                    })
-
-            # Now use find_successful_exit_eis
-            exit_eis = find_successful_exit_eis(branches)
-            print(f"DEBUG: In handle_local_call: Found {len(exit_eis)} exits for {target_callable_id}: {exit_eis}")
-
-            # Wire return edges from exits to next_ei_id
-            for exit_ei in exit_eis:
-                cfg.add_edge(
-                    exit_ei,
-                    next_ei_id,
-                    edge_type='return',
-                    returns_from=target_callable_id,
-                    original_call_site=ei_id
-                )
-                print(f"DEBUG: In handle_local_call: Created return edge {exit_ei} -> {next_ei_id}")
-        else:
-            # Not processed yet - queue for later
-            if target_entry not in stub_queue:
-                stub_queue[target_entry] = []
-            stub_queue[target_entry].append({
-                'return_to': next_ei_id,
-                'call_site': ei_id
-            })
+                if exception_exit_eis:
+                    for exit_ei in exception_exit_eis:
+                        cfg.add_edge(
+                            exit_ei,
+                            next_ei_id,
+                            edge_type='return',
+                            success_outcome=False,
+                            returns_from=target_callable_id,
+                            original_call_site=ei_id
+                        )
+                        print("DEBUG: In handle_local_call: Created exception-case "
+                              f"return edge {exit_ei} -> {next_ei_id}")
+            else:
+                # Not processed yet - queue for later
+                if target_entry not in stub_queue:
+                    stub_queue[target_entry] = []
+                stub_queue[target_entry].append({
+                    'return_to': next_ei_id,
+                    'call_site': ei_id
+                })
 
 
 # =============================================================================
@@ -736,13 +817,15 @@ def refine_return_edges(
 
     print(f"DEBUG: Refining {len(stub_queue[entry_ei_id])} returns for {callable_id}")
 
-    # Find successful exit EIs
-    exit_eis = find_successful_exit_eis(branches)
-    print(f"DEBUG: In refine_return_edges: Found {len(exit_eis)} exits for {callable_id}: {exit_eis}")
+    success_exit_eis = find_successful_exit_eis(branches)
+    exception_exit_eis = find_exception_exit_eis(branches)
 
-    if not exit_eis:
-        print(f"Warning: No successful exit EIs found for {callable_id}")
+    if not success_exit_eis and not exception_exit_eis:
+        print(f"Warning: No exit EIs found for {callable_id}")
         return
+
+    print(f"DEBUG: In refine_return_edges: Found {len(success_exit_eis)} success-path exits for {callable_id}: {success_exit_eis}")
+    print(f"DEBUG: In refine_return_edges: Found {len(exception_exit_eis)} exception-path exits for {callable_id}: {exception_exit_eis}")
 
     # Wire up return edges for each caller
     for pending in stub_queue[entry_ei_id]:
@@ -750,15 +833,29 @@ def refine_return_edges(
         call_site = pending['call_site']
 
         # Create return edges from each exit EI
-        for exit_ei in exit_eis:
-            cfg.add_edge(
-                exit_ei,
-                return_to,
-                edge_type='return',
-                returns_from=callable_id,
-                original_call_site=call_site
-            )
-            print(f"DEBUG: In refine_return_edges: Created return edge {exit_ei} -> {return_to}")
+        if success_exit_eis:
+            for exit_ei in success_exit_eis:
+                cfg.add_edge(
+                    exit_ei,
+                    return_to,
+                    edge_type='return',
+                    success_outcome=True,
+                    returns_from=callable_id,
+                    original_call_site=call_site
+                )
+                print(f"DEBUG: In refine_return_edges: Created success-case return edge {exit_ei} -> {return_to}")
+
+        if exception_exit_eis:
+            for exit_ei in exception_exit_eis:
+                cfg.add_edge(
+                    exit_ei,
+                    return_to,
+                    edge_type='return',
+                    success_outcome=False,
+                    returns_from=callable_id,
+                    original_call_site=call_site
+                )
+                print(f"DEBUG: In refine_return_edges: Created exception-case return edge {exit_ei} -> {return_to}")
 
     # Remove from stub queue - this callable is now complete
     del stub_queue[entry_ei_id]
@@ -789,6 +886,10 @@ def process_callable(
         stub_queue: Map of entry_ei_id -> list of pending returns
         current_unit_callables: Map of local callable names to IDs
     """
+    # Skip stub callables
+    if callable_entry.get('is_stub', False):
+        return
+
     callable_id = callable_entry['id']
     callable_name = callable_entry.get('name', '')
     callable_decorators = callable_entry.get('decorators', [])
@@ -849,19 +950,91 @@ def process_callable(
                 current_unit_callables, unit_name
             )
         else:
-            # Sequential flow to next EI
-            # Skip over terminal exception branches
-            next_ei_id = None
-            for j in range(i + 1, len(branches)):
-                next_branch = branches[j]
-                # Skip terminal exception branches
-                if next_branch.get('is_terminal') and next_branch.get('terminates_via') in ('exception', 'raise'):
-                    continue
-                next_ei_id = next_branch['id']
-                break
+            # Not a call - create branch/sequential edges
+            constraint = branch.get('constraint', {})
 
-            if next_ei_id:
-                cfg.add_edge(ei_id, next_ei_id, edge_type='sequential')
+            # Check if this is part of a conditional (has constraint with polarity)
+            if constraint and constraint.get('polarity') is not None:
+                is_subsequent = False
+                if i > 0:
+                    prev_constraint = branches[i - 1].get('constraint', {})
+                    if (prev_constraint and
+                            prev_constraint.get('expr') == constraint.get('expr') and
+                            prev_constraint.get('polarity') is not None):
+                        is_subsequent = True
+
+                if is_subsequent:
+                    if branch.get('is_terminal'):
+                        continue
+                    # Non-terminal subsequent alternative: create edge to next EI
+                    if i + 1 < len(branches):
+                        next_ei = branches[i + 1]['id']
+                        cfg.add_edge(ei_id, next_ei, edge_type='sequential')
+                    continue
+                    # Non-terminal: fall through to sequential edge logic below
+                else:
+                    # First alternative - collect all and create edges to next
+                    expr = constraint.get('expr')
+                    alternatives = [ei_id]
+                    j = i + 1
+                    while j < len(branches):
+                        alt = branches[j]
+                        alt_constraint = alt.get('constraint', {})
+                        if (alt_constraint and alt_constraint.get('expr') == expr and
+                                alt_constraint.get('polarity') is not None):
+                            alternatives.append(alt['id'])
+                            j += 1
+                        else:
+                            break
+
+                    # Find next non-terminal after all alternatives
+                    next_ei = None
+                    for k in range(j, len(branches)):
+                        if not branches[k].get('is_terminal'):
+                            next_ei = branches[k]['id']
+                            break
+
+                    # Create edge from each alternative to next statement
+                    if next_ei:
+                        for alt_id in alternatives:
+                            cfg.add_edge(alt_id, next_ei, edge_type='sequential')
+                    continue  # Done with this EI
+
+            # This is a regular sequential node or a branching point
+            # Find what comes next
+            next_line_eis = []
+
+            # Check if next EI(s) are conditional branches with same expression
+            if i + 1 < len(branches):
+                next_branch = branches[i + 1]
+                next_constraint = next_branch.get('constraint', {})
+
+                # If next has a conditional constraint, gather all same-expression alternatives
+                if next_constraint and next_constraint.get('polarity') is not None:
+                    expr = next_constraint.get('expr')
+                    # Collect all consecutive EIs with same expression
+                    for j in range(i + 1, len(branches)):
+                        alt = branches[j]
+                        alt_constraint = alt.get('constraint', {})
+                        if (alt_constraint and
+                                alt_constraint.get('expr') == expr and
+                                alt_constraint.get('polarity') is not None):
+                            # Include ALL alternatives, even terminal ones
+                            next_line_eis.append(alt['id'])
+                        else:
+                            break
+                else:
+                    # Regular sequential - just find next non-terminal
+                    for j in range(i + 1, len(branches)):
+                        next_branch = branches[j]
+                        if not next_branch.get('is_terminal'):
+                            next_line_eis.append(next_branch['id'])
+                            break
+
+            # Create edges to all successors
+            for next_ei in next_line_eis:
+                edge_type = 'branch' if len(next_line_eis) > 1 else 'sequential'
+                cfg.add_edge(ei_id, next_ei, edge_type=edge_type)
 
 
 # =============================================================================

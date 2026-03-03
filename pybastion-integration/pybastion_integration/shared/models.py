@@ -520,6 +520,15 @@ class Branch:
         ]):
             return True, 'return'
 
+        # Check for explicit yield (YIELDS ARE TERMINAL - they return control to caller)
+        if any(indicator in outcome_lower for indicator in [
+            '→ yields',
+            'yields ',
+            '→ yield ',
+            'yield from',
+        ]):
+            return True, 'yield'
+
         # Check for explicit raise
         if any(indicator in outcome_lower for indicator in [
             '→ raises',

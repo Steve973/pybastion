@@ -164,8 +164,8 @@ def parse_outcome_to_constraint(
     # Detect constraint type and extract metadata
 
     # 1. CONDITION (if/while/assert)
-    if isinstance(stmt, (ast.If, ast.While, ast.Assert)):
-        if 'is true' in condition or 'is false' in condition:
+    if 'is true' in condition or 'is false' in condition:
+        if isinstance(stmt, (ast.If, ast.While, ast.Assert)):
             # Extract the condition expression
             if isinstance(stmt, ast.If):
                 expr = ast.unparse(stmt.test)
@@ -182,6 +182,24 @@ def parse_outcome_to_constraint(
             variables_read = extract_variables_from_ast_node(stmt.test)
             operators, operands = extract_operators_and_operands(stmt.test)
             smt_expr = _compute_smt_expr(expr, constraint_polarity)
+
+        elif isinstance(stmt, ast.Assign):
+            # BoolOp short-circuit: extract expression from outcome
+            # Format: "raw_configs_by_instance_id is true → ..."
+            match = re.match(r'(.+?) is (true|false)', condition)
+            if match:
+                expr = match.group(1)
+                constraint_type = 'condition'
+                constraint_expr = expr
+                constraint_polarity = match.group(2) == 'true'
+
+                try:
+                    expr_ast = ast.parse(expr, mode='eval')
+                    variables_read = extract_variables_from_ast_node(expr_ast)
+                    operators, operands = extract_operators_and_operands(expr_ast.body)
+                    smt_expr = _compute_smt_expr(expr, constraint_polarity)
+                except:
+                    variables_read = set()
 
     # 2. ITERATION (for/while loop outcomes)
     elif isinstance(stmt, (ast.For, ast.While)):
