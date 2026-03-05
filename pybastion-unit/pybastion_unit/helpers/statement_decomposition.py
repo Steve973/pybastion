@@ -25,6 +25,7 @@ from pybastion_unit.shared.knowledge_base import NO_OP_CALLS
 
 # Type alias for a single EI outcome with its originating call node (if any)
 EIOutcome = tuple[str, ast.Call | None]
+LineOutcome = tuple[str, ast.Call | None, int]
 
 
 # ============================================================================
@@ -113,7 +114,8 @@ class StatementDecomposer:
     before semantic EIs, matching the existing enumeration order.
     """
 
-    def expressions(self, stmt: ast.stmt) -> list[ast.AST]:
+    @classmethod
+    def expressions(cls, stmt: ast.stmt) -> list[ast.AST]:
         """
         Return the AST sub-expressions to extract operations from.
 
@@ -122,7 +124,13 @@ class StatementDecomposer:
         """
         return []
 
-    def semantic_eis(self, stmt: ast.stmt, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.stmt,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome | LineOutcome]:
         """
         Return the statement-specific semantic EIs.
 
@@ -132,14 +140,20 @@ class StatementDecomposer:
         """
         return []
 
-    def decompose(self, stmt: ast.stmt, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def decompose(
+            cls,
+            stmt: ast.stmt,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome | LineOutcome]:
         """
         Template method: operation EIs followed by semantic EIs.
 
         Do not override this — override expressions() and semantic_eis().
         """
-        results = operation_eis(self.expressions(stmt))
-        results.extend(self.semantic_eis(stmt, source_lines))
+        results = operation_eis(cls.expressions(stmt))
+        results.extend(cls.semantic_eis(stmt, source_lines, next_stmt_line))
         return results
 
 
@@ -160,32 +174,69 @@ class IfDecomposer(StatementDecomposer):
         <condition> is false → continues
     """
 
-    def expressions(self, stmt: ast.If) -> list[ast.AST]:
+    @classmethod
+    def expressions(cls, stmt: ast.If) -> list[ast.AST]:
+        # When we have a BoolOp, BoolOpDecomposer handles operations
+        # Otherwise return the test expression for operation extraction
+        if isinstance(stmt.test, ast.BoolOp):
+            return []  # BoolOpDecomposer will handle it
         return [stmt.test]
 
-    def semantic_eis(self, stmt: ast.If, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.If,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome | LineOutcome]:
         condition = ast.unparse(stmt.test)
 
+        # Get target lines for branches
+        true_target = stmt.body[0].lineno if stmt.body else None
+        false_target = stmt.orelse[0].lineno if stmt.orelse else next_stmt_line
+
+        # Check if condition is a BoolOp - if so, delegate to BoolOpDecomposer
+        if isinstance(stmt.test, ast.BoolOp):
+            # Decompose the BoolOp condition
+            boolop_results = BoolOpDecomposer.decompose_boolop(stmt.test, next_stmt_line)
+
+            # BoolOp results may be 2-element or 3-element tuples
+            results = []
+            for result in boolop_results:
+                if len(result) == 3:
+                    outcome, call_node, target_line = result
+                    # Use the target_line from BoolOp (already set correctly)
+                    results.append((outcome, call_node, target_line))
+                else:
+                    outcome, call_node = result
+                    # Determine target based on outcome
+                    if 'is true' in outcome or 'uses' in outcome:
+                        results.append((outcome, call_node, true_target))
+                    else:
+                        results.append((outcome, call_node, false_target))
+            return results
+
+        # Rest of existing logic for non-BoolOp conditions
         if stmt.body:
             first = stmt.body[0]
 
             if isinstance(first, ast.Raise):
                 exc = ast.unparse(first.exc) if first.exc else "exception"
                 return [
-                    semantic(f"{condition} is true → raises {exc}"),
-                    semantic(f"{condition} is false → continues"),
+                    (f"{condition} is true → raises {exc}", None, true_target),
+                    (f"{condition} is false → continues", None, false_target),
                 ]
 
             if isinstance(first, ast.Return):
                 ret_val = ast.unparse(first.value) if first.value else "None"
                 return [
-                    semantic(f"{condition} is true → returns {ret_val}"),
-                    semantic(f"{condition} is false → continues"),
+                    (f"{condition} is true → returns {ret_val}", None, true_target),
+                    (f"{condition} is false → continues", None, false_target),
                 ]
 
         return [
-            semantic(f"{condition} is true → enters if block"),
-            semantic(f"{condition} is false → continues"),
+            (f"{condition} is true → enters if block", None, true_target),
+            (f"{condition} is false → continues", None, false_target),
         ]
 
 
@@ -194,18 +245,27 @@ class MatchDecomposer(StatementDecomposer):
     Match statement: EIs for subject expression operations, then one EI per case.
     """
 
-    def expressions(self, stmt: ast.Match) -> list[ast.AST]:
+    @classmethod
+    def expressions(cls, stmt: ast.Match) -> list[ast.AST]:
         return [stmt.subject]
 
-    def semantic_eis(self, stmt: ast.Match, source_lines: list[str]) -> list[EIOutcome]:
-        results: list[EIOutcome] = []
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.Match,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome | LineOutcome]:
+        results: list[EIOutcome | LineOutcome] = []
         for i, case in enumerate(stmt.cases):
             pattern = ast.unparse(case.pattern)
+            case_target = case.body[0].lineno if case.body else None
+
             has_return = any(isinstance(n, ast.Return) for n in case.body)
             if has_return:
-                results.append(semantic(f"match case {i + 1}: {pattern} → returns"))
+                results.append((f"match case {i + 1}: {pattern} → returns", None, case_target))
             else:
-                results.append(semantic(f"match case {i + 1}: {pattern}"))
+                results.append((f"match case {i + 1}: {pattern}", None, case_target))
         return results
 
 
@@ -219,22 +279,33 @@ class ForDecomposer(StatementDecomposer):
     For-else: 3 EIs (empty, completes without break, breaks).
     """
 
-    def expressions(self, stmt: ast.For) -> list[ast.AST]:
+    @classmethod
+    def expressions(cls, stmt: ast.For) -> list[ast.AST]:
         return [stmt.iter]
 
-    def semantic_eis(self, stmt: ast.For, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.For,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome | LineOutcome]:
         target = ast.unparse(stmt.target)
         iter_expr = ast.unparse(stmt.iter)
 
+        # Targets: body[0] for loop entry, orelse[0] or next stmt for exit
+        loop_body_target = stmt.body[0].lineno if stmt.body else None
+        else_target = stmt.orelse[0].lineno if stmt.orelse else next_stmt_line
+
         if stmt.orelse:
             return [
-                semantic(f"for {target} in {iter_expr}: 0 iterations → else executes"),
-                semantic(f"for {target} in {iter_expr}: completes without break → else executes"),
-                semantic(f"for {target} in {iter_expr}: breaks → else skipped"),
+                (f"for {target} in {iter_expr}: 0 iterations → else executes", None, else_target),
+                (f"for {target} in {iter_expr}: completes without break → else executes", None, else_target),
+                (f"for {target} in {iter_expr}: breaks → else skipped", None, next_stmt_line),
             ]
         return [
-            semantic(f"for {target} in {iter_expr}: 0 iterations"),
-            semantic(f"for {target} in {iter_expr}: ≥1 iterations"),
+            (f"for {target} in {iter_expr}: 0 iterations", None, next_stmt_line),
+            (f"for {target} in {iter_expr}: ≥1 iterations", None, loop_body_target),
         ]
 
 
@@ -249,21 +320,32 @@ class WhileDecomposer(StatementDecomposer):
     While-else: 3 EIs (initially false → else, completes → else, breaks → no else).
     """
 
-    def expressions(self, stmt: ast.While) -> list[ast.AST]:
+    @classmethod
+    def expressions(cls, stmt: ast.While) -> list[ast.AST]:
         return [stmt.test]
 
-    def semantic_eis(self, stmt: ast.While, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.While,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome | LineOutcome]:
         condition = ast.unparse(stmt.test)
+
+        # Targets: body[0] for loop entry, orelse[0] or next stmt for exit
+        loop_body_target = stmt.body[0].lineno if stmt.body else None
+        else_target = stmt.orelse[0].lineno if stmt.orelse else next_stmt_line
 
         if stmt.orelse:
             return [
-                semantic(f"while {condition}: initially false → else executes"),
-                semantic(f"while {condition}: completes without break → else executes"),
-                semantic(f"while {condition}: breaks → else skipped"),
+                (f"while {condition}: initially false → else executes", None, else_target),
+                (f"while {condition}: completes without break → else executes", None, else_target),
+                (f"while {condition}: breaks → else skipped", None, next_stmt_line),
             ]
         return [
-            semantic(f"while {condition}: initially false → 0 iterations"),
-            semantic(f"while {condition}: initially true → ≥1 iterations"),
+            (f"while {condition}: initially false → 0 iterations", None, next_stmt_line),
+            (f"while {condition}: initially true → ≥1 iterations", None, loop_body_target),
         ]
 
 
@@ -276,19 +358,37 @@ class TryDecomposer(StatementDecomposer):
     Try/except: EIs for exception type expressions, then success + handler EIs.
     """
 
-    def expressions(self, stmt: ast.Try) -> list[ast.AST]:
+    @classmethod
+    def expressions(cls, stmt: ast.Try) -> list[ast.AST]:
         # Operations can appear in exception type specifications (rare but possible)
         return [handler.type for handler in stmt.handlers if handler.type]
 
-    def semantic_eis(self, stmt: ast.Try, source_lines: list[str]) -> list[EIOutcome]:
-        results: list[EIOutcome] = [semantic("try block executes successfully")]
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.Try,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome | LineOutcome]:
+        # Success case goes to finalbody or next stmt after try
+        if stmt.finalbody:
+            success_target = stmt.finalbody[0].lineno
+        else:
+            success_target = next_stmt_line
+
+        results: list[EIOutcome | LineOutcome] = [
+            ("try block executes successfully", None, success_target)
+        ]
 
         for handler in stmt.handlers:
+            # Each handler goes to its body
+            handler_target = handler.body[0].lineno if handler.body else None
+
             if handler.type:
                 exc_type = ast.unparse(handler.type)
-                results.append(semantic(f"raises {exc_type} → enters except handler"))
+                results.append((f"raises {exc_type} → enters except handler", None, handler_target))
             else:
-                results.append(semantic("raises exception → enters except handler"))
+                results.append(("raises exception → enters except handler", None, handler_target))
 
         return results
 
@@ -298,10 +398,17 @@ class WithDecomposer(StatementDecomposer):
     With statement: EIs for all context expressions, then entry EIs.
     """
 
-    def expressions(self, stmt: ast.With) -> list[ast.AST]:
+    @classmethod
+    def expressions(cls, stmt: ast.With) -> list[ast.AST]:
         return [item.context_expr for item in stmt.items]
 
-    def semantic_eis(self, stmt: ast.With, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.With,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome]:
         contexts = [ast.unparse(item.context_expr) for item in stmt.items]
         context_str = ', '.join(contexts)
         return [
@@ -325,17 +432,23 @@ class AssignDecomposer(StatementDecomposer):
     Handles comprehensions and ternary expressions as special cases.
     """
 
-    def decompose(self, stmt: ast.Assign, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def decompose(
+            cls,
+            stmt: ast.Assign,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome]:
         if isinstance(stmt.value, ast.ListComp):
-            return ComprehensionDecomposer().decompose_comp(stmt.value, "list", "[]")
+            return ComprehensionDecomposer.decompose_comp(stmt.value, "list", "[]")
         if isinstance(stmt.value, ast.DictComp):
-            return ComprehensionDecomposer().decompose_comp(stmt.value, "dict", "{}")
+            return ComprehensionDecomposer.decompose_comp(stmt.value, "dict", "{}")
         if isinstance(stmt.value, ast.SetComp):
-            return ComprehensionDecomposer().decompose_comp(stmt.value, "set", "set()")
+            return ComprehensionDecomposer.decompose_comp(stmt.value, "set", "set()")
         if isinstance(stmt.value, ast.IfExp):
-            return TernaryDecomposer().decompose_ternary(stmt.value)
+            return TernaryDecomposer.decompose_ternary(stmt.value)
         if isinstance(stmt.value, ast.BoolOp):
-            return BoolOpDecomposer().decompose_boolop(stmt.value)
+            return BoolOpDecomposer.decompose_boolop(stmt.value, next_stmt_line)
 
         ops = extract_all_operations(stmt.value)
 
@@ -355,10 +468,17 @@ class AssignDecomposer(StatementDecomposer):
 class AugAssignDecomposer(StatementDecomposer):
     """Augmented assignment (+=, -=, etc.): EIs for operations in value, then assignment EI."""
 
-    def expressions(self, stmt: ast.AugAssign) -> list[ast.AST]:
+    @classmethod
+    def expressions(cls, stmt: ast.AugAssign) -> list[ast.AST]:
         return [stmt.value]
 
-    def semantic_eis(self, stmt: ast.AugAssign, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.AugAssign,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome]:
         ops = extract_all_operations(stmt.value) if stmt.value else []
         if ops:
             return []
@@ -369,10 +489,17 @@ class AugAssignDecomposer(StatementDecomposer):
 class AnnAssignDecomposer(StatementDecomposer):
     """Annotated assignment: EIs for operations in value (if present), then assignment EI."""
 
-    def expressions(self, stmt: ast.AnnAssign) -> list[ast.AST]:
+    @classmethod
+    def expressions(cls, stmt: ast.AnnAssign) -> list[ast.AST]:
         return [stmt.value] if stmt.value else []
 
-    def semantic_eis(self, stmt: ast.AnnAssign, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.AnnAssign,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome]:
         ops = extract_all_operations(stmt.value) if stmt.value else []
         if ops:
             return []
@@ -387,8 +514,9 @@ class AnnAssignDecomposer(StatementDecomposer):
 class ComprehensionDecomposer:
     """Helper for list/dict/set comprehension EI generation."""
 
+    @classmethod
     def decompose_comp(
-            self,
+            cls,
             comp: ast.ListComp | ast.DictComp | ast.SetComp,
             comp_type: str,
             empty_repr: str
@@ -401,17 +529,20 @@ class ComprehensionDecomposer:
 
         results = operation_eis(exprs)
 
+        # Extract the iterator expression for constraint
+        iter_expr = ast.unparse(comp.generators[0].iter) if comp.generators else "source"
+
         has_filter = any(gen.ifs for gen in comp.generators)
         if has_filter:
             results.extend([
-                semantic(f"{comp_type} comprehension: source empty → {empty_repr}"),
-                semantic(f"{comp_type} comprehension: source has items, all filtered → {empty_repr}"),
-                semantic(f"{comp_type} comprehension: source has items, some pass filter → populated"),
+                semantic(f"{iter_expr} is empty → {empty_repr}"),
+                semantic(f"{iter_expr} has items, all filtered → {empty_repr}"),
+                semantic(f"{iter_expr} has items, some pass filter → populated"),
             ])
         else:
             results.extend([
-                semantic(f"{comp_type} comprehension: source empty → {empty_repr}"),
-                semantic(f"{comp_type} comprehension: source has items → populated"),
+                semantic(f"{iter_expr} is empty → {empty_repr}"),
+                semantic(f"{iter_expr} has items → populated"),
             ])
 
         return results
@@ -420,7 +551,8 @@ class ComprehensionDecomposer:
 class TernaryDecomposer:
     """Helper for ternary expression (IfExp) EI generation."""
 
-    def decompose_ternary(self, ifexp: ast.IfExp) -> list[EIOutcome]:
+    @classmethod
+    def decompose_ternary(cls, ifexp: ast.IfExp) -> list[EIOutcome]:
         results = operation_eis([ifexp.test, ifexp.body, ifexp.orelse])
 
         condition = ast.unparse(ifexp.test)
@@ -440,7 +572,8 @@ class TernaryDecomposer:
 class BoolOpDecomposer:
     """Helper for short-circuit boolean expression (or/and) EI generation."""
 
-    def decompose_boolop(self, boolop: ast.BoolOp) -> list[EIOutcome]:
+    @classmethod
+    def decompose_boolop(cls, boolop: ast.BoolOp, next_stmt_line: int | None = None) -> list[EIOutcome | LineOutcome]:
         """
         Decompose `x or y` and `x and y` into short-circuit branches.
 
@@ -484,10 +617,12 @@ class BoolOpDecomposer:
                 # Operations in right operand
                 results.extend(operation_eis([right]))
 
-                # If we get here, both evaluated
+                # Generate final outcome
                 right_ops = extract_all_operations(right)
                 if right_ops:
                     results.append(semantic(f"all operations succeed → uses {right_str}"))
+                else:
+                    results.append(semantic(f"uses {right_str}"))
 
             elif isinstance(boolop.op, ast.And):
                 # x and y: if x is falsy, use x; else evaluate y
@@ -499,17 +634,26 @@ class BoolOpDecomposer:
                 # Operations in right operand
                 results.extend(operation_eis([right]))
 
-                # If we get here, both evaluated
+                # Generate final outcome
                 right_ops = extract_all_operations(right)
                 if right_ops:
                     results.append(semantic(f"all operations succeed → uses {right_str}"))
+                else:
+                    results.append(semantic(f"uses {right_str}"))
 
         else:
             # Multi-operand case: x or y or z
             # For now, fall back to treating the whole thing as one expression
             results.extend(operation_eis([boolop]))
 
-        return results
+        # Wrap only short-circuit branches with target_line
+        wrapped = []
+        for outcome, call_node in results:
+            if 'is true → uses' in outcome or 'is false → uses' in outcome:
+                wrapped.append((outcome, call_node, next_stmt_line))
+            else:
+                wrapped.append((outcome, call_node))
+        return wrapped
 
 
 # ============================================================================
@@ -519,7 +663,13 @@ class BoolOpDecomposer:
 class ReturnDecomposer(StatementDecomposer):
     """Return statement: EIs for operations in return value, then return EI."""
 
-    def decompose(self, stmt: ast.Return, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def decompose(
+            cls,
+            stmt: ast.Return,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome]:
         if not stmt.value:
             return [semantic("executes → returns None")]
 
@@ -537,7 +687,13 @@ class ReturnDecomposer(StatementDecomposer):
 class RaiseDecomposer(StatementDecomposer):
     """Raise statement: EIs for operations in exception expression, then raise EI."""
 
-    def decompose(self, stmt: ast.Raise, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def decompose(
+            cls,
+            stmt: ast.Raise,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome]:
         if not stmt.exc:
             return [semantic("executes → re-raises current exception")]
 
@@ -550,10 +706,17 @@ class RaiseDecomposer(StatementDecomposer):
 class AssertDecomposer(StatementDecomposer):
     """Assert statement: EIs for operations in test, then assertion holds/fails EIs."""
 
-    def expressions(self, stmt: ast.Assert) -> list[ast.AST]:
+    @classmethod
+    def expressions(cls, stmt: ast.Assert) -> list[ast.AST]:
         return [stmt.test]
 
-    def semantic_eis(self, stmt: ast.Assert, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.Assert,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome]:
         test = ast.unparse(stmt.test)
         return [
             semantic(f"assert {test}: holds → continues"),
@@ -567,7 +730,13 @@ class ExprDecomposer(StatementDecomposer):
     Skips docstrings (string literal expressions).
     """
 
-    def decompose(self, stmt: ast.Expr, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def decompose(
+            cls,
+            stmt: ast.Expr,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome]:
         # Skip docstrings
         if isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
             return []
@@ -586,47 +755,95 @@ class ExprDecomposer(StatementDecomposer):
 # ============================================================================
 
 class DeleteDecomposer(StatementDecomposer):
-    def semantic_eis(self, stmt: ast.Delete, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.Delete,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome]:
         targets = ', '.join(ast.unparse(t) for t in stmt.targets)
         return [semantic(f"executes: del {targets}")]
 
 
 class PassDecomposer(StatementDecomposer):
-    def semantic_eis(self, stmt: ast.Pass, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.Pass,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome]:
         return [semantic("executes: pass")]
 
 
 class BreakDecomposer(StatementDecomposer):
-    def semantic_eis(self, stmt: ast.Break, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.Break,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome]:
         return [semantic("executes: break")]
 
 
 class ContinueDecomposer(StatementDecomposer):
-    def semantic_eis(self, stmt: ast.Continue, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.Continue,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome]:
         return [semantic("executes: continue")]
 
 
 class ImportDecomposer(StatementDecomposer):
-    def semantic_eis(self, stmt: ast.Import, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.Import,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome]:
         modules = ', '.join(alias.name for alias in stmt.names)
         return [semantic(f"executes: import {modules}")]
 
 
 class ImportFromDecomposer(StatementDecomposer):
-    def semantic_eis(self, stmt: ast.ImportFrom, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.ImportFrom,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome]:
         module = stmt.module or ""
         names = ', '.join(alias.name for alias in stmt.names)
         return [semantic(f"executes: from {module} import {names}")]
 
 
 class GlobalDecomposer(StatementDecomposer):
-    def semantic_eis(self, stmt: ast.Global, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.Global,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome]:
         names = ', '.join(stmt.names)
         return [semantic(f"executes → global {names}")]
 
 
 class NonlocalDecomposer(StatementDecomposer):
-    def semantic_eis(self, stmt: ast.Nonlocal, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.Nonlocal,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome]:
         names = ', '.join(stmt.names)
         return [semantic(f"executes → nonlocal {names}")]
 
@@ -634,7 +851,13 @@ class NonlocalDecomposer(StatementDecomposer):
 class DefaultDecomposer(StatementDecomposer):
     """Fallback decomposer for unknown statement types."""
 
-    def semantic_eis(self, stmt: ast.stmt, source_lines: list[str]) -> list[EIOutcome]:
+    @classmethod
+    def semantic_eis(
+            cls,
+            stmt: ast.stmt,
+            source_lines: list[str],
+            next_stmt_line: int | None = None
+    ) -> list[EIOutcome]:
         line_text = source_lines[stmt.lineno - 1].strip() if stmt.lineno <= len(source_lines) else ast.unparse(stmt)
         return [semantic(f"executes → {line_text}")]
 
@@ -643,67 +866,72 @@ class DefaultDecomposer(StatementDecomposer):
 # Dispatch Table
 # ============================================================================
 
-_DECOMPOSERS: dict[type[ast.stmt], StatementDecomposer] = {
+_DECOMPOSERS: dict[type[ast.stmt], type[StatementDecomposer]] = {
     # Conditionals
-    ast.If: IfDecomposer(),
-    ast.Match: MatchDecomposer(),
+    ast.If: IfDecomposer,
+    ast.Match: MatchDecomposer,
 
     # Loops
-    ast.For: ForDecomposer(),
-    ast.While: WhileDecomposer(),
-    ast.AsyncFor: AsyncForDecomposer(),
+    ast.For: ForDecomposer,
+    ast.While: WhileDecomposer,
+    ast.AsyncFor: AsyncForDecomposer,
 
     # Exception handling
-    ast.Try: TryDecomposer(),
-    ast.With: WithDecomposer(),
-    ast.AsyncWith: AsyncWithDecomposer(),
+    ast.Try: TryDecomposer,
+    ast.With: WithDecomposer,
+    ast.AsyncWith: AsyncWithDecomposer,
 
     # Assignments
-    ast.Assign: AssignDecomposer(),
-    ast.AugAssign: AugAssignDecomposer(),
-    ast.AnnAssign: AnnAssignDecomposer(),
+    ast.Assign: AssignDecomposer,
+    ast.AugAssign: AugAssignDecomposer,
+    ast.AnnAssign: AnnAssignDecomposer,
 
     # Imports
-    ast.Import: ImportDecomposer(),
-    ast.ImportFrom: ImportFromDecomposer(),
+    ast.Import: ImportDecomposer,
+    ast.ImportFrom: ImportFromDecomposer,
 
     # Flow control
-    ast.Return: ReturnDecomposer(),
-    ast.Raise: RaiseDecomposer(),
-    ast.Break: BreakDecomposer(),
-    ast.Continue: ContinueDecomposer(),
-    ast.Pass: PassDecomposer(),
+    ast.Return: ReturnDecomposer,
+    ast.Raise: RaiseDecomposer,
+    ast.Break: BreakDecomposer,
+    ast.Continue: ContinueDecomposer,
+    ast.Pass: PassDecomposer,
 
     # Other
-    ast.Delete: DeleteDecomposer(),
-    ast.Assert: AssertDecomposer(),
-    ast.Expr: ExprDecomposer(),
-    ast.Global: GlobalDecomposer(),
-    ast.Nonlocal: NonlocalDecomposer(),
+    ast.Delete: DeleteDecomposer,
+    ast.Assert: AssertDecomposer,
+    ast.Expr: ExprDecomposer,
+    ast.Global: GlobalDecomposer,
+    ast.Nonlocal: NonlocalDecomposer,
 }
 
-_DEFAULT_DECOMPOSER = DefaultDecomposer()
+_DEFAULT_DECOMPOSER = DefaultDecomposer
 
 
 # ============================================================================
 # Public API
 # ============================================================================
 
-def decompose_statement(stmt: ast.stmt, source_lines: list[str]) -> list[EIOutcome]:
+def decompose_statement(
+        stmt: ast.stmt,
+        source_lines: list[str],
+        next_stmt_line: int | None = None) -> list[EIOutcome | LineOutcome]:
     """
-    Decompose a statement into (outcome_str, ast.Call | None) pairs.
+    Decompose a statement into (outcome_str, ast.Call | None) or (outcome_str, ast.Call | None, target_line) tuples.
 
     Each tuple contains:
       - outcome_str: human-readable EI description
       - ast.Call | None: the originating call node (for operation_target
         population in BranchConstraint), or None for semantic EIs
+      - target_line (optional): line number where execution continues for control flow branches
 
     Args:
         stmt: AST statement node to decompose
         source_lines: Source file lines for line-text extraction
+        next_stmt_line: Line number of the next statement after this one (for control flow exits)
 
     Returns:
-        List of EIOutcome tuples
+        List of EIOutcome or LineOutcome tuples
     """
     decomposer = _DECOMPOSERS.get(type(stmt), _DEFAULT_DECOMPOSER)
-    return decomposer.decompose(stmt, source_lines)
+    return decomposer.decompose(stmt, source_lines, next_stmt_line)

@@ -955,6 +955,14 @@ def process_callable(
 
             # Check if this is part of a conditional (has constraint with polarity)
             if constraint and constraint.get('polarity') is not None:
+                # Check if branch has explicit next_ei from control flow
+                next_ei_target = branch.get('next_ei')
+                if next_ei_target:
+                    # Use explicit control flow target
+                    cfg.add_edge(ei_id, next_ei_target, edge_type='sequential')
+                    continue
+
+                # No explicit next_ei - use alternative collection logic
                 is_subsequent = False
                 if i > 0:
                     prev_constraint = branches[i - 1].get('constraint', {})
@@ -964,16 +972,18 @@ def process_callable(
                         is_subsequent = True
 
                 if is_subsequent:
+                    print(f"DEBUG: {ei_id} is subsequent, skipping")
                     if branch.get('is_terminal'):
                         continue
-                    # Non-terminal subsequent alternative: create edge to next EI
-                    if i + 1 < len(branches):
-                        next_ei = branches[i + 1]['id']
-                        cfg.add_edge(ei_id, next_ei, edge_type='sequential')
+                    # If no explicit next_ei, create sequential edge to next EI
+                    if not branch.get('next_ei'):
+                        if i + 1 < len(branches):
+                            next_ei = branches[i + 1]['id']
+                            cfg.add_edge(ei_id, next_ei, edge_type='sequential')
                     continue
-                    # Non-terminal: fall through to sequential edge logic below
                 else:
                     # First alternative - collect all and create edges to next
+                    print(f"DEBUG: {ei_id} is FIRST alternative, collecting...")
                     expr = constraint.get('expr')
                     alternatives = [ei_id]
                     j = i + 1
@@ -987,16 +997,16 @@ def process_callable(
                         else:
                             break
 
-                    # Find next non-terminal after all alternatives
+                    # j now points to the first EI after all alternatives
+                    # Take the next EI (don't skip terminals)
                     next_ei = None
-                    for k in range(j, len(branches)):
-                        if not branches[k].get('is_terminal'):
-                            next_ei = branches[k]['id']
-                            break
+                    if j < len(branches):
+                        next_ei = branches[j]['id']
 
-                    # Create edge from each alternative to next statement
+                    # Create an edge from each alternative to the next statement
                     if next_ei:
                         for alt_id in alternatives:
+                            print(f"DEBUG: First alt edge: {alt_id} -> {next_ei}")
                             cfg.add_edge(alt_id, next_ei, edge_type='sequential')
                     continue  # Done with this EI
 
@@ -1034,6 +1044,7 @@ def process_callable(
             # Create edges to all successors
             for next_ei in next_line_eis:
                 edge_type = 'branch' if len(next_line_eis) > 1 else 'sequential'
+                print(f"DEBUG: Creating edge {ei_id} -> {next_ei} (type={edge_type})")
                 cfg.add_edge(ei_id, next_ei, edge_type=edge_type)
 
 

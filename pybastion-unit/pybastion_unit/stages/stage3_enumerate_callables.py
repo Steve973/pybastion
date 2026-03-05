@@ -177,7 +177,7 @@ def mark_terminal_exits(entries: list[dict[str, Any]]) -> None:
         # Detect stubs - single EI with ellipsis or just pass
         if len(branches) == 1:
             outcome = branches[0].get('outcome', '')
-            if '...' in outcome or outcome.strip() in ('pass', 'pass '):
+            if '...' in outcome or outcome.strip() in ('pass', 'pass ') or 'NotImplementedError' in outcome:
                 entry['is_stub'] = True
                 return  # Don't mark implicit return for stubs
 
@@ -208,6 +208,22 @@ def mark_terminal_exits(entries: list[dict[str, Any]]) -> None:
                 else:
                     break
             else:
+                # Skip statement types that shouldn't have implicit returns
+                stmt_type = branch.get('stmt_type')
+                if stmt_type in ('Raise', 'Return', 'Break', 'Continue'):
+                    continue
+
+                # Special handling for For loops
+                if stmt_type == 'For':
+                    constraint = branch.get('constraint', {})
+                    # 0-iteration loops with no next_ei are implicit returns
+                    if constraint.get('polarity') is False and not branch.get('next_ei'):
+                        branch['is_terminal'] = True
+                        branch['terminates_via'] = 'implicit-return'
+                        break
+                    else:
+                        continue
+
                 branch['is_terminal'] = True
                 branch['terminates_via'] = 'implicit-return'
                 break

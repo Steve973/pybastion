@@ -149,6 +149,42 @@ def get_all_statements(node: ast.AST) -> list[ast.stmt]:
     return statements
 
 
+def get_statements_with_next_sibling(node: ast.AST) -> list[tuple[ast.stmt, int | None]]:
+    """
+    Get all statements with their next sibling's line number.
+
+    Returns list of (statement, next_sibling_line) tuples.
+    For each statement, next_sibling_line is the line number of the next
+    statement at the same nesting level, or None if it's the last in its block.
+    """
+    result: list[tuple[ast.stmt, int | None]] = []
+
+    def visit_block(statements: list[ast.stmt]):
+        """Process a block of sibling statements."""
+        for i, stmt in enumerate(statements):
+            # Get next sibling's line
+            next_line = statements[i + 1].lineno if i + 1 < len(statements) else None
+            print(f"DEBUG: stmt at line {stmt.lineno}, next_line={next_line}")
+            result.append((stmt, next_line))
+
+            # Recursively visit nested blocks
+            if isinstance(stmt, (ast.If, ast.For, ast.While, ast.With, ast.Try)):
+                if hasattr(stmt, 'body'):
+                    visit_block(stmt.body)
+                if hasattr(stmt, 'orelse'):
+                    visit_block(stmt.orelse)
+                if isinstance(stmt, ast.Try):
+                    for handler in stmt.handlers:
+                        visit_block(handler.body)
+                    if stmt.finalbody:
+                        visit_block(stmt.finalbody)
+
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)):
+        visit_block(node.body)
+
+    return result
+
+
 # ============================================================================
 # Result structures
 # ============================================================================
@@ -187,26 +223,31 @@ def enumerate_function_eis(
     branches: list[Branch] = []
     ei_counter = 1
 
-    # Get all statements in the function (including nested)
-    statements = get_all_statements(func_node)
+    # Get all statements with their next sibling info
+    statements_with_next = get_statements_with_next_sibling(func_node)
 
-    # Filter to only statements inside this function's line range
-    statements = [
-        s for s in statements
-        if func_node.lineno <= s.lineno <= func_node.end_lineno
-    ]
+    for stmt, next_stmt_line in statements_with_next:
+        # Filter to only this function's line range
+        if not (func_node.lineno <= stmt.lineno <= func_node.end_lineno):
+            continue
+        if stmt == func_node:
+            continue
 
-    # Remove the function definition itself
-    statements = [s for s in statements if s != func_node]
-
-    for stmt in statements:
-        outcomes = decompose_statement(stmt, source_lines)
+        print(f"DEBUG: About to decompose stmt at line {stmt.lineno}, next_stmt_line={next_stmt_line}")
+        outcomes = decompose_statement(stmt, source_lines, next_stmt_line)
 
         # Extract decorators for this statement
         stmt_decorators = extract_statement_decorators(stmt, source_lines)
 
         if outcomes:
-            for outcome, call_node in outcomes:
+            for outcome_tuple in outcomes:
+                # Handle both EIOutcome and LineOutcome
+                if len(outcome_tuple) == 3:
+                    outcome, call_node, target_line = outcome_tuple
+                else:
+                    outcome, call_node = outcome_tuple
+                    target_line = None
+
                 ei_id = generate_ei_id(callable_id, ei_counter)
 
                 condition, result, constraint = enrich_outcome_with_constraint(
@@ -220,11 +261,28 @@ def enumerate_function_eis(
                         condition=condition,
                         outcome=result,
                         constraint=constraint,
-                        decorators=stmt_decorators  # <- Add here
+                        stmt_type=type(stmt).__name__,
+                        decorators=stmt_decorators,
+                        target_line=target_line
                     )
                 )
 
+                print(f"DEBUG UNPACK: len={len(outcome_tuple)}, tuple={outcome_tuple}")
                 ei_counter += 1
+
+    # Resolve target_line to next_ei
+    for branch in branches:
+        if branch.target_line:
+            print(f"DEBUG: Resolving {branch.id} target_line={branch.target_line}")
+            for target_branch in branches:
+                if target_branch.line == branch.target_line:
+                    print(f"DEBUG: Found match: {target_branch.id}")
+                    branch.next_ei = target_branch.id
+                    break
+            else:
+                print(f"DEBUG: No match found for {branch.id} target_line={branch.target_line}")
+            # Clear target_line after resolution
+            branch.target_line = None
 
     return FunctionResult(
         name=func_node.name,
@@ -357,10 +415,18 @@ class CallableFinder(ast.NodeVisitor):
         branches: list[Branch] = []
         ei_counter = 0
 
-        outcomes = decompose_statement(node, self.source_lines)
+        # No next statement for single assignment
+        outcomes = decompose_statement(node, self.source_lines, next_stmt_line=None)
 
         if outcomes:
-            for outcome, call_node in outcomes:
+            for outcome_tuple in outcomes:
+                # Handle both EIOutcome and LineOutcome
+                if len(outcome_tuple) == 3:
+                    outcome, call_node, target_line = outcome_tuple
+                else:
+                    outcome, call_node = outcome_tuple
+                    target_line = None
+
                 ei_counter += 1
                 ei_id = generate_ei_id(callable_id, ei_counter)
 
@@ -379,7 +445,9 @@ class CallableFinder(ast.NodeVisitor):
                         line=node.lineno,
                         condition=condition,
                         outcome=result,
-                        constraint=constraint
+                        constraint=constraint,
+                        stmt_type=type(node).__name__,
+                        target_line=target_line
                     )
                 )
 

@@ -473,6 +473,24 @@ class Branch:
     Replaces scattered constraint_type, constraint_expr, constraint_polarity fields.
     """
 
+    stmt_type: str | None = None
+    """
+    Statement type of the EI, e.g., 'if', 'for', 'try', 'raise', etc.
+    Used for special handling of certain statement types.
+    """
+
+    target_line: int | None = None
+    """
+    Line number where execution continues for control flow branches.
+    None for terminal EIs or single assignment statements.
+    """
+
+    next_ei: str | None = None
+    """
+    ID of the next EI in the execution flow. Resolved from target_line.
+    None for terminal EIs or single assignment statements.
+    """
+
     is_terminal: bool = False
     """
     Whether this EI terminates execution flow:
@@ -527,7 +545,9 @@ class Branch:
             '→ return ',
             'return value'
         ]):
-            return True, 'return'
+            # Only mark as terminal if from a Return statement
+            if self.stmt_type == 'Return':
+                return True, 'return'
 
         # Check for explicit yield (YIELDS ARE TERMINAL - they return control to caller)
         if any(indicator in outcome_lower for indicator in [
@@ -544,7 +564,9 @@ class Branch:
             'raises ',
             '→ raise ',
         ]):
-            return True, 'raise'
+            # Only mark as terminal if from a Raise statement
+            if self.stmt_type == 'Raise':
+                return True, 'raise'
 
         # Check for exception propagation
         if 'exception propagates' in outcome_lower:
@@ -569,6 +591,9 @@ class Branch:
             outcome=data['outcome'],
             decorators=data.get('decorators', []),
             constraint=BranchConstraint.from_dict(data['constraint']) if data.get('constraint') else None,
+            stmt_type=data.get('stmt_type') if 'stmt_type' in data else None,
+            target_line=data.get('target_line') if 'target_line' in data else None,
+            next_ei=data.get('next_ei') if 'next_ei' in data else None,
             is_terminal=data.get('is_terminal', False),
             terminates_via=data.get('terminates_via'),
             metadata=data.get('metadata', {})
@@ -583,12 +608,21 @@ class Branch:
             'outcome': self.outcome,
         }
 
+        if self.target_line is not None:
+            result['target_line'] = self.target_line
+
+        if self.next_ei is not None:
+            result['next_ei'] = self.next_ei
+
         if self.decorators:
             result['decorators'] = self.decorators
 
         # Include constraint object if present
         if self.constraint is not None:
             result['constraint'] = self.constraint.to_dict()
+
+        if self.stmt_type is not None:
+            result['stmt_type'] = self.stmt_type
 
         if self.is_terminal:
             result['is_terminal'] = self.is_terminal
@@ -617,6 +651,12 @@ class Branch:
         # Include constraint object if present
         if self.constraint is not None:
             result['constraint'] = self.constraint.to_dict()
+
+        if self.stmt_type is not None:
+            result['stmt_type'] = self.stmt_type
+
+        if self.next_ei is not None:
+            result['next_ei'] = self.next_ei
 
         if self.decorators:
             result['decorators'] = self.decorators

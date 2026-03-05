@@ -136,6 +136,7 @@ def parse_outcome_to_constraint(
         stmt: The AST statement this outcome came from
         branch_id: Branch/EI ID for traceability
         line: Line number in source code
+        call_node: The AST Call node if this outcome is from a function call, else None
 
     Returns:
         BranchConstraint object if constraint exists, None otherwise
@@ -213,7 +214,35 @@ def parse_outcome_to_constraint(
                 constraint_expr = ast.unparse(stmt.test)
                 variables_read = extract_variables_from_ast_node(stmt.test)
 
-    # 3. EXCEPTION (try/except, raise, or exception propagation)
+            # Add polarity for iteration alternatives
+            if '0 iterations' in outcome or 'initially false' in outcome:
+                constraint_polarity = False
+            elif '≥1 iterations' in outcome or 'initially true' in outcome:
+                constraint_polarity = True
+
+    # 3. COMPREHENSION
+    elif 'is empty' in condition or 'has items' in condition:
+        # Comprehension iteration alternatives
+        if 'is empty' in condition:
+            match = re.match(r'(.+?) is empty', condition)
+            polarity = False
+        else:  # 'has items' in condition
+            match = re.match(r'(.+?) has items', condition)
+            polarity = True
+
+        if match:
+            iter_expr = match.group(1)
+            constraint_type = 'iteration'
+            constraint_expr = iter_expr
+            constraint_polarity = polarity
+            # Extract variables from iter expression
+            try:
+                expr_ast = ast.parse(iter_expr, mode='eval')
+                variables_read = extract_variables_from_ast_node(expr_ast)
+            except:
+                variables_read = set()
+
+    # 4. EXCEPTION (try/except, raise, or exception propagation)
     elif isinstance(stmt, ast.Try):
         constraint_type = 'exception'
         if 'raises' in outcome_lower:
@@ -222,7 +251,7 @@ def parse_outcome_to_constraint(
             if match:
                 metadata['exception_types'] = [match.group(1)]
 
-    # 4. OPERATION (function/method calls)
+    # 5. OPERATION (function/method calls)
     elif 'executes →' in outcome and 'succeeds' in result_lower:
         # Extract operation from condition
         # Format: "executes → validate(data) succeeds"
@@ -239,7 +268,7 @@ def parse_outcome_to_constraint(
             except:
                 variables_read = set()
 
-    # 5. EXCEPTION PROPAGATION (from operation)
+    # 6. EXCEPTION PROPAGATION (from operation)
     elif 'raises exception' in result_lower and 'propagates' in result_lower:
         # Extract operation from condition
         match = re.match(r'(.+) raises exception', condition)
@@ -248,7 +277,7 @@ def parse_outcome_to_constraint(
             constraint_type = 'exception'
             constraint_expr = operation
 
-    # 6. ASSIGNMENT
+    # 7. ASSIGNMENT
     elif isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
         constraint_type = 'assignment'
 
@@ -271,7 +300,7 @@ def parse_outcome_to_constraint(
             variables_written = extract_variables_from_ast_node(stmt.target)
             variables_read = extract_variables_from_ast_node(stmt.value)
 
-    # 7. MATCH CASE
+    # 8. MATCH CASE
     elif isinstance(stmt, ast.Match):
         if 'match case' in outcome_lower:
             constraint_type = 'match_case'
