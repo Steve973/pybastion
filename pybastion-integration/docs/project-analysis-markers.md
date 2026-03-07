@@ -1,29 +1,29 @@
-# Project Analysis Decorators Specification
+# Project Analysis Markers Specification
 
 ## Overview
 
-This specification defines comment-based decorators for marking functions and
+This specification defines comment-based markers for marking functions and
 methods with metadata that controls integration flow tracing and feature flow
-identification. These decorators serve two primary purposes:
+identification. These markers serve two primary purposes:
 
-1. **Operation Decorators** - Mark mechanical and utility operations to be
+1. **Operation Markers** – Denote mechanical and utility operations to be
    excluded from flow tracing (replaced with mocks/fixtures)
-2. **Feature Flow Decorators** - Define boundaries, waypoints, branching, and
+2. **Feature Flow Markers** – Define boundaries, waypoints, branching, and
    convergence points for end-to-end feature testing
 
-All decorators use a pipe-delimited syntax embedded in comments immediately
+All markers use a pipe-delimited syntax embedded in comments immediately
 preceding the function or method definition.
 
-## Decorator Syntax
+## Marker Syntax
 
 ### General Format
 
 ```
-:: DecoratorName | field=value | field=value
+:: MarkerName | field=value | field=value
 ```
 
 **Rules:**
-- Decorator name is case-sensitive
+- Marker name is case-sensitive
 - Fields are pipe-delimited (`|`)
 - Field values use `key=value` format
 - Whitespace around delimiters is ignored
@@ -32,7 +32,7 @@ preceding the function or method definition.
 
 ### Placement
 
-Place decorators in comments **immediately before** the function or method
+Place markers in comments **immediately before** the function or method
 signature:
 
 ```python
@@ -53,9 +53,9 @@ def validate_schema(data: dict) -> bool:
     return schema.validate(data)
 ```
 
-## Operation Decorators
+## Operation Markers
 
-Operation decorators mark functions that should be excluded from integration
+Operation markers denote functions that should be excluded from integration
 flow tracing. These are mechanical transformations or utility operations that
 do not contain business logic.
 
@@ -135,7 +135,7 @@ def log_transaction(txn_id: str) -> None:
     logger.info(f"Transaction {txn_id} processed")
 ```
 
-### When to Use Operation Decorators
+### When to Use Operation Markers
 
 **Mark as MechanicalOperation:**
 - Pure data transformations (same input always produces same output)
@@ -189,9 +189,9 @@ def process_payment(amount: float, method: str) -> PaymentResult:
     return finalize_transaction(result)  # Flow continues
 ```
 
-## Feature Flow Decorators
+## Feature Flow Markers
 
-Feature flow decorators define the boundaries and structure of end-to-end
+Feature flow markers define the boundaries and structure of end-to-end
 feature flows that span multiple integration points. They enable automated
 tracing of execution paths from feature entry to exit, including branching
 and convergence.
@@ -206,7 +206,7 @@ A feature flow consists of:
 - **One or more exit points** (FeatureEnd, FeatureEndConditional) – where the
   feature completes
 
-All decorators in a feature flow are correlated by the `name` field. Branches
+All markers in a feature flow are correlated by the `name` field. Branches
 within a feature flow are correlated by the `branch_name` field.
 
 ### FeatureStart
@@ -588,14 +588,14 @@ def _finalize_processing(result: TransformResult) -> ProcessedData:
 
 ## Co-occurrence Rules
 
-### Operation Decorators
+### Operation Markers
 
 MechanicalOperation and UtilityOperation have no co-occurrence constraints.
 They apply only to the function they decorate.
 
-### Feature Flow Decorators
+### Feature Flow Markers
 
-Feature flow decorators have codebase-wide co-occurrence rules based on the
+Feature flow markers have codebase-wide co-occurrence rules based on the
 `name` field:
 
 **FeatureStart constraints:**
@@ -603,7 +603,7 @@ Feature flow decorators have codebase-wide co-occurrence rules based on the
 - Requires at least one of:
   - FeatureEnd with matching `name`, OR
   - FeatureEndConditional with matching `name`
-- May have multiple FeatureEnd or FeatureEndConditional decorators
+- May have multiple FeatureEnd or FeatureEndConditional markers
 - May have zero or more FeatureTrace, FeatureBranch, FeatureConverge
 
 **FeatureBranch constraints:**
@@ -626,7 +626,7 @@ When analyzing a callable during ledger generation:
      (`/* */`), docstrings (`"""`, `'''`), doc comments (`///`, `/**`)
    - Stop at blank lines or code
 
-2. **Search for decorator patterns**:
+2. **Search for marker patterns**:
    - `:: MechanicalOperation`
    - `:: UtilityOperation`
    - `:: FeatureStart`
@@ -640,7 +640,7 @@ When analyzing a callable during ledger generation:
 
 4. **Parse fields**:
    - Split on `|` delimiter
-   - The first segment is the decorator name
+   - The first segment is the marker name
    - Remaining segments are `key=value` pairs
    - Strip whitespace around delimiters
    - Remove surrounding quotes from values
@@ -649,9 +649,9 @@ When analyzing a callable during ledger generation:
 
 ## Ledger Output Format
 
-Decorators appear in the ledger as an array under the `decorators` field:
+Markers appear in the ledger as an array under the `markers` field:
 
-**Operation decorator:**
+**Operation marker:**
 ```yaml
 - id: C001M003
   kind: callable
@@ -667,7 +667,7 @@ Decorators appear in the ledger as an array under the `decorators` field:
     branches: [...]
 ```
 
-**Feature flow decorators:**
+**Feature flow markers:**
 ```yaml
 - id: C001M001
   kind: callable
@@ -683,7 +683,7 @@ Decorators appear in the ledger as an array under the `decorators` field:
     branches: [...]
 ```
 
-**Multiple decorators on same function:**
+**Multiple markers on same function:**
 ```yaml
 - id: F005
   kind: callable
@@ -704,7 +704,7 @@ Decorators appear in the ledger as an array under the `decorators` field:
     branches: [...]
 ```
 
-**Branching decorators:**
+**Branching markers:**
 ```yaml
 - id: C002M005
   kind: callable
@@ -720,7 +720,7 @@ Decorators appear in the ledger as an array under the `decorators` field:
     branches: [...]
 ```
 
-**Convergence decorators:**
+**Convergence markers:**
 ```yaml
 - id: C003M008
   kind: callable
@@ -758,7 +758,7 @@ def validate_schema(data: dict) -> bool:
     return MetadataSchema().validate(data)
 ```
 
-### Python – Multiple Decorators
+### Python – Multiple Markers
 ```python
 # :: FeatureTrace | name=dependency_resolution
 # :: FeatureTrace | name=package_installation
@@ -844,11 +844,11 @@ include_mechanical_names = [
 - **Whitespace tolerance**: Strip whitespace around delimiters and field values
 - **Quote handling**: Remove surrounding quotes (`"` and `'`) from values
 - **Optional fields**: All fields except those marked required may be absent
-- **Case-sensitive names**: Decorator names must match exactly
-- **Multiple decorators**: A function may have multiple decorator annotations
-- **Default behavior**: Functions without decorators are treated as business
+- **Case-sensitive names**: Marker names must match exactly
+- **Multiple markers**: A function may have multiple markers specified
+- **Default behavior**: Functions without markers are treated as business
   logic and included in flow tracing
 - **Field validation**: Validate required fields and strict field values
-  against the decorator schema
+  against the marker schema
 - **Co-occurrence validation**: Validate codebase-wide rules for feature flow
-  decorators after all files are processed
+  markers after all files are processed

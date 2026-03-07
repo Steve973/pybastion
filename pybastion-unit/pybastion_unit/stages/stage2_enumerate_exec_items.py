@@ -18,7 +18,7 @@ import yaml
 from pybastion_unit.helpers.constraint_metadata_helper import enrich_outcome_with_constraint, \
     populate_constraint_relationships
 from pybastion_unit.helpers.decorator_processing import extract_statement_decorators
-from pybastion_unit.helpers.statement_decomposition import decompose_statement
+from pybastion_unit.helpers.statement_decomposition import decompose_statement, DecomposerResult
 from pybastion_unit.shared.callable_id_generation import generate_function_id, generate_ei_id, generate_assignment_id
 from pybastion_unit.shared.models import Branch
 
@@ -234,24 +234,22 @@ def enumerate_function_eis(
             continue
 
         print(f"DEBUG: About to decompose stmt at line {stmt.lineno}, next_stmt_line={next_stmt_line}")
-        outcomes = decompose_statement(stmt, source_lines, next_stmt_line)
+        outcomes: list[DecomposerResult] = decompose_statement(stmt, source_lines, next_stmt_line)
 
         # Extract decorators for this statement
         stmt_decorators = extract_statement_decorators(stmt, source_lines)
 
         if outcomes:
-            for outcome_tuple in outcomes:
-                # Handle both EIOutcome and LineOutcome
-                if len(outcome_tuple) == 3:
-                    outcome, call_node, target_line = outcome_tuple
-                else:
-                    outcome, call_node = outcome_tuple
-                    target_line = None
+            for decompose_result in outcomes:
+                outcome = decompose_result.outcome
+                call_node = decompose_result.call_node
+                target_line = decompose_result.target_line
+                skips_lines = decompose_result.skips_lines
 
                 ei_id = generate_ei_id(callable_id, ei_counter)
 
                 condition, result, constraint = enrich_outcome_with_constraint(
-                    outcome, call_node, stmt, ei_id, stmt.lineno
+                    outcome, call_node, stmt, ei_id, stmt.lineno, skips_lines
                 )
 
                 branches.append(
@@ -263,11 +261,10 @@ def enumerate_function_eis(
                         constraint=constraint,
                         stmt_type=type(stmt).__name__,
                         decorators=stmt_decorators,
-                        target_line=target_line
+                        target_line=target_line,
                     )
                 )
 
-                print(f"DEBUG UNPACK: len={len(outcome_tuple)}, tuple={outcome_tuple}")
                 ei_counter += 1
 
     # Resolve target_line to next_ei
@@ -381,6 +378,7 @@ class CallableFinder(ast.NodeVisitor):
 
         # NEW: Process nested functions
         self.fqn_stack.append(node.name)
+        item: ast.FunctionDef | ast.AsyncFunctionDef
         for item in ast.walk(node):
             if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item != node:
                 # This is a nested function - process it recursively
@@ -416,16 +414,14 @@ class CallableFinder(ast.NodeVisitor):
         ei_counter = 0
 
         # No next statement for single assignment
-        outcomes = decompose_statement(node, self.source_lines, next_stmt_line=None)
+        outcomes: list[DecomposerResult] = decompose_statement(node, self.source_lines, next_stmt_line=None)
 
         if outcomes:
-            for outcome_tuple in outcomes:
+            for decompose_result in outcomes:
                 # Handle both EIOutcome and LineOutcome
-                if len(outcome_tuple) == 3:
-                    outcome, call_node, target_line = outcome_tuple
-                else:
-                    outcome, call_node = outcome_tuple
-                    target_line = None
+                outcome = decompose_result.outcome
+                call_node = decompose_result.call_node
+                target_line = decompose_result.target_line
 
                 ei_counter += 1
                 ei_id = generate_ei_id(callable_id, ei_counter)

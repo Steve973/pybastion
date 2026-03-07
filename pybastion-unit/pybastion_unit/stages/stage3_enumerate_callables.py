@@ -213,7 +213,7 @@ def mark_terminal_exits(entries: list[dict[str, Any]]) -> None:
                 if stmt_type in ('Raise', 'Return', 'Break', 'Continue'):
                     continue
 
-                # Special handling for For loops
+                # Special handling for "For" loops
                 if stmt_type == 'For':
                     constraint = branch.get('constraint', {})
                     # 0-iteration loops with no next_ei are implicit returns

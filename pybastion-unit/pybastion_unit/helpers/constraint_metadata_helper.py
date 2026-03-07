@@ -123,7 +123,8 @@ def parse_outcome_to_constraint(
         stmt: ast.stmt,
         branch_id: str = "",
         line: int = 0,
-        call_node: ast.Call | None = None
+        call_node: ast.Call | None = None,
+        skips_lines: list[int] | None = None
 ) -> BranchConstraint | None:
     """
     Parse an outcome string and statement to create a BranchConstraint.
@@ -325,6 +326,7 @@ def parse_outcome_to_constraint(
             operands=operands,
             smt_expr=smt_expr,
             operation_target=operation_target,
+            skips_eis=[str(line) for line in skips_lines if line is not None],
             metadata=metadata
         )
 
@@ -488,7 +490,8 @@ def enrich_outcome_with_constraint(
         call_node: ast.Call | None,
         stmt: ast.stmt,
         ei_id: str,
-        line: int
+        line: int,
+        skips_lines: list[int] | None = None
 ) -> tuple[str, str, BranchConstraint | None]:
     """
     Enrich an outcome string with the extracted constraint.
@@ -511,6 +514,6 @@ def enrich_outcome_with_constraint(
         result = outcome.replace('executes: ', '')
 
     # Extract constraint
-    constraint = parse_outcome_to_constraint(outcome, stmt, branch_id=ei_id, line=line, call_node=call_node)
+    constraint = parse_outcome_to_constraint(outcome, stmt, branch_id=ei_id, line=line, call_node=call_node, skips_lines)
 
     return condition, result, constraint

@@ -246,6 +246,13 @@ class BranchConstraint:
     Used for conflict detection.
     """
 
+    skips_eis: list[str] = field(default_factory=list)
+    """
+    Branch IDs that this constraint skips when the constraint
+    conditions cause code to be bypassed. E.g., when a for loop
+    has zero items, it would bypass the loop body.
+    """
+
     metadata: dict[str, Any] = field(default_factory=dict)
     """
     Additional metadata for specialized analysis:
@@ -392,6 +399,9 @@ class BranchConstraint:
         if self.excludes:
             result['excludes'] = self.excludes
 
+        if self.skips_eis:
+            result['skips_eis'] = self.skips_eis
+
         if self.metadata:
             result['metadata'] = self.metadata
 
@@ -415,6 +425,7 @@ class BranchConstraint:
             exception_types=data.get('exception_types', []),
             implies=data.get('implies', []),
             excludes=data.get('excludes', []),
+            skips_eis=data.get('skips_eis', []),
             metadata=data.get('metadata', {})
         )
 
