@@ -341,6 +341,42 @@ def group_similar_paths(cfg: nx.DiGraph, paths: list[list[str]],
 # YAML Output
 # =============================================================================
 
+
+def condense_path(cfg: nx.DiGraph, path: list[str]) -> list[str]:
+    """Filter path to callable boundaries, branches, and integration points."""
+    condensed = []
+
+    for ei_id in path:
+        node_data = cfg.nodes[ei_id]
+
+        # Keep if it's:
+        # - Entry EI (E0000/E0001)
+        # - Exit EI (terminal return/yield)
+        # - Has a call edge (integration point)
+        # - Has branch constraint (conditional decision)
+
+        ei_num = int(ei_id.split('_E')[-1])
+        is_entry = ei_num in (0, 1)
+        is_exit = (
+                node_data.get('is_terminal') and
+                node_data.get('terminates_via') in
+                ('return', 'implicit-return', 'yield')
+        )
+
+        has_call = any(
+            edge_data.get('edge_type') == 'call'
+            for _, _, edge_data in cfg.out_edges(ei_id, data=True)
+        )
+
+        constraint = node_data.get('constraint', {})
+        is_branch = constraint and constraint.get('constraint_type') in ('condition', 'iteration')
+
+        if is_entry or is_exit or has_call or is_branch:
+            condensed.append(ei_id)
+
+    return condensed
+
+
 def extract_path_metadata(cfg: nx.DiGraph, path: list[str]) -> dict[str, Any]:
     """Extract call chain, integration points, and branch points from a path."""
     call_chain = []
@@ -545,42 +581,6 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.verbose:
         print(f"CFG loaded: {cfg.number_of_nodes()} nodes, {cfg.number_of_edges()} edges")
-
-    ####################################################################
-    # DEBUGGERY
-    ####################################################################
-    current = 'U37D3513825_F007_E0009'
-    visited = set()
-    path = [current]
-
-    for i in range(50):
-        if current == 'U37D3513825_F007_E0035':
-            print(f"FOUND E0035! At iteration {i}, path length: {len(path)}")
-            break
-
-        visited.add(current)
-        edges = list(cfg.out_edges(current, data=True))
-
-        if not edges:
-            print(f"DEAD END at {current}")
-            break
-
-        next_node = None
-        for _, target, data in edges:
-            if target not in visited:
-                next_node = target
-                print(f"{current} -> {next_node} ({data.get('edge_type')})")
-                break
-
-        if not next_node:
-            print(f"CYCLE/NO UNVISITED at {current}")
-            break
-
-        path.append(next_node)
-        current = next_node
-    ####################################################################
-    # DEBUGGERY
-    ####################################################################
 
     # Find feature flows
     if args.verbose:

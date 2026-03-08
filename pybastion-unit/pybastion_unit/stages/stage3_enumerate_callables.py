@@ -160,21 +160,23 @@ def enumerate_paths(
 
 
 def _is_skippable_by_any_earlier_branch(
-    branches: list[dict],
-    terminal_idx: int,
+    reversed_branches: list[dict],
     terminal_branch: dict,
 ) -> bool:
     terminal_id = terminal_branch.get("id")
+    print(f"DEBUG: Checking if {terminal_id} is skippable")
 
-    for earlier in branches[:terminal_idx]:
+    for earlier in reversed_branches:
         if earlier.get("is_terminal", False):
             continue
 
         skips: set[str] = set(
             earlier.get("constraint", {}).get("skips_eis", []) or []
         )
+        print(f"DEBUG: Earlier branch {earlier.get('id')} skips: {skips}")
 
         if terminal_id in skips:
+            print(f"DEBUG: Found {terminal_id} in {earlier.get('id')}'s skips!")
             return True
 
     return False
@@ -199,11 +201,24 @@ def mark_terminal_exits(entries: list[dict[str, Any]]) -> None:
             return
 
         # Detect stubs - single EI with ellipsis or just pass
-        if len(branches) == 1:
-            outcome = branches[0].get('outcome', '')
-            if '...' in outcome or outcome.strip() in ('pass', 'pass ') or 'NotImplementedError' in outcome:
+        if len(branches) <= 2:
+            branch_num = 1 if branches[0].get('id').endswith('E0000') else 0
+            outcome = branches[branch_num].get('outcome', '')
+            if '...' in outcome or outcome.strip() in ('pass', 'pass ') in outcome:
                 entry['is_stub'] = True
                 return  # Don't mark implicit return for stubs
+
+        # Check for NotImplementedError (single or multi-EI)
+        has_not_impl = any('NotImplementedError' in branch.get('outcome', '') for branch in branches)
+        if has_not_impl:
+            # Skip synthetic entry
+            real_branches = [b for b in branches if not b.get('synthetic')]
+            # Check if all branches are NotImplementedError-related
+            stub_outcomes = ['NotImplementedError', 'raises', 'exception propagates']
+            if all(any(pattern in b.get('outcome', '') for pattern in stub_outcomes)
+                   for b in real_branches):
+                entry['is_stub'] = True
+                return
 
         # Sort by line number to find last EI
         sorted_branches = sorted(branches, key=lambda b: b['line'])
@@ -224,7 +239,9 @@ def mark_terminal_exits(entries: list[dict[str, Any]]) -> None:
         #    - If it is not an exception, then it is an explicit return and we're done.
         #  2. If the line is not designated as terminal, then it is an implicit return.
         #    - Mark it as terminal and set the terminates_via to 'implicit-return'.
-        for branch_idx, branch in enumerate(reversed(sorted_branches)):
+        reversed_branches = list(reversed(sorted_branches))
+        for branch_idx, branch in enumerate(reversed_branches):
+            earlier_branches = list(reversed_branches)[branch_idx + 1:]
             branch_id = branch.get('id')
             print(f"Processing branch {branch_id}...")
             if branch.get('is_terminal', False):
@@ -236,7 +253,7 @@ def mark_terminal_exits(entries: list[dict[str, Any]]) -> None:
                 print(f"Branch {branch_id} does not terminate via exception, processing...")
 
                 # Normal terminal: only stop if nothing earlier can skip it
-                if _is_skippable_by_any_earlier_branch(branches, branch_idx, branch):
+                if _is_skippable_by_any_earlier_branch(earlier_branches, branch):
                     print(f"Branch {branch_id} is already marked as terminal, and is skippable (continue)")
                     continue
                 else:
@@ -258,7 +275,7 @@ def mark_terminal_exits(entries: list[dict[str, Any]]) -> None:
                         print(f"Branch {branch_id} has False polarity and no next_ei, so it is an implicit return (break)")
                         branch['is_terminal'] = True
                         branch['terminates_via'] = 'implicit-return'
-                        if _is_skippable_by_any_earlier_branch(branches, branch_idx, branch):
+                        if _is_skippable_by_any_earlier_branch(earlier_branches, branch):
                             print(f"Branch {branch_id} is now marked as terminal, and is skippable (continue)")
                             continue
                         else:
@@ -272,7 +289,7 @@ def mark_terminal_exits(entries: list[dict[str, Any]]) -> None:
                 if branch.get('next_ei') is None:
                     branch['is_terminal'] = True
                     branch['terminates_via'] = 'implicit-return'
-                    if _is_skippable_by_any_earlier_branch(branches, branch_idx, branch):
+                    if _is_skippable_by_any_earlier_branch(earlier_branches, branch):
                         print(f"Branch {branch_id} is now marked as terminal, and is skippable (continue)")
                         continue
                     else:
@@ -459,7 +476,12 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
         self.interunit_imports = set()  # FQNs that are from the project
         self.local_symbols: set[str] = set()  # All callables defined in this unit
 
-    def _get_callable_id(self, node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef, context: str) -> str:
+    def _get_callable_id(
+            self,
+            node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef,
+            context: str,
+            inventory_only: bool = False,
+    ) -> str:
         """
         Get callable ID from inventory or generate it.
 
@@ -479,6 +501,9 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
         # Try inventory first
         if fqn in self.callable_inventory:
             return self.callable_inventory[fqn]
+
+        if inventory_only:
+            return ""
 
         # Fallback: generate ID
         if context == "class":
@@ -632,8 +657,17 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
     def _visit_nested_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef, parent_id: str) -> None:
         """Visit a nested function."""
         # Generate nested function ID
-        self.function_counter += 1
-        nested_id = generate_nested_function_id(parent_id, self.function_counter)
+        id_from_inventory = self._get_callable_id(node, "function", inventory_only=True)
+        if id_from_inventory:
+            if "_set_attr" in node.name:
+                print(f"DEBUG: Get callable ID Nested function ID from inventory: {id_from_inventory}")
+            nested_id = id_from_inventory
+        else:
+            self.function_counter += 1
+            nested_id = generate_nested_function_id(parent_id, self.function_counter)
+
+        if "_set_attr" in node.name:
+            print(f"DEBUG: Get callable ID Nested function ID: {nested_id}")
 
         # Analyze as callable
         entry = self._analyze_callable(node, nested_id, is_method=False)
@@ -664,9 +698,9 @@ class EnhancedCallableEnumerator(ast.NodeVisitor):
         # Check for nested functions
         self.context_stack.append(func_id)
         if self.fqn_stack:
-            self.fqn_stack.append(f"{'.'.join(self.fqn_stack)}.{node.name}")
+            self.fqn_stack.append(node.name)
         elif self.module_fqn:
-            self.fqn_stack.append(f"{self.module_fqn}.{node.name}")
+            self.fqn_stack.append(node.name)
         item: ast.FunctionDef | ast.AsyncFunctionDef
         for item in ast.walk(node):
             if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item != node:

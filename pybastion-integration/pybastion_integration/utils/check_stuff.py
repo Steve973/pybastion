@@ -6,10 +6,14 @@ Analyzes paths in the CFG to identify where paths break and why.
 """
 
 import pickle
+import re
 import sys
 from pathlib import Path
 
 import networkx as nx
+
+
+FUNC_ID_PATTERN: re.Pattern[str] = re.compile(r"^U[0-9A-F]{10}_[FM]\d{3}")
 
 
 def load_cfg(cfg_path: Path) -> nx.DiGraph:
@@ -155,7 +159,7 @@ def find_exit_eis(cfg: nx.DiGraph, callable_id: str):
 
 def check_callable_integrity(cfg, callable_id):
     """Check if a callable has valid internal structure."""
-    entry = f"{callable_id}_E0001"
+    entry = f"{callable_id}_E000" + ("0" if FUNC_ID_PATTERN.match(callable_id) else "1")
 
     # Check entry exists
     if not cfg.has_node(entry):
@@ -254,7 +258,7 @@ def check_return_edges(cfg, callable_id):
 
 def check_call_coverage(cfg, callable_id):
     """Check if callable is ever called (has incoming call edges)."""
-    entry = f"{callable_id}_E0001"
+    entry = f"{callable_id}_E000" + ("0" if FUNC_ID_PATTERN.match(callable_id) else "1")
 
     if not cfg.has_node(entry):
         return {
@@ -333,8 +337,8 @@ def diagnose_callable_detail(cfg, callable_id):
     # Sort by EI number
     eis.sort(key=lambda e: int(e['id'].split('_E')[-1]))
 
-    # Find entry (E0001)
-    entry = f"{callable_id}_E0001"
+    # Find entry (E0000)
+    entry = f"{callable_id}_E000" + ("0" if FUNC_ID_PATTERN.match(callable_id) else "1")
 
     # Find exits
     exits = []
@@ -422,7 +426,7 @@ def analyze_broken_callable(cfg, callable_id):
     results = []
     for line, line_eis in multi_ei_lines.items():
         # Check if these EIs are reachable from entry
-        entry = f"{callable_id}_E0001"
+        entry = f"{callable_id}_E000" + ("0" if FUNC_ID_PATTERN.match(callable_id) else "1")
         reachable = set()
         if cfg.has_node(entry):
             try:
@@ -499,6 +503,19 @@ def print_diagnostic_summary(results):
         for r in never_called[:10]:
             print(f"{r['callable_id']}")
 
+    print("\n=== Callables NOT in Both Lists ===")
+    no_returns_set = set(
+        r['callable_id'] for r in results if r['returns']['has_exits'] and not r['returns']['all_exits_have_returns'])
+    never_called_set = set(
+        r['callable_id'] for r in results if r['coverage']['entry_exists'] and not r['coverage']['is_called'])
+    not_in_both = no_returns_set ^ never_called_set
+    print(f"Count: {len(not_in_both)}")
+    for cid in sorted(not_in_both):
+        if cid in no_returns_set:
+            print(f"  {cid}: missing return edges")
+        else:
+            print(f"  {cid}: never called")
+
 
 def main():
     if len(sys.argv) < 2:
@@ -535,6 +552,8 @@ def main():
         callable_id = sys.argv[2]
         detail = diagnose_callable_detail(cfg, callable_id)
         print_callable_detail(detail)
+        broken = [r['callable_id'] for r in results if r['is_broken']]
+        print(f"\n{callable_id} in broken list: {callable_id in broken}")
 
     return 0
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import re
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +21,10 @@ from pybastion_unit.helpers.constraint_metadata_helper import enrich_outcome_wit
     populate_constraint_relationships
 from pybastion_unit.helpers.decorator_processing import extract_statement_decorators
 from pybastion_unit.helpers.statement_decomposition import decompose_statement, DecomposerResult
-from pybastion_unit.shared.callable_id_generation import generate_function_id, generate_ei_id, generate_assignment_id
+from pybastion_unit.shared.callable_id_generation import generate_function_id, generate_ei_id, generate_assignment_id, \
+    generate_function_entry_ei_id, FUNC_ID_EXPR
 
-ENUM_BASES = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag'}
+ENUM_BASES: set[str] = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag'}
 
 
 def load_callable_inventory(filepath: Path | None) -> dict[str, str]:
@@ -153,7 +155,7 @@ import ast
 
 
 def get_statements_with_next_sibling(
-    node: ast.AST,
+        node: ast.AST,
 ) -> list[tuple[ast.stmt, list[int] | None]]:
     """
     Get all statements with their continuation line chain.
@@ -174,8 +176,8 @@ def get_statements_with_next_sibling(
     result: list[tuple[ast.stmt, list[int] | None]] = []
 
     def prepend_next_line(
-        local_next_line: int | None,
-        inherited_next_lines: list[int] | None,
+            local_next_line: int | None,
+            inherited_next_lines: list[int] | None,
     ) -> list[int] | None:
         if local_next_line is None:
             return inherited_next_lines
@@ -184,8 +186,8 @@ def get_statements_with_next_sibling(
         return [local_next_line, *inherited_next_lines]
 
     def visit_block(
-        statements: list[ast.stmt],
-        inherited_next_lines: list[int] | None = None,
+            statements: list[ast.stmt],
+            inherited_next_lines: list[int] | None = None,
     ) -> None:
         for i, stmt in enumerate(statements):
             local_next_line = (
@@ -198,7 +200,6 @@ def get_statements_with_next_sibling(
             if isinstance(stmt, ast.If):
                 visit_block(stmt.body, next_lines)
                 visit_block(stmt.orelse, next_lines)
-
 
             elif isinstance(stmt, (ast.For, ast.While)):
                 visit_block(stmt.body, next_lines)
@@ -245,6 +246,42 @@ class FunctionResult:
         }
 
 
+def create_function_entry_branch(
+        callable_id: str,
+        line_num: int,
+        target_line: int | None = None,
+) -> Branch:
+    """Create a Branch for the function entry point."""
+    entry_ei_id = generate_function_entry_ei_id(callable_id)
+    return Branch(
+        id=entry_ei_id,
+        condition=f"enters function {callable_id}",
+        outcome="function start",
+        stmt_type="FunctionInvocation",
+        synthetic=True,
+        line=line_num,
+        target_line=target_line,
+    )
+
+
+def get_first_ei_line(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
+    if not node.body:
+        return node.lineno
+
+    first_stmt = node.body[0]
+
+    if (
+        isinstance(first_stmt, ast.Expr)
+        and isinstance(first_stmt.value, ast.Constant)
+        and isinstance(first_stmt.value.value, str)
+    ):
+        if len(node.body) > 1:
+            return node.body[1].lineno
+        return node.lineno
+
+    return first_stmt.lineno
+
+
 def enumerate_function_eis(
         func_node: ast.FunctionDef | ast.AsyncFunctionDef,
         source_lines: list[str],
@@ -257,6 +294,11 @@ def enumerate_function_eis(
     """
     branches: list[Branch] = []
     ei_counter = 1
+
+    pattern = re.compile(FUNC_ID_EXPR)
+    if bool(pattern.match(callable_id)):
+        first_ei_line = get_first_ei_line(func_node)
+        branches.append(create_function_entry_branch(callable_id, func_node.lineno, first_ei_line))
 
     # Get all statements with their next sibling info
     statements_with_next = get_statements_with_next_sibling(func_node)
@@ -280,7 +322,6 @@ def enumerate_function_eis(
                 call_node = decompose_result.call_node
                 target_line = decompose_result.target_line
                 skips_lines = decompose_result.skips_lines
-
                 ei_id = generate_ei_id(callable_id, ei_counter)
 
                 condition, result, constraint = enrich_outcome_with_constraint(

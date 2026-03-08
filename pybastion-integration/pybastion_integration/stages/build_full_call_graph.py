@@ -35,42 +35,9 @@ from typing import Any
 import networkx as nx
 import yaml
 
+from pybastion_common.models import NodeCategory, CallNodeType, ExternalNodeType
 from pybastion_integration import config
 from pybastion_integration.config import StoreInConfig
-
-# Import node types - adjust path as needed for your project
-try:
-    from pybastion_common.models import NodeCategory, CallNodeType, ExternalNodeType
-except ModuleNotFoundError:
-    # For testing - use local definitions
-    from enum import Enum
-
-
-    class NodeCategory(Enum):
-        CALL_NODE = "call_node"
-        EXTERNAL_NODE = "external_node"
-
-
-    class CallNodeType(Enum):
-        LOCAL = "local"
-        INTERUNIT = "interunit"
-
-
-    class ExternalNodeType(Enum):
-        STDLIB = "stdlib"
-        EXTLIB = "extlib"
-        BOUNDARY = "boundary"
-        UNKNOWN = "unknown"
-
-        @classmethod
-        def from_integration_category(cls, category: str):
-            mapping = {
-                'stdlib': cls.STDLIB,
-                'extlib': cls.EXTLIB,
-                'boundary': cls.BOUNDARY,
-                'unknown': cls.UNKNOWN,
-            }
-            return mapping.get(category, cls.UNKNOWN)
 
 
 # =============================================================================
@@ -824,8 +791,10 @@ def refine_return_edges(
         print(f"Warning: No exit EIs found for {callable_id}")
         return
 
-    print(f"DEBUG: In refine_return_edges: Found {len(success_exit_eis)} success-path exits for {callable_id}: {success_exit_eis}")
-    print(f"DEBUG: In refine_return_edges: Found {len(exception_exit_eis)} exception-path exits for {callable_id}: {exception_exit_eis}")
+    print(
+        f"DEBUG: In refine_return_edges: Found {len(success_exit_eis)} success-path exits for {callable_id}: {success_exit_eis}")
+    print(
+        f"DEBUG: In refine_return_edges: Found {len(exception_exit_eis)} exception-path exits for {callable_id}: {exception_exit_eis}")
 
     # Wire up return edges for each caller
     for pending in stub_queue[entry_ei_id]:
@@ -1035,11 +1004,12 @@ def process_callable(
                             break
                 else:
                     # Regular sequential - just find next non-terminal
+                    print(f"DEBUG: {ei_id} hitting else block")
                     for j in range(i + 1, len(branches)):
                         next_branch = branches[j]
-                        if not next_branch.get('is_terminal'):
-                            next_line_eis.append(next_branch['id'])
-                            break
+                        next_line_eis.append(next_branch['id'])
+                        print(f"DEBUG: Added {next_branch['id']} to next_line_eis")
+                        break
 
             # Create edges to all successors
             for next_ei in next_line_eis:

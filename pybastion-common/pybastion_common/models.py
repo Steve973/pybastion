@@ -523,6 +523,13 @@ class Branch:
     - 'continue': loop continue
     """
 
+    synthetic: bool = False
+    """
+    Whether this EI is synthetic and not directly derived from source code:
+    - True: synthetic EI, e.g., function invocation/start
+    - False: derived from actual source code
+    """
+
     metadata: dict[str, Any] = field(default_factory=dict)
     """
     Additional metadata for specialized analysis:
@@ -609,6 +616,7 @@ class Branch:
             next_ei=data.get('next_ei') if 'next_ei' in data else None,
             is_terminal=data.get('is_terminal', False),
             terminates_via=data.get('terminates_via'),
+            synthetic=data.get('synthetic', False),
             metadata=data.get('metadata', {})
         )
 
@@ -642,6 +650,9 @@ class Branch:
 
         if self.terminates_via is not None:
             result['terminates_via'] = self.terminates_via
+
+        if self.synthetic:
+            result['synthetic'] = self.synthetic
 
         if self.metadata:
             result['metadata'] = self.metadata
@@ -678,6 +689,9 @@ class Branch:
             result['is_terminal'] = self.is_terminal
             if self.terminates_via:
                 result['terminates_via'] = self.terminates_via
+
+        if self.synthetic:
+            result['synthetic'] = self.synthetic
 
         if self.metadata:
             result['metadata'] = self.metadata

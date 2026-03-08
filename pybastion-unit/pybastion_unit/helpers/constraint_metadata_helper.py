@@ -364,7 +364,6 @@ def populate_constraint_relationships(branches: list) -> None:
     condition_branches = [
         b for b in branches
         if b.constraint is not None
-           and b.constraint.constraint_type == 'condition'
            and b.constraint.polarity is not None
     ]
 
