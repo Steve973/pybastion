@@ -698,11 +698,13 @@ class BoolOpDecomposer:
 
         # Wrap only short-circuit branches with target_line
         wrapped = []
-        for outcome, call_node in results:
+        for result in results:
+            outcome = result.outcome
+            call_node = result.call_node
             if 'is true → uses' in outcome or 'is false → uses' in outcome:
-                wrapped.append((outcome, call_node, next_stmt_line))
+                wrapped.append(DecomposerResult(outcome, call_node, next_stmt_line))
             else:
-                wrapped.append((outcome, call_node))
+                wrapped.append(DecomposerResult(outcome, call_node))
         return wrapped
 
 

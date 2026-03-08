@@ -30,6 +30,7 @@ classifiers = [
 package-mode = false
 
 [tool.poetry.dependencies]
+pybastion-common =      { path = "pybastion-common", develop = true }
 pybastion-unit =        { path = "pybastion-unit", develop = true }
 pybastion-integration = { path = "pybastion-integration", develop = true }
 

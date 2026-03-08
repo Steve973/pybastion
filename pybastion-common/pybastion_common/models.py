@@ -15,6 +15,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from typing_extensions import Self
+
 from pybastion_unit.shared.callable_id_generation import ei_id_to_integration_id
 from pybastion_unit.shared.knowledge_base import (
     BOUNDARY_OPERATIONS,
@@ -1221,3 +1223,78 @@ class CallableEntry:
             spec['integration'] = integration
 
         return spec
+
+
+class ExternalNodeType(Enum):
+    """
+    Type of external placeholder node (when category=EXTERNAL_NODE).
+
+    STDLIB: Standard library call (sorted, dict, list, etc.)
+    EXTLIB: External library call (requests, numpy, etc.)
+    BOUNDARY: System boundary call (file I/O, network, database, etc.)
+    UNKNOWN: Unresolved or unknown call type
+    """
+    STDLIB = "stdlib"
+    EXTLIB = "extlib"
+    BOUNDARY = "boundary"
+    UNKNOWN = "unknown"
+
+    @classmethod
+    def from_integration_category(cls, category: str) -> Self:
+        """
+        Map integration category string to ExternalNodeType.
+
+        Args:
+            category: Integration category ('stdlib', 'extlib', 'boundary', 'unknown')
+
+        Returns:
+            Corresponding ExternalNodeType
+        """
+        mapping = {
+            'stdlib': cls.STDLIB,
+            'extlib': cls.EXTLIB,
+            'boundary': cls.BOUNDARY,
+            'unknown': cls.UNKNOWN,
+        }
+        return mapping.get(category, cls.UNKNOWN)
+
+
+class ExternalTargetType(Enum):
+    STDLIB = "EXTERNAL_STDLIB"
+    EXTLIB = "EXTERNAL_EXTLIB"
+    BOUNDARY = "EXTERNAL_BOUNDARY"
+    UNKNOWN = "EXTERNAL_UNKNOWN"
+
+    @classmethod
+    def from_category(cls, category: str) -> Self:
+        """Map integration category to external target type."""
+        mapping = {
+            'stdlib': cls.STDLIB,
+            'extlib': cls.EXTLIB,
+            'boundary': cls.BOUNDARY,
+            'unknown': cls.UNKNOWN,
+            'interunit': cls.UNKNOWN,  # Fallback for unresolved interunit
+        }
+        return mapping.get(category, cls.UNKNOWN)
+
+
+class CallNodeType(Enum):
+    """
+    Type of concrete call node (when category=CALL_NODE).
+
+    LOCAL: Callable in the same module
+    INTERUNIT: Callable in a different module within the same project
+    """
+    LOCAL = "local"
+    INTERUNIT = "interunit"
+
+
+class NodeCategory(Enum):
+    """
+    High-level category of a CFG node.
+
+    CALL_NODE: Concrete callable that can be traced into (local or interunit)
+    EXTERNAL_NODE: Placeholder for external calls requiring fixtures/mocks
+    """
+    CALL_NODE = "call_node"
+    EXTERNAL_NODE = "external_node"

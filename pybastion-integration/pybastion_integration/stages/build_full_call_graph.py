@@ -40,7 +40,7 @@ from pybastion_integration.config import StoreInConfig
 
 # Import node types - adjust path as needed for your project
 try:
-    from pybastion_integration.shared.models import NodeCategory, CallNodeType, ExternalNodeType
+    from pybastion_common.models import NodeCategory, CallNodeType, ExternalNodeType
 except ModuleNotFoundError:
     # For testing - use local definitions
     from enum import Enum

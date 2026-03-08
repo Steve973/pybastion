@@ -10,8 +10,8 @@ import ast
 import re
 from typing import Any
 
-from pybastion_unit.shared.models import BranchConstraint
-from pybastion_unit.helpers.smt_path_checker import ConstraintExtractor
+from pybastion_common.models import BranchConstraint
+from pybastion_common.smt_path_checker import ConstraintExtractor
 
 
 def _compute_smt_expr(expr: str, polarity: bool | None) -> str | None:
@@ -138,6 +138,7 @@ def parse_outcome_to_constraint(
         branch_id: Branch/EI ID for traceability
         line: Line number in source code
         call_node: The AST Call node if this outcome is from a function call, else None
+        skips_lines: List of line numbers to skip when parsing the outcome
 
     Returns:
         BranchConstraint object if constraint exists, None otherwise
@@ -311,6 +312,7 @@ def parse_outcome_to_constraint(
                 constraint_expr = match.group(1)
 
     operation_target = ast.unparse(call_node.func) if call_node is not None else None
+    skip_eis = [str(skips_line) for skips_line in skips_lines if skips_line is not None] if skips_lines else None
 
     # If we found constraint data, create BranchConstraint
     if constraint_type and constraint_expr:
@@ -326,7 +328,7 @@ def parse_outcome_to_constraint(
             operands=operands,
             smt_expr=smt_expr,
             operation_target=operation_target,
-            skips_eis=[str(line) for line in skips_lines if line is not None],
+            skips_eis=skip_eis,
             metadata=metadata
         )
 
@@ -514,6 +516,13 @@ def enrich_outcome_with_constraint(
         result = outcome.replace('executes: ', '')
 
     # Extract constraint
-    constraint = parse_outcome_to_constraint(outcome, stmt, branch_id=ei_id, line=line, call_node=call_node, skips_lines)
+    constraint = parse_outcome_to_constraint(
+        outcome,
+        stmt,
+        branch_id=ei_id,
+        line=line,
+        call_node=call_node,
+        skips_lines=skips_lines
+    )
 
     return condition, result, constraint

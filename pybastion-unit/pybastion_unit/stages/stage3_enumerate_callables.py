@@ -12,12 +12,15 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from pybastion_common.models import Branch, CallableEntry, ParamSpec, TypeRef, IntegrationCandidate
+from pybastion_common.smt_path_checker import filter_feasible_paths
 from pybastion_unit.helpers.decorator_processing import (
     extract_callable_decorators,
     has_effect,
     validate_feature_co_occurrences
 )
-from pybastion_unit.helpers.smt_path_checker import filter_feasible_paths
+# from pybastion_unit.helpers.smt_path_checker import filter_feasible_paths
 from pybastion_unit.shared.callable_id_generation import (
     generate_class_id,
     generate_function_id,
@@ -25,7 +28,7 @@ from pybastion_unit.shared.callable_id_generation import (
     generate_method_id
 )
 from pybastion_unit.shared.knowledge_base import PYTHON_BUILTINS, BUILTIN_METHODS
-from pybastion_unit.shared.models import Branch, TypeRef, ParamSpec, IntegrationCandidate, CallableEntry
+# from pybastion_unit.shared.models import Branch, TypeRef, ParamSpec, IntegrationCandidate, CallableEntry
 
 
 def load_callable_inventory(filepath: Path | None) -> dict[str, str]:
@@ -156,6 +159,27 @@ def enumerate_paths(
     return paths
 
 
+def _is_skippable_by_any_earlier_branch(
+    branches: list[dict],
+    terminal_idx: int,
+    terminal_branch: dict,
+) -> bool:
+    terminal_id = terminal_branch.get("id")
+
+    for earlier in branches[:terminal_idx]:
+        if earlier.get("is_terminal", False):
+            continue
+
+        skips: set[str] = set(
+            earlier.get("constraint", {}).get("skips_eis", []) or []
+        )
+
+        if terminal_id in skips:
+            return True
+
+    return False
+
+
 def mark_terminal_exits(entries: list[dict[str, Any]]) -> None:
     """
     Mark implicit returns and yields as terminal exits.
@@ -200,14 +224,26 @@ def mark_terminal_exits(entries: list[dict[str, Any]]) -> None:
         #    - If it is not an exception, then it is an explicit return and we're done.
         #  2. If the line is not designated as terminal, then it is an implicit return.
         #    - Mark it as terminal and set the terminates_via to 'implicit-return'.
-        for branch in reversed(sorted_branches):
+        for branch_idx, branch in enumerate(reversed(sorted_branches)):
+            branch_id = branch.get('id')
+            print(f"Processing branch {branch_id}...")
             if branch.get('is_terminal', False):
+                print(f"Branch {branch_id} is already marked as terminal")
                 terminates_via = branch.get('terminates_via', '')
                 if terminates_via in ('exception', 'raise'):
+                    print(f"Branch {branch_id} terminates via: {terminates_via} (continue)")
+                    continue
+                print(f"Branch {branch_id} does not terminate via exception, processing...")
+
+                # Normal terminal: only stop if nothing earlier can skip it
+                if _is_skippable_by_any_earlier_branch(branches, branch_idx, branch):
+                    print(f"Branch {branch_id} is already marked as terminal, and is skippable (continue)")
                     continue
                 else:
+                    print(f"Branch {branch_id} is already marked as terminal, and is not skippable (break)")
                     break
             else:
+                print(f"Branch {branch_id} is not marked as terminal, processing...")
                 # Skip statement types that shouldn't have implicit returns
                 stmt_type = branch.get('stmt_type')
                 if stmt_type in ('Raise', 'Return', 'Break', 'Continue'):
@@ -215,18 +251,33 @@ def mark_terminal_exits(entries: list[dict[str, Any]]) -> None:
 
                 # Special handling for "For" loops
                 if stmt_type == 'For':
+                    print(f"Processing For loop branch {branch_id} that is not terminal")
                     constraint = branch.get('constraint', {})
                     # 0-iteration loops with no next_ei are implicit returns
                     if constraint.get('polarity') is False and not branch.get('next_ei'):
+                        print(f"Branch {branch_id} has False polarity and no next_ei, so it is an implicit return (break)")
                         branch['is_terminal'] = True
                         branch['terminates_via'] = 'implicit-return'
-                        break
+                        if _is_skippable_by_any_earlier_branch(branches, branch_idx, branch):
+                            print(f"Branch {branch_id} is now marked as terminal, and is skippable (continue)")
+                            continue
+                        else:
+                            print(f"Branch {branch_id} is now marked as terminal, and is not skippable (break)")
+                            break
+
                     else:
+                        print(f"Branch {branch_id} is not markable as an implicit return (continue)")
                         continue
 
-                branch['is_terminal'] = True
-                branch['terminates_via'] = 'implicit-return'
-                break
+                if branch.get('next_ei') is None:
+                    branch['is_terminal'] = True
+                    branch['terminates_via'] = 'implicit-return'
+                    if _is_skippable_by_any_earlier_branch(branches, branch_idx, branch):
+                        print(f"Branch {branch_id} is now marked as terminal, and is skippable (continue)")
+                        continue
+                    else:
+                        print(f"Branch {branch_id} is now marked as terminal, and is not skippable (break)")
+                        break
 
     # Process all entries recursively
     for entry in entries:

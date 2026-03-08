@@ -15,12 +15,12 @@ from typing import Any
 
 import yaml
 
+from pybastion_common.models import Branch
 from pybastion_unit.helpers.constraint_metadata_helper import enrich_outcome_with_constraint, \
     populate_constraint_relationships
 from pybastion_unit.helpers.decorator_processing import extract_statement_decorators
 from pybastion_unit.helpers.statement_decomposition import decompose_statement, DecomposerResult
 from pybastion_unit.shared.callable_id_generation import generate_function_id, generate_ei_id, generate_assignment_id
-from pybastion_unit.shared.models import Branch
 
 ENUM_BASES = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag'}
 
@@ -149,35 +149,70 @@ def get_all_statements(node: ast.AST) -> list[ast.stmt]:
     return statements
 
 
-def get_statements_with_next_sibling(node: ast.AST) -> list[tuple[ast.stmt, int | None]]:
-    """
-    Get all statements with their next sibling's line number.
+import ast
 
-    Returns list of (statement, next_sibling_line) tuples.
-    For each statement, next_sibling_line is the line number of the next
-    statement at the same nesting level, or None if it's the last in its block.
-    """
-    result: list[tuple[ast.stmt, int | None]] = []
 
-    def visit_block(statements: list[ast.stmt]):
-        """Process a block of sibling statements."""
+def get_statements_with_next_sibling(
+    node: ast.AST,
+) -> list[tuple[ast.stmt, list[int] | None]]:
+    """
+    Get all statements with their continuation line chain.
+
+    Returns list of (statement, next_lines) tuples.
+
+    For each statement:
+    - if it has a next sibling in the current block, that line is prepended
+      to the inherited outer continuation chain
+    - if it does not, it inherits the outer continuation chain unchanged
+    - if there is no continuation at any level, next_lines is None
+
+    Ordering of next_lines:
+    - index 0 is the nearest continuation line
+    - index 1 is the next outer continuation line
+    - etc.
+    """
+    result: list[tuple[ast.stmt, list[int] | None]] = []
+
+    def prepend_next_line(
+        local_next_line: int | None,
+        inherited_next_lines: list[int] | None,
+    ) -> list[int] | None:
+        if local_next_line is None:
+            return inherited_next_lines
+        if inherited_next_lines is None:
+            return [local_next_line]
+        return [local_next_line, *inherited_next_lines]
+
+    def visit_block(
+        statements: list[ast.stmt],
+        inherited_next_lines: list[int] | None = None,
+    ) -> None:
         for i, stmt in enumerate(statements):
-            # Get next sibling's line
-            next_line = statements[i + 1].lineno if i + 1 < len(statements) else None
-            print(f"DEBUG: stmt at line {stmt.lineno}, next_line={next_line}")
-            result.append((stmt, next_line))
+            local_next_line = (
+                statements[i + 1].lineno if i + 1 < len(statements) else None
+            )
 
-            # Recursively visit nested blocks
-            if isinstance(stmt, (ast.If, ast.For, ast.While, ast.With, ast.Try)):
-                if hasattr(stmt, 'body'):
-                    visit_block(stmt.body)
-                if hasattr(stmt, 'orelse'):
-                    visit_block(stmt.orelse)
-                if isinstance(stmt, ast.Try):
-                    for handler in stmt.handlers:
-                        visit_block(handler.body)
-                    if stmt.finalbody:
-                        visit_block(stmt.finalbody)
+            next_lines = prepend_next_line(local_next_line, inherited_next_lines)
+            result.append((stmt, next_lines))
+
+            if isinstance(stmt, ast.If):
+                visit_block(stmt.body, next_lines)
+                visit_block(stmt.orelse, next_lines)
+
+
+            elif isinstance(stmt, (ast.For, ast.While)):
+                visit_block(stmt.body, next_lines)
+                visit_block(stmt.orelse, next_lines)
+
+            elif isinstance(stmt, ast.With):
+                visit_block(stmt.body, next_lines)
+
+            elif isinstance(stmt, ast.Try):
+                visit_block(stmt.body, next_lines)
+                visit_block(stmt.orelse, next_lines)
+                for handler in stmt.handlers:
+                    visit_block(handler.body, next_lines)
+                visit_block(stmt.finalbody, next_lines)
 
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)):
         visit_block(node.body)
@@ -280,6 +315,17 @@ def enumerate_function_eis(
                 print(f"DEBUG: No match found for {branch.id} target_line={branch.target_line}")
             # Clear target_line after resolution
             branch.target_line = None
+
+    # Resolve skips_eis from line number strings to EI IDs
+    for branch in branches:
+        if branch.constraint and branch.constraint.skips_eis:
+            resolved_ids = []
+            for line_str in branch.constraint.skips_eis:
+                line_num = int(line_str)
+                for target_branch in branches:
+                    if target_branch.line == line_num:
+                        resolved_ids.append(target_branch.id)
+            branch.constraint.skips_eis = resolved_ids
 
     return FunctionResult(
         name=func_node.name,

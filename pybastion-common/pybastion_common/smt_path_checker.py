@@ -16,7 +16,7 @@ from z3 import (
     IntVal, RealVal, BoolVal, StringVal
 )
 
-from pybastion_unit.shared.models import Branch
+from pybastion_common.models import Branch
 
 
 @dataclass
