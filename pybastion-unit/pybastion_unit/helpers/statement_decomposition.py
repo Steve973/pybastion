@@ -22,6 +22,7 @@ from __future__ import annotations
 import ast
 from dataclasses import dataclass
 
+from pybastion_common.models import ConditionalTarget
 from pybastion_unit.shared.knowledge_base import NO_OP_CALLS
 
 
@@ -30,6 +31,7 @@ class DecomposerResult:
     outcome: str
     call_node: ast.Call | None = None
     target_line: int | None = None
+    conditional_targets: list[ConditionalTarget] | None = None
     skips_lines: list[int] | None = None
 
     def __len__(self) -> int:
@@ -106,9 +108,13 @@ def operation_eis(expressions: list[ast.AST]) -> list[DecomposerResult]:
     return results
 
 
-def semantic(outcome: str) -> DecomposerResult:
+def semantic(outcome: str, next_stmt_lines: list[int] | None = None) -> DecomposerResult:
     """Convenience wrapper for a semantic EI with no associated call node."""
-    return DecomposerResult(outcome, None)
+    next_line = (
+        next_stmt_lines[0]
+        if next_stmt_lines and len(next_stmt_lines) == 1
+        else None)
+    return DecomposerResult(outcome, None, next_line)
 
 
 # ============================================================================
@@ -131,6 +137,22 @@ class StatementDecomposer:
     """
 
     @classmethod
+    def _select_target_from_chain(
+            cls,
+            next_stmt_lines: list[int] | None,
+            skips_lines: list[int] | None
+    ) -> int | None:
+        if not next_stmt_lines:
+            return None
+        if not skips_lines:
+            return next_stmt_lines[0]
+
+        for line in next_stmt_lines:
+            if line not in skips_lines:
+                return line
+        return None
+
+    @classmethod
     def expressions(cls, stmt: ast.stmt) -> list[ast.AST]:
         """
         Return the AST sub-expressions to extract operations from.
@@ -145,7 +167,7 @@ class StatementDecomposer:
             cls,
             stmt: ast.stmt,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         """
         Return the statement-specific semantic EIs.
@@ -161,7 +183,7 @@ class StatementDecomposer:
             cls,
             stmt: ast.stmt,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         """
         Template method: operation EIs followed by semantic EIs.
@@ -169,7 +191,7 @@ class StatementDecomposer:
         Do not override this — override expressions() and semantic_eis().
         """
         results = operation_eis(cls.expressions(stmt))
-        results.extend(cls.semantic_eis(stmt, source_lines, next_stmt_line))
+        results.extend(cls.semantic_eis(stmt, source_lines, next_stmt_lines))
         return results
 
 
@@ -203,74 +225,155 @@ class IfDecomposer(StatementDecomposer):
             cls,
             stmt: ast.If,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
-        condition = ast.unparse(stmt.test)
+        """
+        Generate EIs for if/elif/else chain.
 
-        # Get target lines for branches
-        true_target = stmt.body[0].lineno if stmt.body else None
-        false_target = stmt.orelse[0].lineno if stmt.orelse else next_stmt_line
+        Creates:
+        1. Evaluation EIs - one per if/elif with conditional_targets
+        2. Outcome EIs - descriptive outcomes for each branch
+        """
+        results = []
 
-        # Get line ranges for skips_eis
-        if_body_lines = []
-        if stmt.body:
-            if_body_lines = list(range(stmt.body[0].lineno, stmt.body[-1].end_lineno + 1))
+        # ================================================================
+        # Pass 1: Create evaluation EIs for if/elif chain
+        # ================================================================
+        current = stmt
+        chain_index = 0
 
-        else_body_lines = []
-        if stmt.orelse:
-            else_body_lines = list(range(stmt.orelse[0].lineno, stmt.orelse[-1].end_lineno + 1))
+        while current and isinstance(current, ast.If):
+            condition = ast.unparse(current.test)
 
-        # Check if condition is a BoolOp - if so, delegate to BoolOpDecomposer
-        if isinstance(stmt.test, ast.BoolOp):
-            # ... existing BoolOp handling ...
-            pass
+            # True target: first line of this branch's body
+            true_target = current.body[0].lineno if current.body else None
 
-        # Rest of existing logic for non-BoolOp conditions
-        if stmt.body:
-            first = stmt.body[0]
+            # False target: next elif, else, or continuation after entire chain
+            if current.orelse:
+                if isinstance(current.orelse[0], ast.If):
+                    # Next elif - target is that elif's line (which will have its own eval EI)
+                    false_target = current.orelse[0].lineno
+                else:
+                    # Else block - target is first line of else
+                    false_target = current.orelse[0].lineno
+            else:
+                # No else - skip to next statement after entire chain
+                # Need to skip all bodies in the chain
+                all_body_lines = []
+                temp = stmt
+                while temp and isinstance(temp, ast.If):
+                    if temp.body:
+                        all_body_lines.extend(range(temp.body[0].lineno, temp.body[-1].end_lineno + 1))
+                    if temp.orelse and isinstance(temp.orelse[0], ast.If):
+                        temp = temp.orelse[0]
+                    else:
+                        break
+                false_target = cls._select_target_from_chain(next_stmt_lines, all_body_lines)
 
-            if isinstance(first, ast.Raise):
-                exc = ast.unparse(first.exc) if first.exc else "exception"
-                return [
-                    DecomposerResult(
-                        outcome=f"{condition} is true → raises {exc}",
+            # Create evaluation EI
+            results.append(DecomposerResult(
+                outcome=f"evaluates {condition}",
+                conditional_targets=[
+                    ConditionalTarget(
+                        condition=True,  # It's a boolean now
                         target_line=true_target,
-                        skips_lines=else_body_lines  # True skips else
+                        is_terminal=(true_target is None),
+                        terminates_via='implicit-return' if true_target is None else None
                     ),
-                    DecomposerResult(
-                        outcome=f"{condition} is false → continues",
+                    ConditionalTarget(
+                        condition=False,
                         target_line=false_target,
-                        skips_lines=if_body_lines  # False skips if body
+                        is_terminal=(false_target is None),
+                        terminates_via='implicit-return' if false_target is None else None
                     )
                 ]
+            ))
 
-            if isinstance(first, ast.Return):
-                ret_val = ast.unparse(first.value) if first.value else "None"
-                return [
-                    DecomposerResult(
-                        outcome=f"{condition} is true → returns {ret_val}",
-                        target_line=true_target,
-                        skips_lines=else_body_lines
-                    ),
-                    DecomposerResult(
-                        outcome=f"{condition} is false → continues",
-                        target_line=false_target,
-                        skips_lines=if_body_lines
-                    )
-                ]
+            # Move to next elif
+            if current.orelse and isinstance(current.orelse[0], ast.If):
+                current = current.orelse[0]
+                chain_index += 1
+            else:
+                break
 
-        return [
-            DecomposerResult(
-                outcome=f"{condition} is true → enters if block",
-                target_line=true_target,
-                skips_lines=else_body_lines
-            ),
-            DecomposerResult(
-                outcome=f"{condition} is false → continues",
-                target_line=false_target,
-                skips_lines=if_body_lines
-            )
-        ]
+        # ================================================================
+        # Pass 2: Create outcome EIs for each branch
+        # ================================================================
+        current = stmt
+
+        while current and isinstance(current, ast.If):
+            condition = ast.unparse(current.test)
+
+            # Get line ranges for skips
+            if_body_lines = []
+            if current.body:
+                if_body_lines = list(range(current.body[0].lineno, current.body[-1].end_lineno + 1))
+
+            else_body_lines = []
+            if current.orelse:
+                else_body_lines = list(range(current.orelse[0].lineno, current.orelse[-1].end_lineno + 1))
+
+            # Get target lines
+            true_target = current.body[0].lineno if current.body else None
+
+            if current.orelse:
+                false_target = current.orelse[0].lineno
+            else:
+                false_target = cls._select_target_from_chain(next_stmt_lines, if_body_lines)
+
+            # Create outcome EIs based on what's in the body
+            if current.body:
+                first = current.body[0]
+
+                if isinstance(first, ast.Raise):
+                    exc = ast.unparse(first.exc) if first.exc else "exception"
+                    results.extend([
+                        DecomposerResult(
+                            outcome=f"{condition} is true → raises {exc}",
+                            target_line=true_target,
+                            skips_lines=else_body_lines
+                        ),
+                        DecomposerResult(
+                            outcome=f"{condition} is false → continues",
+                            target_line=false_target,
+                            skips_lines=if_body_lines
+                        )
+                    ])
+                elif isinstance(first, ast.Return):
+                    ret_val = ast.unparse(first.value) if first.value else "None"
+                    results.extend([
+                        DecomposerResult(
+                            outcome=f"{condition} is true → returns {ret_val}",
+                            target_line=true_target,
+                            skips_lines=else_body_lines
+                        ),
+                        DecomposerResult(
+                            outcome=f"{condition} is false → continues",
+                            target_line=false_target,
+                            skips_lines=if_body_lines
+                        )
+                    ])
+                else:
+                    results.extend([
+                        DecomposerResult(
+                            outcome=f"{condition} is true → enters if block",
+                            target_line=true_target,
+                            skips_lines=else_body_lines
+                        ),
+                        DecomposerResult(
+                            outcome=f"{condition} is false → continues",
+                            target_line=false_target,
+                            skips_lines=if_body_lines
+                        )
+                    ])
+
+            # Move to next elif
+            if current.orelse and isinstance(current.orelse[0], ast.If):
+                current = current.orelse[0]
+            else:
+                break
+
+        return results
 
 
 class MatchDecomposer(StatementDecomposer):
@@ -287,7 +390,7 @@ class MatchDecomposer(StatementDecomposer):
             cls,
             stmt: ast.Match,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         results: list[DecomposerResult] = []
         for i, case in enumerate(stmt.cases):
@@ -320,7 +423,7 @@ class ForDecomposer(StatementDecomposer):
             cls,
             stmt: ast.For,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         target = ast.unparse(stmt.target)
         iter_expr = ast.unparse(stmt.iter)
@@ -335,7 +438,11 @@ class ForDecomposer(StatementDecomposer):
 
         # Get target lines for branches
         loop_body_target = stmt.body[0].lineno if stmt.body else None
-        exit_target = stmt.orelse[0].lineno if stmt.orelse else next_stmt_line
+        exit_target = (
+            stmt.orelse[0].lineno
+            if stmt.orelse
+            else cls._select_target_from_chain(next_stmt_lines, body_lines)
+        )
 
         return [
             DecomposerResult(
@@ -370,7 +477,7 @@ class WhileDecomposer(StatementDecomposer):
             cls,
             stmt: ast.While,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         condition = ast.unparse(stmt.test)
 
@@ -384,7 +491,11 @@ class WhileDecomposer(StatementDecomposer):
 
         # Get target lines
         loop_body_target = stmt.body[0].lineno if stmt.body else None
-        exit_target = stmt.orelse[0].lineno if stmt.orelse else next_stmt_line
+        exit_target = (
+            stmt.orelse[0].lineno
+            if stmt.orelse
+            else cls._select_target_from_chain(next_stmt_lines, body_lines)
+        )
 
         return [
             DecomposerResult(
@@ -418,13 +529,13 @@ class TryDecomposer(StatementDecomposer):
             cls,
             stmt: ast.Try,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         # Success case goes to finalbody or next stmt after try
         if stmt.finalbody:
             success_target = stmt.finalbody[0].lineno
         else:
-            success_target = next_stmt_line
+            success_target = next_stmt_lines[0] if next_stmt_lines else None
 
         results: list[DecomposerResult] = [
             DecomposerResult("try block executes successfully", None, success_target)
@@ -457,7 +568,7 @@ class WithDecomposer(StatementDecomposer):
             cls,
             stmt: ast.With,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         contexts = [ast.unparse(item.context_expr) for item in stmt.items]
         context_str = ', '.join(contexts)
@@ -487,30 +598,30 @@ class AssignDecomposer(StatementDecomposer):
             cls,
             stmt: ast.Assign,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         if isinstance(stmt.value, ast.ListComp):
-            return ComprehensionDecomposer.decompose_comp(stmt.value, "list", "[]")
+            return ComprehensionDecomposer.decompose_comp(stmt.value, "[]")
         if isinstance(stmt.value, ast.DictComp):
-            return ComprehensionDecomposer.decompose_comp(stmt.value, "dict", "{}")
+            return ComprehensionDecomposer.decompose_comp(stmt.value, "{}")
         if isinstance(stmt.value, ast.SetComp):
-            return ComprehensionDecomposer.decompose_comp(stmt.value, "set", "set()")
+            return ComprehensionDecomposer.decompose_comp(stmt.value, "set()")
         if isinstance(stmt.value, ast.IfExp):
             return TernaryDecomposer.decompose_ternary(stmt.value)
         if isinstance(stmt.value, ast.BoolOp):
-            return BoolOpDecomposer.decompose_boolop(stmt.value, next_stmt_line)
+            return BoolOpDecomposer.decompose_boolop(stmt.value, next_stmt_lines)
 
         ops = extract_all_operations(stmt.value)
 
         if not ops:
             line_text = source_lines[stmt.lineno - 1].strip() if stmt.lineno <= len(source_lines) else ast.unparse(stmt)
-            return [semantic(f"executes → {line_text}")]
+            return [semantic(f"executes → {line_text}", next_stmt_lines)]
 
         results = operation_eis([stmt.value])
 
         if len(ops) > 1:
             line_text = source_lines[stmt.lineno - 1].strip() if stmt.lineno <= len(source_lines) else ast.unparse(stmt)
-            results.append(semantic(f"all operations succeed → {line_text}"))
+            results.append(semantic(f"all operations succeed → {line_text}", next_stmt_lines))
 
         return results
 
@@ -527,13 +638,13 @@ class AugAssignDecomposer(StatementDecomposer):
             cls,
             stmt: ast.AugAssign,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         ops = extract_all_operations(stmt.value) if stmt.value else []
         if ops:
             return []
         line_text = source_lines[stmt.lineno - 1].strip() if stmt.lineno <= len(source_lines) else ast.unparse(stmt)
-        return [semantic(f"executes → {line_text}")]
+        return [semantic(f"executes → {line_text}", next_stmt_lines)]
 
 
 class AnnAssignDecomposer(StatementDecomposer):
@@ -548,13 +659,13 @@ class AnnAssignDecomposer(StatementDecomposer):
             cls,
             stmt: ast.AnnAssign,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         ops = extract_all_operations(stmt.value) if stmt.value else []
         if ops:
             return []
         line_text = source_lines[stmt.lineno - 1].strip() if stmt.lineno <= len(source_lines) else ast.unparse(stmt)
-        return [semantic(f"executes → {line_text}")]
+        return [semantic(f"executes → {line_text}", next_stmt_lines)]
 
 
 # ============================================================================
@@ -568,7 +679,6 @@ class ComprehensionDecomposer:
     def decompose_comp(
             cls,
             comp: ast.ListComp | ast.DictComp | ast.SetComp,
-            comp_type: str,
             empty_repr: str
     ) -> list[DecomposerResult]:
         # Operations in iterators and filter conditions
@@ -623,7 +733,11 @@ class BoolOpDecomposer:
     """Helper for short-circuit boolean expression (or/and) EI generation."""
 
     @classmethod
-    def decompose_boolop(cls, boolop: ast.BoolOp, next_stmt_line: int | None = None) -> list[DecomposerResult]:
+    def decompose_boolop(
+            cls,
+            boolop: ast.BoolOp,
+            next_stmt_lines: list[int] | None = None
+    ) -> list[DecomposerResult]:
         """
         Decompose `x or y` and `x and y` into short-circuit branches.
 
@@ -702,7 +816,8 @@ class BoolOpDecomposer:
             outcome = result.outcome
             call_node = result.call_node
             if 'is true → uses' in outcome or 'is false → uses' in outcome:
-                wrapped.append(DecomposerResult(outcome, call_node, next_stmt_line))
+                target = next_stmt_lines[0] if next_stmt_lines else None
+                wrapped.append(DecomposerResult(outcome, call_node, target))
             else:
                 wrapped.append(DecomposerResult(outcome, call_node))
         return wrapped
@@ -720,7 +835,7 @@ class ReturnDecomposer(StatementDecomposer):
             cls,
             stmt: ast.Return,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         if not stmt.value:
             return [semantic("executes → returns None")]
@@ -744,7 +859,7 @@ class RaiseDecomposer(StatementDecomposer):
             cls,
             stmt: ast.Raise,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         if not stmt.exc:
             return [semantic("executes → re-raises current exception")]
@@ -767,11 +882,11 @@ class AssertDecomposer(StatementDecomposer):
             cls,
             stmt: ast.Assert,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         test = ast.unparse(stmt.test)
         return [
-            semantic(f"assert {test}: holds → continues"),
+            semantic(f"assert {test}: holds → continues", next_stmt_lines),
             semantic(f"assert {test}: fails → raises AssertionError"),
         ]
 
@@ -787,7 +902,7 @@ class ExprDecomposer(StatementDecomposer):
             cls,
             stmt: ast.Expr,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         # Skip docstrings
         if isinstance(stmt.value, ast.Constant) and isinstance(stmt.value.value, str):
@@ -812,10 +927,10 @@ class DeleteDecomposer(StatementDecomposer):
             cls,
             stmt: ast.Delete,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         targets = ', '.join(ast.unparse(t) for t in stmt.targets)
-        return [semantic(f"executes: del {targets}")]
+        return [semantic(f"executes: del {targets}", next_stmt_lines)]
 
 
 class PassDecomposer(StatementDecomposer):
@@ -824,9 +939,9 @@ class PassDecomposer(StatementDecomposer):
             cls,
             stmt: ast.Pass,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
-        return [semantic("executes: pass")]
+        return [semantic("executes: pass", next_stmt_lines)]
 
 
 class BreakDecomposer(StatementDecomposer):
@@ -835,9 +950,9 @@ class BreakDecomposer(StatementDecomposer):
             cls,
             stmt: ast.Break,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
-        return [semantic("executes: break")]
+        return [semantic("executes: break", next_stmt_lines)]
 
 
 class ContinueDecomposer(StatementDecomposer):
@@ -846,9 +961,9 @@ class ContinueDecomposer(StatementDecomposer):
             cls,
             stmt: ast.Continue,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
-        return [semantic("executes: continue")]
+        return [semantic("executes: continue", next_stmt_lines)]
 
 
 class ImportDecomposer(StatementDecomposer):
@@ -857,10 +972,10 @@ class ImportDecomposer(StatementDecomposer):
             cls,
             stmt: ast.Import,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         modules = ', '.join(alias.name for alias in stmt.names)
-        return [semantic(f"executes: import {modules}")]
+        return [semantic(f"executes: import {modules}", next_stmt_lines)]
 
 
 class ImportFromDecomposer(StatementDecomposer):
@@ -869,11 +984,11 @@ class ImportFromDecomposer(StatementDecomposer):
             cls,
             stmt: ast.ImportFrom,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         module = stmt.module or ""
         names = ', '.join(alias.name for alias in stmt.names)
-        return [semantic(f"executes: from {module} import {names}")]
+        return [semantic(f"executes: from {module} import {names}", next_stmt_lines)]
 
 
 class GlobalDecomposer(StatementDecomposer):
@@ -882,10 +997,10 @@ class GlobalDecomposer(StatementDecomposer):
             cls,
             stmt: ast.Global,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         names = ', '.join(stmt.names)
-        return [semantic(f"executes → global {names}")]
+        return [semantic(f"executes → global {names}", next_stmt_lines)]
 
 
 class NonlocalDecomposer(StatementDecomposer):
@@ -894,10 +1009,10 @@ class NonlocalDecomposer(StatementDecomposer):
             cls,
             stmt: ast.Nonlocal,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         names = ', '.join(stmt.names)
-        return [semantic(f"executes → nonlocal {names}")]
+        return [semantic(f"executes → nonlocal {names}", next_stmt_lines)]
 
 
 class DefaultDecomposer(StatementDecomposer):
@@ -908,10 +1023,10 @@ class DefaultDecomposer(StatementDecomposer):
             cls,
             stmt: ast.stmt,
             source_lines: list[str],
-            next_stmt_line: int | None = None
+            next_stmt_lines: list[int] | None = None
     ) -> list[DecomposerResult]:
         line_text = source_lines[stmt.lineno - 1].strip() if stmt.lineno <= len(source_lines) else ast.unparse(stmt)
-        return [semantic(f"executes → {line_text}")]
+        return [semantic(f"executes → {line_text}", next_stmt_lines)]
 
 
 # ============================================================================
@@ -967,7 +1082,8 @@ _DEFAULT_DECOMPOSER = DefaultDecomposer
 def decompose_statement(
         stmt: ast.stmt,
         source_lines: list[str],
-        next_stmt_line: int | None = None) -> list[DecomposerResult]:
+        next_stmt_lines: list[int] | None = None
+) -> list[DecomposerResult]:
     """
     Decompose a statement into (outcome_str, ast.Call | None) or (outcome_str, ast.Call | None, target_line) tuples.
 
@@ -980,10 +1096,10 @@ def decompose_statement(
     Args:
         stmt: AST statement node to decompose
         source_lines: Source file lines for line-text extraction
-        next_stmt_line: Line number of the next statement after this one (for control flow exits)
+        next_stmt_lines: Line numbers of the next statements after this one (for control flow exits)
 
     Returns:
         List of EIOutcome or LineOutcome tuples
     """
     decomposer = _DECOMPOSERS.get(type(stmt), _DEFAULT_DECOMPOSER)
-    return decomposer.decompose(stmt, source_lines, next_stmt_line)
+    return decomposer.decompose(stmt, source_lines, next_stmt_lines)

@@ -437,14 +437,17 @@ def handle_call_ei(
     for j in range(ei_index + 1, len(all_branches)):
         next_branch = all_branches[j]
         # Skip terminal exception branches
-        if next_branch.get('is_terminal') and next_branch.get('terminates_via') in ('exception', 'raise'):
+        if (
+                next_branch.get('is_terminal') and
+                next_branch.get('terminates_via') == 'exception'
+        ):
             continue
         next_ei_id = next_branch['id']
         next_ei_index = j
         break
 
     # Check if next_ei_id is part of a conditional group and collect all alternatives
-    next_ei_ids = []
+    next_ei_ids: list[str] | None = []
 
     if next_ei_id:
         next_branch = all_branches[next_ei_index]
@@ -453,7 +456,6 @@ def handle_call_ei(
         if next_constraint and next_constraint.get('polarity') is not None:
             # Collect all alternatives with same expr
             expr = next_constraint.get('expr')
-            next_ei_ids = []
 
             # Look backward from next_idx to find earlier alternatives
             for j in range(next_ei_index - 1, -1, -1):
@@ -899,10 +901,34 @@ def process_callable(
     for i, branch in enumerate(branches):
         ei_id = branch['id']
 
-        if branch.get('is_terminal'):
-            # Terminal - no outgoing edges
+        if branch.get('is_terminal') and branch.get('terminates_via') in ('raise', 'exception'):
+            # Terminal exception - no outgoing edges
             continue
 
+        # Check for conditional branching (if/elif evaluation EIs)
+        conditional_targets = branch.get('conditional_targets')
+        if conditional_targets:
+            for ct in conditional_targets:
+                if ct.get('is_terminal'):
+                    # This branch terminates - no edge needed
+                    continue
+
+                target_ei = ct.get('target_ei')
+                if target_ei:
+                    cfg.add_edge(
+                        ei_id,
+                        target_ei,
+                        edge_type='branch',
+                        condition=ct.get('condition')
+                    )
+            continue  # Done with this EI
+        # Check if branch has explicit next_ei
+        next_ei_target = branch.get('next_ei')
+        if next_ei_target:
+            cfg.add_edge(ei_id, next_ei_target, edge_type='sequential')
+            continue
+
+        # Only if no next_ei, do the old inference (shouldn't happen anymore)
         constraint = branch.get('constraint', {})
         has_operation_target = (
                 constraint and

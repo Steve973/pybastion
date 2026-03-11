@@ -151,9 +151,6 @@ def get_all_statements(node: ast.AST) -> list[ast.stmt]:
     return statements
 
 
-import ast
-
-
 def get_statements_with_next_sibling(
         node: ast.AST,
 ) -> list[tuple[ast.stmt, list[int] | None]]:
@@ -303,15 +300,15 @@ def enumerate_function_eis(
     # Get all statements with their next sibling info
     statements_with_next = get_statements_with_next_sibling(func_node)
 
-    for stmt, next_stmt_line in statements_with_next:
+    for stmt, next_stmt_lines in statements_with_next:
         # Filter to only this function's line range
         if not (func_node.lineno <= stmt.lineno <= func_node.end_lineno):
             continue
         if stmt == func_node:
             continue
 
-        print(f"DEBUG: About to decompose stmt at line {stmt.lineno}, next_stmt_line={next_stmt_line}")
-        outcomes: list[DecomposerResult] = decompose_statement(stmt, source_lines, next_stmt_line)
+        print(f"DEBUG: About to decompose stmt at line {stmt.lineno}, next_stmt_lines={str(next_stmt_lines)}")
+        outcomes: list[DecomposerResult] = decompose_statement(stmt, source_lines, next_stmt_lines)
 
         # Extract decorators for this statement
         stmt_decorators = extract_statement_decorators(stmt, source_lines)
@@ -321,6 +318,7 @@ def enumerate_function_eis(
                 outcome = decompose_result.outcome
                 call_node = decompose_result.call_node
                 target_line = decompose_result.target_line
+                conditional_targets = decompose_result.conditional_targets
                 skips_lines = decompose_result.skips_lines
                 ei_id = generate_ei_id(callable_id, ei_counter)
 
@@ -338,6 +336,7 @@ def enumerate_function_eis(
                         stmt_type=type(stmt).__name__,
                         decorators=stmt_decorators,
                         target_line=target_line,
+                        conditional_targets=conditional_targets,
                     )
                 )
 
@@ -357,6 +356,16 @@ def enumerate_function_eis(
             # Clear target_line after resolution
             branch.target_line = None
 
+    # Resolve conditional_targets target_line to target_ei
+    for branch in branches:
+        if branch.conditional_targets:
+            for ct in branch.conditional_targets:
+                if ct.target_line:
+                    for target_branch in branches:
+                        if target_branch.line == ct.target_line:
+                            ct.target_ei = target_branch.id
+                            break
+
     # Resolve skips_eis from line number strings to EI IDs
     for branch in branches:
         if branch.constraint and branch.constraint.skips_eis:
@@ -367,6 +376,27 @@ def enumerate_function_eis(
                     if target_branch.line == line_num:
                         resolved_ids.append(target_branch.id)
             branch.constraint.skips_eis = resolved_ids
+
+    # After all branches are created and target_line resolution is done
+    for i, branch in enumerate(branches):
+        # Skip if already has next_ei or is terminal
+        if branch.next_ei or branch.is_terminal:
+            continue
+
+        # Get this branch's skipped EIs
+        skips = set(branch.constraint.skips_eis if branch.constraint and branch.constraint.skips_eis else [])
+
+        # Find the next non-terminal EI that this branch doesn't skip
+        for j in range(i + 1, len(branches)):
+            next_branch = branches[j]
+            # Skip terminal branches
+            if next_branch.is_terminal:
+                continue
+            # Skip if this branch explicitly skips that EI
+            if next_branch.id in skips:
+                continue
+            branch.next_ei = next_branch.id
+            break
 
     return FunctionResult(
         name=func_node.name,
@@ -463,7 +493,7 @@ class CallableFinder(ast.NodeVisitor):
         # Get callable ID from inventory or generate
         self._enumerate_and_record(node, fqn)
 
-        # NEW: Process nested functions
+        # Process nested functions
         self.fqn_stack.append(node.name)
         item: ast.FunctionDef | ast.AsyncFunctionDef
         for item in ast.walk(node):
@@ -501,7 +531,7 @@ class CallableFinder(ast.NodeVisitor):
         ei_counter = 0
 
         # No next statement for single assignment
-        outcomes: list[DecomposerResult] = decompose_statement(node, self.source_lines, next_stmt_line=None)
+        outcomes: list[DecomposerResult] = decompose_statement(node, self.source_lines, next_stmt_lines=None)
 
         if outcomes:
             for decompose_result in outcomes:

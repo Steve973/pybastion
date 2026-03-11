@@ -130,12 +130,11 @@ def find_feature_flows(cfg: nx.DiGraph,
             end_kwargs = get_decorator_kwargs(end_data, 'FeatureEnd')
             end_feature_name = end_kwargs.get('name', 'unnamed')
 
-            print(f"\nChecking pair: {feature_name} ({start_id}) -> {end_feature_name} ({end_id})")
-
             # Only match if feature names align
             if feature_name != end_feature_name and feature_name != 'unnamed' and end_feature_name != 'unnamed':
-                print(f"  Skipping: feature names don't match")
                 continue
+
+            print(f"\nFeature tracing: {feature_name} ({start_id} -> {end_id})")
 
             # Find paths based on strategy
             try:
@@ -341,42 +340,6 @@ def group_similar_paths(cfg: nx.DiGraph, paths: list[list[str]],
 # YAML Output
 # =============================================================================
 
-
-def condense_path(cfg: nx.DiGraph, path: list[str]) -> list[str]:
-    """Filter path to callable boundaries, branches, and integration points."""
-    condensed = []
-
-    for ei_id in path:
-        node_data = cfg.nodes[ei_id]
-
-        # Keep if it's:
-        # - Entry EI (E0000/E0001)
-        # - Exit EI (terminal return/yield)
-        # - Has a call edge (integration point)
-        # - Has branch constraint (conditional decision)
-
-        ei_num = int(ei_id.split('_E')[-1])
-        is_entry = ei_num in (0, 1)
-        is_exit = (
-                node_data.get('is_terminal') and
-                node_data.get('terminates_via') in
-                ('return', 'implicit-return', 'yield')
-        )
-
-        has_call = any(
-            edge_data.get('edge_type') == 'call'
-            for _, _, edge_data in cfg.out_edges(ei_id, data=True)
-        )
-
-        constraint = node_data.get('constraint', {})
-        is_branch = constraint and constraint.get('constraint_type') in ('condition', 'iteration')
-
-        if is_entry or is_exit or has_call or is_branch:
-            condensed.append(ei_id)
-
-    return condensed
-
-
 def extract_path_metadata(cfg: nx.DiGraph, path: list[str]) -> dict[str, Any]:
     """Extract call chain, integration points, and branch points from a path."""
     call_chain = []
@@ -442,7 +405,88 @@ def extract_path_metadata(cfg: nx.DiGraph, path: list[str]) -> dict[str, Any]:
     }
 
 
-def build_output_dict(cfg: nx.DiGraph, flows: list[dict[str, Any]]) -> dict[str, Any]:
+def filter_path(cfg: nx.DiGraph, path: list[str], filter_mode: str) -> list[str]:
+    """
+    Filter path based on specified strategy.
+
+    Filter modes:
+    - 'none': No filtering, return full path
+    - 'boundaries': Only callable entry/exit points
+    - 'integration': Call sites + branch points + callable boundaries
+    - 'branches': Conditional/loop decisions + callable boundaries
+    - 'calls': Call sites + callable boundaries
+
+    Args:
+        cfg: Control flow graph
+        path: Full path (list of node IDs)
+        filter_mode: Filter strategy to apply
+
+    Returns:
+        Filtered path
+    """
+    if filter_mode == 'none':
+        return path
+
+    filtered = []
+
+    for ei_id in path:
+        node_data = cfg.nodes[ei_id]
+
+        # Always keep external nodes
+        if node_data.get('category') == 'external_node':
+            filtered.append(ei_id)
+            continue
+
+        # Check if entry EI (E0000)
+        ei_suffix = ei_id.split('_E')[-1]
+        is_entry = ei_suffix == '0000'
+
+        # Check if exit EI (terminal return/yield)
+        is_exit = (
+                node_data.get('is_terminal', False) and
+                node_data.get('terminates_via') in ('return', 'implicit-return', 'yield')
+        )
+
+        # Check if this EI has a call edge
+        has_call = any(
+            edge_data.get('edge_type') == 'call'
+            for _, _, edge_data in cfg.out_edges(ei_id, data=True)
+        )
+
+        # Check if this is a branch/conditional point
+        constraint = node_data.get('constraint', {})
+        is_branch = (
+                constraint and
+                isinstance(constraint, dict) and
+                constraint.get('constraint_type') in ('condition', 'iteration')
+        )
+
+        # Apply filter strategy
+        keep = False
+
+        if filter_mode == 'boundaries':
+            # Only entry/exit of callables
+            keep = is_entry or is_exit
+
+        elif filter_mode == 'integration':
+            # Calls + branches + boundaries
+            keep = is_entry or is_exit or has_call or is_branch
+
+        elif filter_mode == 'branches':
+            # Conditionals/loops + boundaries
+            keep = is_entry or is_exit or is_branch
+
+        elif filter_mode == 'calls':
+            # Call sites + boundaries
+            keep = is_entry or is_exit or has_call
+
+        if keep:
+            filtered.append(ei_id)
+
+    return filtered
+
+
+def build_output_dict(cfg: nx.DiGraph, flows: list[dict[str, Any]], filter_mode: str = 'none') -> dict[str, Any]:
     """Build the complete output dictionary for YAML serialization."""
     output = {
         'flows': [],
@@ -467,10 +511,15 @@ def build_output_dict(cfg: nx.DiGraph, flows: list[dict[str, Any]]) -> dict[str,
         # Add all paths with metadata
         for i, path in enumerate(paths, start=1):
             path_id = f"{feature_name}_path_{i:03d}"
-            path_metadata = extract_path_metadata(cfg, path)
+
+            # Apply filtering if requested
+            filtered_path = filter_path(cfg, path, filter_mode)
+
+            path_metadata = extract_path_metadata(cfg, filtered_path)
             flow_entry['paths'].append({
                 'path_id': path_id,
                 'length': len(path),
+                'filtered_length': len(filtered_path),
                 'call_chain': path_metadata['call_chain'],
                 'integration_points': path_metadata['integration_points'],
                 'branch_points': path_metadata['branch_points'],
@@ -543,6 +592,14 @@ def main(argv: list[str] | None = None) -> int:
         help='Similarity threshold for grouping (default: 0.8)'
     )
     ap.add_argument(
+        '--filter',
+        choices=['none', 'boundaries', 'integration', 'branches', 'calls'],
+        default='none',
+        help='Path filtering: none (all nodes), boundaries (entry/exit only), '
+             'integration (calls+branches+boundaries), branches (conditionals+boundaries), '
+             'calls (call sites+boundaries)'
+    )
+    ap.add_argument(
         '--target-root',
         type=Path,
         help='Target project root (sets config defaults)'
@@ -603,7 +660,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.verbose:
         print("\nAnalyzing path similarities and building output...")
 
-    output_dict = build_output_dict(cfg, flows)
+    output_dict = build_output_dict(cfg, flows, filter_mode=args.filter)
 
     # Write YAML
     output_path.parent.mkdir(parents=True, exist_ok=True)

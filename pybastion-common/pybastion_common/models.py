@@ -451,6 +451,39 @@ class BranchConstraint:
 
 
 @dataclass
+class ConditionalTarget:
+    condition: bool
+    target_line: int
+    target_ei: str | None = None
+    is_terminal: bool = False
+    terminates_via: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary format for serialization."""
+        result: dict[str, Any] = {'condition': self.condition}
+
+        if self.is_terminal:
+            result['is_terminal'] = self.is_terminal
+            result['terminates_via'] = self.terminates_via
+        else:
+            result['target_line'] = self.target_line
+            result['target_ei'] = self.target_ei
+
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        """Parse from dictionary format."""
+        return cls(
+            condition=data['condition'],
+            target_line=data.get('target_line'),
+            target_ei=data.get('target_ei'),
+            is_terminal=data.get('is_terminal', False),
+            terminates_via=data.get('terminates_via'),
+        )
+
+
+@dataclass
 class Branch:
     """
     Execution Item (EI) representation with constraint tracking.
@@ -502,6 +535,12 @@ class Branch:
     """
     ID of the next EI in the execution flow. Resolved from target_line.
     None for terminal EIs or single assignment statements.
+    """
+
+    conditional_targets: list[ConditionalTarget] | None = None
+    """
+    List of conditional targets for this EI when it is a branching EI,
+    like an 'if' statement.
     """
 
     is_terminal: bool = False
@@ -614,6 +653,11 @@ class Branch:
             stmt_type=data.get('stmt_type') if 'stmt_type' in data else None,
             target_line=data.get('target_line') if 'target_line' in data else None,
             next_ei=data.get('next_ei') if 'next_ei' in data else None,
+            conditional_targets=(
+                [ConditionalTarget.from_dict(ct) for ct in data['conditional_targets']]
+                if data.get('conditional_targets')
+                else None
+            ),
             is_terminal=data.get('is_terminal', False),
             terminates_via=data.get('terminates_via'),
             synthetic=data.get('synthetic', False),
@@ -634,6 +678,9 @@ class Branch:
 
         if self.next_ei is not None:
             result['next_ei'] = self.next_ei
+
+        if self.conditional_targets is not None:
+            result['conditional_targets'] = [ct.to_dict() for ct in self.conditional_targets]
 
         if self.decorators:
             result['decorators'] = self.decorators
@@ -681,6 +728,11 @@ class Branch:
 
         if self.next_ei is not None:
             result['next_ei'] = self.next_ei
+
+        if self.conditional_targets is not None:
+            result['conditional_targets'] = [
+                ct.to_dict() for ct in self.conditional_targets
+            ]
 
         if self.decorators:
             result['decorators'] = self.decorators
