@@ -13,7 +13,8 @@ from pathlib import Path
 import networkx as nx
 
 
-FUNC_ID_PATTERN: re.Pattern[str] = re.compile(r"^U[0-9A-F]{10}_[FM]\d{3}")
+FUNC_ID_PATTERN: re.Pattern[str] = re.compile(r"^U[0-9A-F]{10}(?:_C\d{3})?_[FM]\d{3}")
+ENTRY_ID_PATTERN: re.Pattern[str] = re.compile(r"^U[0-9A-F]{10}.+_E000[01]")
 
 
 def load_cfg(cfg_path: Path) -> nx.DiGraph:
@@ -159,10 +160,11 @@ def find_exit_eis(cfg: nx.DiGraph, callable_id: str):
 
 def check_callable_integrity(cfg, callable_id):
     """Check if a callable has valid internal structure."""
-    entry = f"{callable_id}_E000" + ("0" if FUNC_ID_PATTERN.match(callable_id) else "1")
+    entry = f"{callable_id}_E0000"
 
     # Check entry exists
     if not cfg.has_node(entry):
+        print(f"Callable {callable_id} has no entry node: {entry}")
         return {
             'callable_id': callable_id,
             'valid': False,
@@ -179,6 +181,7 @@ def check_callable_integrity(cfg, callable_id):
             exits.append(nid)
 
     if not exits:
+        print(f"Callable {callable_id} has no exit nodes: {exits}")
         return {
             'callable_id': callable_id,
             'valid': False,

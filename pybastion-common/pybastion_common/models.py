@@ -11,6 +11,7 @@ These models define contracts between pipeline stages:
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -26,6 +27,37 @@ from pybastion_unit.shared.knowledge_base import (
     STDLIB_CLASSES,
     is_stdlib_module,
 )
+
+
+@dataclass(slots=True)
+class UnitIndexEntry:
+    id: str
+    kind: str
+    name: str
+    fully_qualified_name: str
+    parent_id: str | None
+    owner_id: str
+    lineno: int
+    end_lineno: int
+    ordinal_within_parent: int
+    child_ids: list[str] = field(default_factory=list)
+    is_async: bool = False
+
+
+@dataclass(slots=True)
+class UnitIndex:
+    unit_id: str
+    fully_qualified_name: str
+    filepath: str
+    language: str
+    source_hash: str
+    entries: list[UnitIndexEntry]
+
+
+@dataclass(slots=True)
+class ProjectIndex:
+    source_root: str
+    units: list[UnitIndex]
 
 
 # =============================================================================
@@ -46,6 +78,66 @@ class TypeRef:
     args: list[TypeRef] = field(default_factory=list)
 
     @classmethod
+    def from_annotation_ast(cls, annotation: ast.expr | None) -> Self | None:
+        if annotation is None:
+            return None
+
+        if isinstance(annotation, ast.Name):
+            return cls(name=annotation.id)
+
+        if isinstance(annotation, ast.Attribute):
+            return cls(name=ast.unparse(annotation))
+
+        if isinstance(annotation, ast.Subscript):
+            base_type = ast.unparse(annotation.value)
+            args: list[TypeRef] = []
+
+            if isinstance(annotation.slice, ast.Tuple):
+                for elt in annotation.slice.elts:
+                    arg_ref = cls.from_annotation_ast(elt)
+                    if arg_ref is not None:
+                        args.append(arg_ref)
+            else:
+                arg_ref = cls.from_annotation_ast(annotation.slice)
+                if arg_ref is not None:
+                    args.append(arg_ref)
+
+            if base_type in {"Optional", "typing.Optional"} and len(args) == 1:
+                return cls(name="Union", args=[args[0], cls(name="None")])
+
+            return cls(name=base_type, args=args)
+
+        if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+            left_ref = cls.from_annotation_ast(annotation.left)
+            right_ref = cls.from_annotation_ast(annotation.right)
+
+            args: list[TypeRef] = []
+            if left_ref is not None:
+                args.append(left_ref)
+            if right_ref is not None:
+                args.append(right_ref)
+
+            return cls(name="Union", args=args)
+
+        if isinstance(annotation, ast.Constant):
+            if annotation.value is None:
+                return cls(name="None")
+            return cls(name=repr(annotation.value))
+
+        if isinstance(annotation, ast.Tuple):
+            return cls(name=ast.unparse(annotation))
+
+        return cls(name=ast.unparse(annotation))
+
+    @classmethod
+    def from_annotation_string(cls, annotation: str) -> Self:
+        expr = ast.parse(annotation, mode="eval").body
+        result = cls.from_annotation_ast(expr)
+        if result is None:
+            raise ValueError(f"Could not parse annotation: {annotation}")
+        return result
+
+    @classmethod
     def from_dict(cls, data: dict[str, Any] | None) -> TypeRef | None:
         """Parse from inventory dict format."""
         if not data:
@@ -61,6 +153,29 @@ class TypeRef:
         if self.args:
             result['args'] = [arg.to_dict() for arg in self.args]
         return result
+
+    def to_annotation_string(self) -> str:
+        if not self.args:
+            return self.name
+
+        if self.name == "Union":
+            return " | ".join(arg.to_annotation_string() for arg in self.args)
+
+        inner = ", ".join(arg.to_annotation_string() for arg in self.args)
+        return f"{self.name}[{inner}]"
+
+    def to_resolver_string(self) -> str:
+        if not self.args:
+            return self.name
+
+        if self.name == "Union":
+            non_none_args = [arg for arg in self.args if arg.name != "None"]
+            if len(non_none_args) == 1:
+                return non_none_args[0].to_resolver_string()
+            return " | ".join(arg.to_resolver_string() for arg in self.args)
+
+        inner = ", ".join(arg.to_annotation_string() for arg in self.args)
+        return f"{self.name}::{inner}"
 
 
 @dataclass
@@ -237,22 +352,15 @@ class BranchConstraint:
     implies: list[str] = field(default_factory=list)
     """
     Branch IDs that this constraint logically implies.
-    Example: 'x > 10' implies 'x > 5'
+    Example: '123' implies '234'
     Used for constraint propagation and optimization.
     """
 
     excludes: list[str] = field(default_factory=list)
     """
     Branch IDs that this constraint excludes (mutually exclusive).
-    Example: 'x > 10' excludes 'x < 5'
+    Example: '123' excludes '234'
     Used for conflict detection.
-    """
-
-    skips_eis: list[str] = field(default_factory=list)
-    """
-    Branch IDs that this constraint skips when the constraint
-    conditions cause code to be bypassed. E.g., when a for loop
-    has zero items, it would bypass the loop body.
     """
 
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -401,9 +509,6 @@ class BranchConstraint:
         if self.excludes:
             result['excludes'] = self.excludes
 
-        if self.skips_eis:
-            result['skips_eis'] = self.skips_eis
-
         if self.metadata:
             result['metadata'] = self.metadata
 
@@ -427,7 +532,6 @@ class BranchConstraint:
             exception_types=data.get('exception_types', []),
             implies=data.get('implies', []),
             excludes=data.get('excludes', []),
-            skips_eis=data.get('skips_eis', []),
             metadata=data.get('metadata', {})
         )
 
@@ -451,23 +555,26 @@ class BranchConstraint:
 
 
 @dataclass
-class ConditionalTarget:
-    condition: bool
-    target_line: int
-    target_ei: str | None = None
-    is_terminal: bool = False
-    terminates_via: str | None = None
+class TargetHint:
+    line: int | None = None
+    role: str | None = None
+    polarity: bool | None = None
+    expr: str | None = None
+    stmt_type: str | None = None
+    skips_lines: list[int] = field(default_factory=list)
+    skips_eis: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary format for serialization."""
-        result: dict[str, Any] = {'condition': self.condition}
-
-        if self.is_terminal:
-            result['is_terminal'] = self.is_terminal
-            result['terminates_via'] = self.terminates_via
-        else:
-            result['target_line'] = self.target_line
-            result['target_ei'] = self.target_ei
+        result: dict[str, Any] = {}
+        if self.line is not None:
+            result['line'] = self.line
+        if self.role is not None:
+            result['role'] = self.role
+        if self.polarity is not None:
+            result['polarity'] = self.polarity
+        if self.expr is not None:
+            result['expr'] = self.expr
 
         return result
 
@@ -475,11 +582,197 @@ class ConditionalTarget:
     def from_dict(cls, data: dict[str, Any]) -> Self:
         """Parse from dictionary format."""
         return cls(
-            condition=data['condition'],
+            line=data.get('line'),
+            role=data.get('role'),
+            polarity=data.get('polarity'),
+            expr=data.get('expr'),
+            stmt_type=data.get('stmt_type'),
+        )
+
+
+@dataclass
+class StatementOutcome:
+    outcome: str
+    target_line: int | None = None
+    target_ei: str | None = None
+    skips_lines: list[int] = field(default_factory=list)
+    skips_eis: list[str] = field(default_factory=list)
+    is_terminal: bool = False
+    terminates_via: str | None = None
+    target_hint: TargetHint | None = None
+    synthetic: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary format for serialization."""
+        result: dict[str, Any] = {
+            'outcome': self.outcome,
+        }
+        if self.target_line is not None:
+            result['target_line'] = self.target_line
+        if self.target_ei is not None:
+            result['target_ei'] = self.target_ei
+        if self.is_terminal:
+            result['is_terminal'] = self.is_terminal
+            result['terminates_via'] = self.terminates_via
+        if self.skips_lines:
+            result['skips_lines'] = self.skips_lines
+        if self.skips_eis:
+            result['skips_eis'] = self.skips_eis
+        if self.target_hint is not None:
+            result['target_hint'] = self.target_hint.to_dict()
+        if self.synthetic:
+            result['synthetic'] = self.synthetic
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        """Parse from dictionary format."""
+        return cls(
+            outcome=data['outcome'],
             target_line=data.get('target_line'),
             target_ei=data.get('target_ei'),
             is_terminal=data.get('is_terminal', False),
             terminates_via=data.get('terminates_via'),
+            skips_lines=data.get('skips_lines', []),
+            skips_eis=data.get('skips_eis', []),
+            target_hint=TargetHint.from_dict(data.get('target_hint', {})) if data.get('target_hint') else None,
+            synthetic=data.get('synthetic', False),
+        )
+
+
+@dataclass
+class DisruptiveOutcome:
+    outcome: str
+    target_line: int | None = None
+    target_ei: str | None = None
+    skips_lines: list[int] = field(default_factory=list)
+    skips_eis: list[str] = field(default_factory=list)
+    is_terminal: bool = False
+    terminates_via: str | None = None
+    target_hint: TargetHint | None = None
+    synthetic: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary format for serialization."""
+        result: dict[str, Any] = {
+            'outcome': self.outcome,
+        }
+        if self.target_line is not None:
+            result['target_line'] = self.target_line
+        if self.target_ei is not None:
+            result['target_ei'] = self.target_ei
+        if self.is_terminal:
+            result['is_terminal'] = self.is_terminal
+            result['terminates_via'] = self.terminates_via
+        if self.skips_lines:
+            result['skips_lines'] = self.skips_lines
+        if self.skips_eis:
+            result['skips_eis'] = self.skips_eis
+        if self.target_hint is not None:
+            result['target_hint'] = self.target_hint.to_dict()
+        if self.synthetic:
+            result['synthetic'] = self.synthetic
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        """Parse from dictionary format."""
+        return cls(
+            outcome=data['outcome'],
+            target_line=data.get('target_line'),
+            target_ei=data.get('target_ei'),
+            is_terminal=data.get('is_terminal', False),
+            terminates_via=data.get('terminates_via'),
+            skips_lines=data.get('skips_lines', []),
+            skips_eis=data.get('skips_eis', []),
+            target_hint=TargetHint.from_dict(data.get('target_hint', {})) if data.get('target_hint') else None,
+            synthetic=data.get('synthetic', False),
+        )
+
+
+@dataclass
+class ConditionalTarget:
+    target_condition: str
+    condition_result: bool
+    target_line: int | None = None
+    target_ei: str | None = None
+    skips_lines: list[int] = field(default_factory=list)
+    skips_eis: list[str] = field(default_factory=list)
+    is_terminal: bool = False
+    terminates_via: str | None = None
+    target_hint: TargetHint | None = None
+    synthetic: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary format for serialization."""
+        result: dict[str, Any] = {
+            'target_condition': self.target_condition,
+            'condition_result': self.condition_result,
+        }
+        if self.target_line is not None:
+            result['target_line'] = self.target_line
+        if self.target_ei is not None:
+            result['target_ei'] = self.target_ei
+        if self.is_terminal:
+            result['is_terminal'] = self.is_terminal
+            result['terminates_via'] = self.terminates_via
+        if self.skips_lines:
+            result['skips_lines'] = self.skips_lines
+        if self.skips_eis:
+            result['skips_eis'] = self.skips_eis
+        if self.target_hint is not None:
+            result['target_hint'] = self.target_hint.to_dict()
+        if self.synthetic:
+            result['synthetic'] = self.synthetic
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        """Parse from dictionary format."""
+        return cls(
+            target_condition=data['target_condition'],
+            condition_result=data['condition_result'],
+            target_line=data.get('target_line'),
+            target_ei=data.get('target_ei'),
+            is_terminal=data.get('is_terminal', False),
+            terminates_via=data.get('terminates_via'),
+            skips_lines=data.get('skips_lines', []),
+            skips_eis=data.get('skips_eis', []),
+            target_hint=TargetHint.from_dict(data.get('target_hint', {})) if data.get('target_hint') else None,
+            synthetic=data.get('synthetic', False),
+        )
+
+
+@dataclass(frozen=True)
+class OwnerInfo:
+    stmt_type: str | None = None
+    region: str | None = None
+    line: int | None = None
+    branch_id: str | None = None
+    expr: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to dictionary format for serialization."""
+        result: dict[str, Any] = {}
+        if self.stmt_type is not None:
+            result['stmt_type'] = self.stmt_type
+        if self.region is not None:
+            result['region'] = self.region
+        if self.line is not None:
+            result['line'] = self.line
+        if self.branch_id is not None:
+            result['branch_id'] = self.branch_id
+        return result
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> Self:
+        """Parse from dictionary format."""
+        return cls(
+            stmt_type=data.get('stmt_type'),
+            region=data.get('region'),
+            line=data.get('line'),
+            branch_id=data.get('branch_id'),
+            expr=data.get('expr'),
         )
 
 
@@ -492,8 +785,11 @@ class Branch:
     Called "Branch" in current code but represents an Execution Item.
 
     Enhanced with constraint metadata to enable path feasibility analysis.
+
+    In the newer model, Branch is a container for concrete outcome objects rather
+    than a flattened holder of top-level target/terminal fields.
     """
-    # Core fields
+
     id: str
     """Unique identifier for the EI."""
 
@@ -503,10 +799,8 @@ class Branch:
     condition: str
     """Condition expression for the EI."""
 
-    outcome: str
-    """
-    Describes the EI outcome.
-    """
+    description: str
+    """Human-readable description of the EI itself."""
 
     decorators: list[dict[str, Any]] = field(default_factory=list)
     """
@@ -525,48 +819,36 @@ class Branch:
     Used for special handling of certain statement types.
     """
 
-    target_line: int | None = None
+    statement_outcome: StatementOutcome | None = None
     """
-    Line number where execution continues for control flow branches.
-    None for terminal EIs or single assignment statements.
+    Singular normal statement outcome for this EI, when applicable.
+
+    This is used for straight-line statements or other cases where the EI
+    has one primary modeled outcome.
     """
 
-    next_ei: str | None = None
+    disruptive_outcomes: list[DisruptiveOutcome] | None = None
     """
-    ID of the next EI in the execution flow. Resolved from target_line.
-    None for terminal EIs or single assignment statements.
+    Disruptive outcomes for this EI, if any.
+
+    These represent outcomes that disrupt the normal execution path, such as
+    propagated exceptions or other non-standard flow outcomes.
     """
 
     conditional_targets: list[ConditionalTarget] | None = None
     """
-    List of conditional targets for this EI when it is a branching EI,
-    like an 'if' statement.
+    Conditional targets for this EI when it is a branching EI.
+
+    Each ConditionalTarget represents one path-conditioned outcome of evaluating
+    the control condition, including short-circuit-distinct boolean outcomes.
     """
 
-    is_terminal: bool = False
+    owner_info: OwnerInfo | None = None
     """
-    Whether this EI terminates execution flow:
-    - Returns (explicit return statement)
-    - Raises (explicit raise or unhandled exception propagation)
-    - Breaks/continues (loop control flow)
-    Terminal EIs have no successors in the CFG.
-    """
-
-    terminates_via: str | None = None
-    """
-    How this EI terminates, if is_terminal=True:
-    - 'return': explicit return
-    - 'raise': explicit raise
-    - 'exception': unhandled exception propagation
-    - 'break': loop break
-    - 'continue': loop continue
-    """
-
-    synthetic: bool = False
-    """
-    Whether this EI is synthetic and not directly derived from source code:
-    - True: synthetic EI, e.g., function invocation/start
-    - False: derived from actual source code
+    Information about the owner of the EI, if available.
+    
+    For example, if a statement is part of a for loop, this field will contain
+    information about the loop's control statement.
     """
 
     metadata: dict[str, Any] = field(default_factory=dict)
@@ -578,135 +860,96 @@ class Branch:
     """
 
     def __post_init__(self) -> None:
-        """Validate branch structure and derive terminal status."""
+        """Validate branch structure."""
         if not self.id:
             raise ValueError("Branch ID cannot be empty")
         if self.line <= 0:
             raise ValueError(f"Invalid line number: {self.line}")
 
-        # Auto-detect terminal status from outcome if not explicitly set
-        if not self.is_terminal:
-            self.is_terminal, self.terminates_via = self._detect_terminal_status()
+        present = sum([
+            self.statement_outcome is not None,
+            bool(self.conditional_targets),
+            bool(self.disruptive_outcomes),
+        ])
 
-    def _detect_terminal_status(self) -> tuple[bool, str | None]:
-        """
-        Auto-detect if this EI is terminal based on outcome text.
-
-        Returns:
-            (is_terminal, terminates_via)
-        """
-        outcome_lower = self.outcome.lower()
-
-        # Check for explicit return
-        if any(indicator in outcome_lower for indicator in [
-            '→ returns',
-            'returns ',
-            '→ return ',
-            'return value'
-        ]):
-            # Only mark as terminal if from a Return statement
-            if self.stmt_type == 'Return':
-                return True, 'return'
-
-        # Check for explicit yield (YIELDS ARE TERMINAL - they return control to caller)
-        if any(indicator in outcome_lower for indicator in [
-            '→ yields',
-            'yields ',
-            '→ yield ',
-            'yield from',
-        ]):
-            return True, 'yield'
-
-        # Check for explicit raise
-        if any(indicator in outcome_lower for indicator in [
-            '→ raises',
-            'raises ',
-            '→ raise ',
-        ]):
-            # Only mark as terminal if from a Raise statement
-            if self.stmt_type == 'Raise':
-                return True, 'raise'
-
-        # Check for exception propagation
-        if 'exception propagates' in outcome_lower:
-            return True, 'exception'
-
-        # Check for loop control
-        if '→ breaks' in outcome_lower or 'break' in outcome_lower:
-            return True, 'break'
-
-        if '→ continues' in outcome_lower:
-            return True, 'continue'
-
-        return False, None
+        if present == 0:
+            raise ValueError(
+                "Branch must have at least one of: statement_outcome, "
+                "conditional_targets, disruptive_outcomes"
+            )
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> Branch:
+    def from_dict(cls, data: dict[str, Any]) -> Self:
         """Parse from inventory dict format."""
         return cls(
-            id=data['id'],
-            line=data['line'],
-            condition=data['condition'],
-            outcome=data['outcome'],
-            decorators=data.get('decorators', []),
-            constraint=BranchConstraint.from_dict(data['constraint']) if data.get('constraint') else None,
-            stmt_type=data.get('stmt_type') if 'stmt_type' in data else None,
-            target_line=data.get('target_line') if 'target_line' in data else None,
-            next_ei=data.get('next_ei') if 'next_ei' in data else None,
-            conditional_targets=(
-                [ConditionalTarget.from_dict(ct) for ct in data['conditional_targets']]
-                if data.get('conditional_targets')
-                else None
+            id=data["id"],
+            line=data["line"],
+            condition=data["condition"],
+            description=data["description"],
+            decorators=data.get("decorators", []),
+            constraint=(
+                BranchConstraint.from_dict(data["constraint"])
+                if data.get("constraint") else None
             ),
-            is_terminal=data.get('is_terminal', False),
-            terminates_via=data.get('terminates_via'),
-            synthetic=data.get('synthetic', False),
-            metadata=data.get('metadata', {})
+            stmt_type=data.get("stmt_type"),
+            statement_outcome=(
+                StatementOutcome.from_dict(data["statement_outcome"])
+                if data.get("statement_outcome") else None
+            ),
+            conditional_targets=(
+                [ConditionalTarget.from_dict(ct) for ct in data["conditional_targets"]]
+                if data.get("conditional_targets") else None
+            ),
+            disruptive_outcomes=(
+                [DisruptiveOutcome.from_dict(o) for o in data["disruptive_outcomes"]]
+                if data.get("disruptive_outcomes") else None
+            ),
+            owner_info=(
+                OwnerInfo.from_dict(data["owner_info"]) if data.get("owner_info") else None
+            ),
+            metadata=data.get("metadata", {}),
         )
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to inventory dict format."""
         result: dict[str, Any] = {
-            'id': self.id,
-            'line': self.line,
-            'condition': self.condition,
-            'outcome': self.outcome,
+            "id": self.id,
+            "line": self.line,
+            "condition": self.condition,
+            "description": self.description,
         }
 
-        if self.target_line is not None:
-            result['target_line'] = self.target_line
-
-        if self.next_ei is not None:
-            result['next_ei'] = self.next_ei
-
-        if self.conditional_targets is not None:
-            result['conditional_targets'] = [ct.to_dict() for ct in self.conditional_targets]
-
         if self.decorators:
-            result['decorators'] = self.decorators
+            result["decorators"] = self.decorators
 
-        # Include constraint object if present
         if self.constraint is not None:
-            result['constraint'] = self.constraint.to_dict()
+            result["constraint"] = self.constraint.to_dict()
 
         if self.stmt_type is not None:
-            result['stmt_type'] = self.stmt_type
+            result["stmt_type"] = self.stmt_type
 
-        if self.is_terminal:
-            result['is_terminal'] = self.is_terminal
+        if self.statement_outcome is not None:
+            result["statement_outcome"] = self.statement_outcome.to_dict()
 
-        if self.terminates_via is not None:
-            result['terminates_via'] = self.terminates_via
+        if self.conditional_targets:
+            result["conditional_targets"] = [
+                ct.to_dict() for ct in self.conditional_targets
+            ]
 
-        if self.synthetic:
-            result['synthetic'] = self.synthetic
+        if self.disruptive_outcomes:
+            result["disruptive_outcomes"] = [
+                o.to_dict() for o in self.disruptive_outcomes
+            ]
+
+        if self.owner_info:
+            result["owner_info"] = self.owner_info.to_dict()
 
         if self.metadata:
-            result['metadata'] = self.metadata
+            result["metadata"] = self.metadata
 
         return result
 
-    def to_ledger_ei_spec(self) -> dict[str, str | bool | list[str] | dict[str, Any]]:
+    def to_ledger_ei_spec(self) -> dict[str, Any]:
         """
         Transform to ledger EiSpec format.
 
@@ -714,39 +957,35 @@ class Branch:
         and test generation. Uses snake_case for consistency.
         """
         result: dict[str, Any] = {
-            'id': self.id,
-            'condition': self.condition,
-            'outcome': self.outcome,
+            "id": self.id,
+            "condition": self.condition,
+            "description": self.description,
         }
 
-        # Include constraint object if present
         if self.constraint is not None:
-            result['constraint'] = self.constraint.to_dict()
+            result["constraint"] = self.constraint.to_dict()
 
         if self.stmt_type is not None:
-            result['stmt_type'] = self.stmt_type
+            result["stmt_type"] = self.stmt_type
 
-        if self.next_ei is not None:
-            result['next_ei'] = self.next_ei
+        if self.statement_outcome is not None:
+            result["statement_outcome"] = self.statement_outcome.to_dict()
 
-        if self.conditional_targets is not None:
-            result['conditional_targets'] = [
+        if self.conditional_targets:
+            result["conditional_targets"] = [
                 ct.to_dict() for ct in self.conditional_targets
             ]
 
+        if self.disruptive_outcomes:
+            result["disruptive_outcomes"] = [
+                o.to_dict() for o in self.disruptive_outcomes
+            ]
+
         if self.decorators:
-            result['decorators'] = self.decorators
-
-        if self.is_terminal:
-            result['is_terminal'] = self.is_terminal
-            if self.terminates_via:
-                result['terminates_via'] = self.terminates_via
-
-        if self.synthetic:
-            result['synthetic'] = self.synthetic
+            result["decorators"] = self.decorators
 
         if self.metadata:
-            result['metadata'] = self.metadata
+            result["metadata"] = self.metadata
 
         return result
 
@@ -759,7 +998,6 @@ class Branch:
         Returns:
             True if constraints are mutually exclusive
         """
-        # Use constraint object if available
         if self.constraint is not None and other.constraint is not None:
             return self.constraint.conflicts_with(other.constraint)
 
@@ -776,11 +1014,10 @@ class Branch:
             "operation:validate(data)"
             "exception:ValueError"
         """
-        # Use constraint object if available
         if self.constraint is not None:
             return self.constraint.get_signature()
 
-        return ''
+        return ""
 
     def is_alternative_to(self, other: Branch) -> bool:
         """
@@ -788,17 +1025,19 @@ class Branch:
 
         Branches are alternatives if they:
         1. Are on the same line (same decision point)
-        2. Have the same condition but different outcomes
+        2. Have the same condition but different descriptions
 
         Returns:
             True if branches are mutually exclusive alternatives
         """
-        return (self.line == other.line and
-                self.condition == other.condition and
-                self.outcome != other.outcome)
+        return (
+                self.line == other.line
+                and self.condition == other.condition
+                and self.description != other.description
+        )
 
     def __repr__(self) -> str:
-        """Enhanced repr showing constraint information."""
+        """Enhanced repr showing constraint and terminal information."""
         parts = [f"Branch(id={self.id!r}, line={self.line}"]
 
         if self.constraint is not None:
@@ -813,10 +1052,18 @@ class Branch:
         if self.constraint is not None and self.constraint.polarity is not None:
             parts.append(f"polarity={self.constraint.polarity}")
 
-        if self.is_terminal:
-            parts.append(f"terminal={self.terminates_via!r}")
+        if self.statement_outcome is not None and self.statement_outcome.is_terminal:
+            parts.append(f"terminal={self.statement_outcome.terminates_via!r}")
+        elif self.disruptive_outcomes:
+            terminal_modes = sorted({
+                outcome.terminates_via
+                for outcome in self.disruptive_outcomes
+                if outcome.is_terminal and outcome.terminates_via is not None
+            })
+            if terminal_modes:
+                parts.append(f"terminal={terminal_modes!r}")
 
-        return ', '.join(parts) + ')'
+        return ", ".join(parts) + ")"
 
 
 # =============================================================================

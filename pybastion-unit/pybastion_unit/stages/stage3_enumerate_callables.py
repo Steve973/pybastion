@@ -1,1360 +1,893 @@
 #!/usr/bin/env python3
-"""Enhanced callable enumerator with complete AST structural analysis."""
+"""Stage 3 callable inventory builder for structured stage 1 + new stage 2 output.
+
+This version consumes:
+  - stage 1 structured unit index JSON
+  - stage 2 EI YAML for a unit
+  - source files referenced by the unit index
+
+It replaces the old flat callable inventory-based stage 3.
+"""
 
 from __future__ import annotations
 
 import argparse
 import ast
-import builtins
+import json
 import re
 import sys
 from pathlib import Path
 from typing import Any
 
 import yaml
-
-from pybastion_common.models import Branch, CallableEntry, ParamSpec, TypeRef, IntegrationCandidate
+from pybastion_common.models import (
+    CallableEntry,
+    ParamSpec,
+    TypeRef,
+    Branch,
+    ProjectIndex,
+    UnitIndex,
+    UnitIndexEntry
+)
 from pybastion_common.smt_path_checker import filter_feasible_paths
 from pybastion_unit.helpers.decorator_processing import (
     extract_callable_decorators,
     has_effect,
-    validate_feature_co_occurrences
+    validate_feature_co_occurrences,
 )
-# from pybastion_unit.helpers.smt_path_checker import filter_feasible_paths
-from pybastion_unit.shared.callable_id_generation import (
-    generate_class_id,
-    generate_function_id,
-    generate_nested_function_id,
-    generate_method_id
-)
-from pybastion_unit.shared.knowledge_base import PYTHON_BUILTINS, BUILTIN_METHODS
-# from pybastion_unit.shared.models import Branch, TypeRef, ParamSpec, IntegrationCandidate, CallableEntry
+from pybastion_unit.helpers.integration_analysis import build_integration_entries
+from pybastion_unit.shared.knowledge_base import PYTHON_BUILTINS, BUILTIN_METHODS, GENERIC_CONTAINER_TYPES, \
+    is_builtin_container_method
 
-
-def load_callable_inventory(filepath: Path | None) -> dict[str, str]:
-    """
-    Load callable inventory file (FQN:ID pairs).
-
-    Returns:
-        Dict mapping fully qualified names to callable IDs
-    """
-    inventory = {}
-    if not filepath or not filepath.exists():
-        return inventory
-
-    with open(filepath, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line or ':' not in line:
-                continue
-            fqn, callable_id = line.split(':', 1)
-            inventory[fqn] = callable_id
-
-    return inventory
+ENUM_BASES: set[str] = {"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"}
+CALLABLE_ENTRY_KINDS: set[str] = {"unit_function", "method", "nested_function", "module_assignment"}
+CLASS_ENTRY_KINDS: set[str] = {"class", "nested_class"}
 
 
 # ============================================================================
-# CFG and Path Enumeration
+# Stage 1 model
 # ============================================================================
 
-def build_cfg(branches: list[Branch]) -> dict[str, list[str]]:
-    """
-    Build control flow graph from branches.
 
-    Exception-raising branches are terminal and don't connect to subsequent lines.
-
-    Returns: adjacency dict {ei_id: [next_ei_ids]}
-    """
-    if not branches:
-        return {}
-
-    # Sort by line number
-    sorted_branches = sorted(branches, key=lambda b: b.line)
-
-    # Build adjacency graph
-    graph: dict[str, list[str]] = {}
-
-    for i, branch in enumerate(sorted_branches):
-        ei_id = branch.id
-        current_line = branch.line
-        outcome = branch.outcome.lower()
-
-        # Check if this branch raises an exception (terminal)
-        is_exception = any(indicator in outcome for indicator in [
-            'raises',
-            'raise ',
-            'exception',
-            'error',
-            'returns',
-            'return ',
-            '→ returns',
-        ])
-
-        if is_exception:
-            # Exception paths terminate - no successors
-            graph[ei_id] = []
-            continue
-
-        # Find next line's EIs
-        next_eis: list[str] = []
-        for j in range(i + 1, len(sorted_branches)):
-            next_branch = sorted_branches[j]
-            if next_branch.line > current_line:
-                # This is the next executable line
-                next_line = next_branch.line
-                next_eis = [
-                    b.id for b in sorted_branches
-                    if b.line == next_line
-                ]
-                break
-
-        graph[ei_id] = next_eis
-
-    return graph
-
-
-def enumerate_paths(
-        graph: dict[str, list[str]],
-        start_ei: str,
-        target_ei: str
-) -> list[list[str]]:
-    """
-    Enumerate all paths from start to target in the CFG.
-
-    Handles same-line branches as alternative paths.
-    Uses DFS with cycle detection.
-    """
-
-    def dfs(current: str, target: str, path: list[str], visited: set[str]) -> list[list[str]]:
-        # Reached target
-        if current == target:
-            return [path + [current]]
-
-        # Cycle detection
-        if current in visited:
-            return []
-
-        # Mark visited
-        visited_copy = visited | {current}
-        all_paths: list[list[str]] = []
-
-        # Explore all successors
-        successors = graph.get(current, [])
-        if not successors:
-            return []
-
-        for next_ei in successors:
-            sub_paths = dfs(next_ei, target, path + [current], visited_copy)
-            all_paths.extend(sub_paths)
-
-        return all_paths
-
-    # Try from the specified start
-    paths = dfs(start_ei, target_ei, [], set())
-
-    # The standalone path should only happen if target IS the start
-    if start_ei == target_ei:
-        paths = [[target_ei]]
-
-    return paths
-
-
-def _is_skippable_by_any_earlier_branch(
-    reversed_branches: list[dict],
-    terminal_branch: dict,
-) -> bool:
-    terminal_id = terminal_branch.get("id")
-    print(f"DEBUG: Checking if {terminal_id} is skippable")
-
-    for earlier in reversed_branches:
-        if earlier.get("is_terminal", False):
-            continue
-
-        skips: set[str] = set(
-            earlier.get("constraint", {}).get("skips_eis", []) or []
+def load_project_index(filepath: Path) -> ProjectIndex:
+    payload = json.loads(filepath.read_text(encoding="utf-8"))
+    units: list[UnitIndex] = []
+    for unit_payload in payload.get("units", []):
+        units.append(
+            UnitIndex(
+                unit_id=unit_payload["unit_id"],
+                fully_qualified_name=unit_payload["fully_qualified_name"],
+                filepath=unit_payload["filepath"],
+                language=unit_payload["language"],
+                source_hash=unit_payload["source_hash"],
+                entries=[UnitIndexEntry(**entry) for entry in unit_payload.get("entries", [])],
+            )
         )
-        print(f"DEBUG: Earlier branch {earlier.get('id')} skips: {skips}")
+    return ProjectIndex(source_root=payload["source_root"], units=units)
 
-        if terminal_id in skips:
-            print(f"DEBUG: Found {terminal_id} in {earlier.get('id')}'s skips!")
+
+# ============================================================================
+# Stage 2 model helpers
+# ============================================================================
+
+
+def load_stage2_yaml(filepath: Path | None) -> dict[str, Any]:
+    if filepath is None or not filepath.exists():
+        return {}
+    payload = yaml.safe_load(filepath.read_text(encoding="utf-8"))
+    return payload or {}
+
+
+def build_stage2_lookup(stage2_payload: dict[str, Any]) -> dict[tuple[str, int, int], dict[str, Any]]:
+    lookup: dict[tuple[str, int, int], dict[str, Any]] = {}
+    for item in stage2_payload.get("functions", []) or []:
+        key = (item.get("name", ""), item.get("line_start", 0), item.get("line_end", 0))
+        lookup[key] = item
+    return lookup
+
+
+# ============================================================================
+# AST location and symbol discovery
+# ============================================================================
+
+
+class IndexedNodeLocator(ast.NodeVisitor):
+    def __init__(self, module_fqn: str):
+        self.module_fqn = module_fqn
+        self.scope_stack: list[str] = [module_fqn] if module_fqn else []
+        self.nodes_by_fqn_and_line: dict[tuple[str, int], ast.AST] = {}
+        self.assignment_nodes_by_fqn_and_line: dict[tuple[str, int], ast.AST] = {}
+
+    def current_fqn_prefix(self) -> str:
+        return ".".join(self.scope_stack)
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        fqn = f"{self.current_fqn_prefix()}.{node.name}" if self.scope_stack else node.name
+        self.nodes_by_fqn_and_line[(fqn, node.lineno)] = node
+        self.scope_stack.append(node.name)
+        self.generic_visit(node)
+        self.scope_stack.pop()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        fqn = f"{self.current_fqn_prefix()}.{node.name}" if self.scope_stack else node.name
+        self.nodes_by_fqn_and_line[(fqn, node.lineno)] = node
+        self.scope_stack.append(node.name)
+        self.generic_visit(node)
+        self.scope_stack.pop()
+
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+        fqn = f"{self.current_fqn_prefix()}.{node.name}" if self.scope_stack else node.name
+        self.nodes_by_fqn_and_line[(fqn, node.lineno)] = node
+        self.scope_stack.append(node.name)
+        self.generic_visit(node)
+        self.scope_stack.pop()
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                fqn = f"{self.module_fqn}.{target.id}" if self.module_fqn else target.id
+                self.assignment_nodes_by_fqn_and_line[(fqn, node.lineno)] = node
+                break
+        self.generic_visit(node)
+
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if isinstance(node.target, ast.Name):
+            fqn = f"{self.module_fqn}.{node.target.id}" if self.module_fqn else node.target.id
+            self.assignment_nodes_by_fqn_and_line[(fqn, node.lineno)] = node
+        self.generic_visit(node)
+
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        if isinstance(node.target, ast.Name):
+            fqn = f"{self.module_fqn}.{node.target.id}" if self.module_fqn else node.target.id
+            self.assignment_nodes_by_fqn_and_line[(fqn, node.lineno)] = node
+        self.generic_visit(node)
+
+
+def build_import_map(tree: ast.Module, project_fqns: set[str]) -> tuple[dict[str, str], set[str]]:
+    import_map: dict[str, str] = {}
+    interunit_imports: set[str] = set()
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                name = alias.asname if alias.asname else alias.name
+                import_map[name] = alias.name
+                if alias.name in project_fqns:
+                    interunit_imports.add(name)
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            for alias in node.names:
+                name = alias.asname if alias.asname else alias.name
+                fqn = f"{module}.{alias.name}" if module else alias.name
+                import_map[name] = fqn
+                if fqn in project_fqns:
+                    interunit_imports.add(name)
+
+    return import_map, interunit_imports
+
+
+def build_local_symbols(tree: ast.Module) -> set[str]:
+    local_symbols: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            local_symbols.add(node.name)
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    local_symbols.add(target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            local_symbols.add(node.target.id)
+        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            local_symbols.add(node.target.id)
+    return local_symbols
+
+
+def build_local_return_type_map(tree: ast.Module) -> dict[str, str]:
+    local_return_types: dict[str, str] = {}
+
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns is not None:
+            type_ref = TypeRef.from_annotation_ast(node.returns)
+            if type_ref is not None:
+                local_return_types[node.name] = type_ref.to_resolver_string()
+
+    return local_return_types
+
+# ============================================================================
+# AST analysis helpers
+# ============================================================================
+
+
+def is_enum_class(node: ast.ClassDef) -> bool:
+    for base in node.bases:
+        if isinstance(base, ast.Name) and base.id in ENUM_BASES:
             return True
-
+        if isinstance(base, ast.Attribute) and base.attr in ENUM_BASES:
+            return True
     return False
 
 
-def mark_terminal_exits(entries: list[dict[str, Any]]) -> None:
-    """
-    Mark implicit returns and yields as terminal exits.
+def _integration_signature_for_branch(branch: Branch) -> str:
+    constraint = branch.constraint
+    if constraint is not None and constraint.expr:
+        return constraint.expr.strip()
 
-    Processes all entries recursively to ensure:
-    1. Yields are marked as terminal (they return control to caller)
-    2. Last non-terminal EI in a callable is marked as implicit return
-    """
+    if branch.statement_outcome is not None and branch.statement_outcome.outcome:
+        return branch.statement_outcome.outcome.strip()
 
-    def process_entry(entry: dict[str, Any]) -> None:
-        # Only process callables with branches
-        if not entry.get('needs_callable_analysis', False):
-            return
-
-        branches = entry.get('branches', [])
-        if not branches:
-            return
-
-        # Detect stubs - single EI with ellipsis or just pass
-        if len(branches) <= 2:
-            branch_num = 1 if branches[0].get('id').endswith('E0000') else 0
-            outcome = branches[branch_num].get('outcome', '')
-            if '...' in outcome or outcome.strip() in ('pass', 'pass ') in outcome:
-                entry['is_stub'] = True
-                return  # Don't mark implicit return for stubs
-
-        # Check for NotImplementedError (single or multi-EI)
-        has_not_impl = any('NotImplementedError' in branch.get('outcome', '') for branch in branches)
-        if has_not_impl:
-            # Skip synthetic entry
-            real_branches = [b for b in branches if not b.get('synthetic')]
-            # Check if all branches are NotImplementedError-related
-            stub_outcomes = ['NotImplementedError', 'raises', 'exception propagates']
-            if all(any(pattern in b.get('outcome', '') for pattern in stub_outcomes)
-                   for b in real_branches):
-                entry['is_stub'] = True
-                return
-
-        # Sort by line number to find last EI
-        sorted_branches = sorted(branches, key=lambda b: b['line'])
-
-        for i, branch in enumerate(sorted_branches):
-            outcome = branch.get('outcome', '').lower()
-
-            # Mark yields as terminal
-            if any(indicator in outcome for indicator in ['→ yields', 'yields ', '→ yield ', 'yield from']):
-                branch['is_terminal'] = True
-                branch['terminates_via'] = 'yield'
-
-        # If there is an implicit return, we need to recognize it and designate it
-        # as an implicit return. To find these cases, we work backward from the last
-        # EI in the callable:
-        #  1. If the line is already designated as terminal, see if it is an exception
-        #    - If it is an exception, skip it and go to the next line.
-        #    - If it is not an exception, then it is an explicit return and we're done.
-        #  2. If the line is not designated as terminal, then it is an implicit return.
-        #    - Mark it as terminal and set the terminates_via to 'implicit-return'.
-        reversed_branches = list(reversed(sorted_branches))
-        for branch_idx, branch in enumerate(reversed_branches):
-            earlier_branches = list(reversed_branches)[branch_idx + 1:]
-            branch_id = branch.get('id')
-            print(f"Processing branch {branch_id}...")
-            if branch.get('is_terminal', False):
-                print(f"Branch {branch_id} is already marked as terminal")
-                terminates_via = branch.get('terminates_via', '')
-                if terminates_via in ('exception', 'raise'):
-                    print(f"Branch {branch_id} terminates via: {terminates_via} (continue)")
-                    continue
-                print(f"Branch {branch_id} does not terminate via exception, processing...")
-
-                # Normal terminal: only stop if nothing earlier can skip it
-                if _is_skippable_by_any_earlier_branch(earlier_branches, branch):
-                    print(f"Branch {branch_id} is already marked as terminal, and is skippable (continue)")
-                    continue
-                else:
-                    print(f"Branch {branch_id} is already marked as terminal, and is not skippable (break)")
-                    break
-            else:
-                print(f"Branch {branch_id} is not marked as terminal, processing...")
-                # Skip statement types that shouldn't have implicit returns
-                stmt_type = branch.get('stmt_type')
-                if stmt_type in ('Raise', 'Return', 'Break', 'Continue'):
-                    continue
-
-                # Special handling for "For" loops
-                if stmt_type == 'For':
-                    print(f"Processing For loop branch {branch_id} that is not terminal")
-                    constraint = branch.get('constraint', {})
-                    # 0-iteration loops with no next_ei are implicit returns
-                    if constraint.get('polarity') is False and not branch.get('next_ei'):
-                        print(f"Branch {branch_id} has False polarity and no next_ei, so it is an implicit return (break)")
-                        branch['is_terminal'] = True
-                        branch['terminates_via'] = 'implicit-return'
-                        if _is_skippable_by_any_earlier_branch(earlier_branches, branch):
-                            print(f"Branch {branch_id} is now marked as terminal, and is skippable (continue)")
-                            continue
-                        else:
-                            print(f"Branch {branch_id} is now marked as terminal, and is not skippable (break)")
-                            break
-
-                    else:
-                        print(f"Branch {branch_id} is not markable as an implicit return (continue)")
-                        continue
-
-                if branch.get('next_ei') is None:
-                    branch['is_terminal'] = True
-                    branch['terminates_via'] = 'implicit-return'
-                    if _is_skippable_by_any_earlier_branch(earlier_branches, branch):
-                        print(f"Branch {branch_id} is now marked as terminal, and is skippable (continue)")
-                        continue
-                    else:
-                        print(f"Branch {branch_id} is now marked as terminal, and is not skippable (break)")
-                        break
-
-    # Process all entries recursively
-    for entry in entries:
-        process_entry(entry)
-
-        # Recurse into children
-        if 'children' in entry and entry['children']:
-            mark_terminal_exits(entry['children'])
+    return (branch.description or "").strip()
 
 
-def add_execution_paths(entries: list[dict[str, Any]]) -> None:
-    """
-    Add execution_paths to integration_candidates in all callables.
-
-    Recursively processes all entries and their children.
-    """
-    for entry in entries:
-        # Skip if this has MechanicalOperation decorator
-        skip_entry = False
-        if entry.get('decorators'):
-            for decorator in entry['decorators']:
-                if has_effect(decorator, 'exclude_from_flow'):
-                    # Don't enumerate paths for mechanical operations
-                    for integration in entry.get('ast_analysis', {}).get('integration_candidates', []):
-                        integration['execution_paths'] = []
-                        integration['suppressed_by'] = decorator.get('name')
-                    skip_entry = True
-                    break
-
-        if skip_entry:
-            continue
-
-        # Process this entry if it's a callable with branches and integrations
-        if (entry.get('needs_callable_analysis', False) and
-                'branches' in entry and
-                'ast_analysis' in entry and
-                'integration_candidates' in entry['ast_analysis']):
-
-            branches_data = entry['branches']
-            integration_candidates = entry['ast_analysis']['integration_candidates']
-
-            if not branches_data or not integration_candidates:
-                continue
-
-            # Convert branch dicts to Branch objects for CFG building
-            branches = [Branch.from_dict(b) for b in branches_data]
-
-            # Build CFG for this callable
-            graph = build_cfg(branches)
-
-            # Find entry points (EIs with no predecessors)
-            all_ei_ids = [b.id for b in branches]
-            predecessors: dict[str, list[str]] = {ei: [] for ei in all_ei_ids}
-            for ei, successors in graph.items():
-                for succ in successors:
-                    predecessors[succ].append(ei)
-
-            entry_eis = [ei for ei, preds in predecessors.items() if not preds]
-
-            # If no entry points found, use first line EIs
-            if not entry_eis:
-                first_line = min(b.line for b in branches)
-                entry_eis = [b.id for b in branches if b.line == first_line]
-
-            # Build line -> EI mapping
-            line_to_eis: dict[int, list[str]] = {}
-            for branch in branches:
-                line = branch.line
-                if line not in line_to_eis:
-                    line_to_eis[line] = []
-                line_to_eis[line].append(branch.id)
-
-            # Enumerate paths for each integration
-            for integration in integration_candidates:
-                line = integration.get('line')
-                if not line or line not in line_to_eis:
-                    # Integration has no corresponding EI, set empty paths
-                    integration['execution_paths'] = []
-                    continue
-
-                integration_eis = line_to_eis[line]
-
-                # Match integration signature to correct EI on this line
-                target_ei = None
-                raw_sig = integration.get('signature', '').strip()
-                # Normalize quotes by round-tripping through AST
-                try:
-                    integration_sig = ast.unparse(ast.parse(raw_sig, mode='eval'))
-                except:
-                    integration_sig = raw_sig
-
-                # Find which EI matches this integration's signature
-                for ei_id in integration_eis:
-                    matching_branch = next((b for b in branches if b.id == ei_id), None)
-                    if matching_branch:
-                        ei_text = f"{matching_branch.condition} {matching_branch.outcome}"
-                        if integration_sig in ei_text:
-                            target_ei = ei_id
-                            break
-
-                # Fallback to first EI if no match
-                if target_ei is None:
-                    target_ei = integration_eis[0]
-
-                all_paths: list[list[str]] = []
-                for start_ei in entry_eis:
-                    paths = enumerate_paths(graph, start_ei, target_ei)
-                    all_paths.extend(paths)
-
-                # Deduplicate paths
-                unique_paths: list[list[str]] = []
-                for path in all_paths:
-                    if path not in unique_paths:
-                        unique_paths.append(path)
-
-                # === SMT FILTERING ===
-                feasible_paths, feasibility_results = filter_feasible_paths(
-                    unique_paths,
-                    branches,
-                    timeout_ms=5000
-                )
-
-                # Attach feasible paths to integration
-                integration['execution_paths'] = feasible_paths
-
-                # Store analysis metadata
-                integration['path_analysis'] = {
-                    'total_syntactic_paths': len(unique_paths),
-                    'feasible_paths': len(feasible_paths),
-                    'infeasible_paths': len(unique_paths) - len(feasible_paths),
-                    'filter_effectiveness': (
-                        100 * (1 - len(feasible_paths) / len(unique_paths))
-                        if unique_paths else 0
-                    ),
-                }
-
-                # Store witness values for test generation
-                if feasible_paths:
-                    witnesses = []
-                    for path in feasible_paths:
-                        path_id = '->'.join(path)
-                        if path_id in feasibility_results:
-                            result = feasibility_results[path_id]
-                            if result.witness_values:
-                                witnesses.append({
-                                    'path': path,
-                                    'witness': result.witness_values
-                                })
-
-                    if witnesses:
-                        integration['test_witnesses'] = witnesses
-
-        # Recurse into children
-        if 'children' in entry and entry['children']:
-            add_execution_paths(entry['children'])
-
-
-# ============================================================================
-# AST Visitor for Callable Enumeration
-# ============================================================================
-
-class EnhancedCallableEnumerator(ast.NodeVisitor):
-    """Enumerate callables with complete structural analysis."""
-
-    def __init__(self, source: str, unit_id: str, module_fqn: str | None = None,
-                 callable_inventory: dict[str, str] | None = None) -> None:
-        self.source = source
-        self.unit_id = unit_id
-        self.module_fqn = module_fqn or ""
-        self.callable_inventory = callable_inventory or {}
-        self.source_lines = source.split('\n')
-        self.function_counter = 0
-        self.class_counter = 0
-        self.method_counters: dict[str, int] = {}
-        self.context_stack: list[str] = [unit_id]  # Track current nesting: [unit_id, class_id, method_id, ...]
-        self.fqn_stack: list[str] = [module_fqn] if module_fqn else []  # Track FQN stack
-        self.entries: list[CallableEntry] = []  # Store CallableEntry objects
-        self.import_map = {}  # bare_name -> FQN
-        self.interunit_imports = set()  # FQNs that are from the project
-        self.local_symbols: set[str] = set()  # All callables defined in this unit
-
-    def _get_callable_id(
+class AstAnalyzer:
+    def __init__(
             self,
-            node: ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef,
-            context: str,
-            inventory_only: bool = False,
-    ) -> str:
-        """
-        Get callable ID from inventory or generate it.
+            *,
+            source_lines: list[str],
+            unit_id: str,
+            unit_fqn: str,
+            callable_inventory: dict[str, str],
+            project_fqns: set[str],
+            import_map: dict[str, str],
+            local_symbols: set[str],
+            local_return_types: dict[str, str],
+    ):
+        self.source_lines = source_lines
+        self.unit_id = unit_id
+        self.unit_fqn = unit_fqn
+        self.callable_inventory = callable_inventory
+        self.project_fqns = project_fqns
+        self.import_map = import_map
+        self.local_symbols = local_symbols
+        self.local_return_types = local_return_types
 
-        Args:
-            node: AST node
-            context: "class" | "method" | "function"
+    def _normalize_type_name(self, type_name: str) -> str:
+        type_name = re.sub(r"\s*\|\s*None", "", type_name).strip()
+        type_name = re.sub(r"None\s*\|\s*", "", type_name).strip()
 
-        Returns:
-            Callable ID
-        """
-        # Build FQN
-        if self.fqn_stack:
-            fqn = f"{'.'.join(self.fqn_stack)}.{node.name}"
+        optional_match = re.match(r"^Optional\[(.+)]$", type_name)
+        if optional_match:
+            type_name = optional_match.group(1).strip()
+
+        type_match = re.match(r"^type\[(.+)]$", type_name)
+        if type_match:
+            type_name = type_match.group(1).strip()
+
+        if "::" in type_name:
+            container, inner = type_name.split("::", 1)
+            if container in GENERIC_CONTAINER_TYPES:
+                return container
+            return inner
+
+        return type_name.split("[", 1)[0].strip()
+
+    def _resolve_attribute_owner_type(self, owner_type: str, attr_name: str) -> str:
+        owner_type = self._normalize_type_name(owner_type)
+
+        if owner_type in self.import_map:
+            owner_type = self.import_map[owner_type]
+
+        # project-local class lookup by short name or FQN
+        candidate_fqns = []
+        if owner_type in self.callable_inventory:
+            candidate_fqns.append(owner_type)
         else:
-            fqn = f"{self.module_fqn}.{node.name}" if self.module_fqn else node.name
+            for fqn in self.callable_inventory:
+                if fqn.endswith(f".{owner_type}"):
+                    candidate_fqns.append(fqn)
 
-        # Try inventory first
-        if fqn in self.callable_inventory:
-            return self.callable_inventory[fqn]
+        # If we know the owner class in-project, inspect its source annotation info later.
+        # For now, we can only continue when the owner type itself is already imported/FQN.
+        # This keeps behavior bounded and non-magical.
+        if owner_type:
+            return owner_type
 
-        if inventory_only:
-            return ""
+        return ""
 
-        # Fallback: generate ID
-        if context == "class":
-            self.class_counter += 1
-            return generate_class_id(self.unit_id, self.class_counter)
-        elif context == "method":
-            parent_id = self.context_stack[-1]
-            self.method_counters[parent_id] += 1
-            return generate_method_id(parent_id, self.method_counters[parent_id])
-        elif context == "function":
-            self.function_counter += 1
-            return generate_function_id(self.unit_id, self.function_counter)
-        else:
-            raise ValueError(f"Unknown context: {context}")
+    def analyze_entry(self, entry: UnitIndexEntry, node: ast.AST) -> dict[str, Any]:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            return self._analyze_callable(entry, node)
+        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+            return self._analyze_assignment(entry, node)
+        if isinstance(node, ast.ClassDef):
+            return self._analyze_class(entry, node)
+        return {
+            "id": entry.id,
+            "kind": entry.kind,
+            "name": entry.name,
+            "line_start": entry.lineno,
+            "line_end": entry.end_lineno,
+        }
 
-    def build_import_map(self, tree: ast.Module, project_fqns: set[str]) -> None:
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                for alias in node.names:
-                    name = alias.asname if alias.asname else alias.name
-                    fqn = alias.name
-                    self.import_map[name] = fqn
-                    if fqn in project_fqns:
-                        self.interunit_imports.add(name)
-
-            elif isinstance(node, ast.ImportFrom):
-                module = node.module or ''
-                for alias in node.names:
-                    name = alias.asname if alias.asname else alias.name
-                    fqn = f"{module}.{alias.name}" if module else alias.name
-                    self.import_map[name] = fqn
-                    if fqn in project_fqns:
-                        self.interunit_imports.add(name)
-
-    def build_symbol_table(self, tree: ast.Module) -> None:
-        """
-        Build a set of all callable names defined in this module.
-        Must be called before visiting the tree.
-        """
-        for node in ast.walk(tree):
-            # Module-level functions
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                self.local_symbols.add(node.name)
-                # Also add nested functions
-                nested_item: ast.FunctionDef | ast.AsyncFunctionDef
-                for nested_item in ast.walk(node):
-                    if isinstance(nested_item, (ast.FunctionDef, ast.AsyncFunctionDef)) and nested_item != node:
-                        self.local_symbols.add(nested_item.name)
-
-            # Classes
-            elif isinstance(node, ast.ClassDef):
-                self.local_symbols.add(node.name)
-                # Also add all methods in the class
-                for item in node.body:
-                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        self.local_symbols.add(item.name)
-                        # Also add nested functions
-                        for nested_item in ast.walk(node):
-                            if isinstance(nested_item, (ast.FunctionDef, ast.AsyncFunctionDef)) and nested_item != node:
-                                self.local_symbols.add(nested_item.name)
-
-            elif isinstance(node, (ast.AnnAssign, ast.Assign, ast.AugAssign)):
-                if isinstance(node, ast.Assign):
-                    # For multiple targets like a = b = value, just use the first one
-                    if not node.targets:
-                        return
-                    first_target = node.targets[0]
-                    if not isinstance(first_target, ast.Name):
-                        return  # Skip non-Name targets (tuples, attributes, etc.)
-                    if first_target.id.startswith('_') and first_target.id.isupper():
-                        self.local_symbols.add(first_target.id)
-                else:  # AnnAssign or AugAssign
-                    if not isinstance(node.target, ast.Name):
-                        return
-                    if node.target.id.startswith('_') and node.target.id.isupper():
-                        self.local_symbols.add(node.target.id)
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        """Visit a class definition."""
-        parent_id = self.context_stack[-1]
-
-        # Get class ID from inventory or generate
-        class_id = self._get_callable_id(node, "class")
-
-        # Check if this is an enum
-        is_enum = any(
-            isinstance(base, ast.Name) and base.id == 'Enum'
-            for base in node.bases
-        )
-
-        entry = CallableEntry(
-            id=class_id,
-            kind='enum' if is_enum else 'class',
-            name=node.name,
-            line_start=node.lineno,
-            line_end=node.end_lineno or node.lineno,
+    def _analyze_class(self, entry: UnitIndexEntry, node: ast.ClassDef) -> dict[str, Any]:
+        kind = "enum" if is_enum_class(node) else "class"
+        return CallableEntry(
+            id=entry.id,
+            kind=kind,
+            name=entry.name,
+            line_start=entry.lineno,
+            line_end=entry.end_lineno,
             decorators=self._extract_decorators(node.decorator_list),
             base_classes=[ast.unparse(base) for base in node.bases],
-            children=[]
-        )
+        ).to_dict()
 
-        self.entries.append(entry)
-
-        # Push this class onto context stack
-        self.context_stack.append(class_id)
-        if self.fqn_stack:
-            self.fqn_stack.append(f"{'.'.join(self.fqn_stack)}.{node.name}")
-        else:
-            self.fqn_stack.append(f"{self.module_fqn}.{node.name}" if self.module_fqn else node.name)
-
-        # Visit methods in this class
-        self.method_counters[class_id] = 0
-        for item in node.body:
-            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                self._visit_method(item, class_id)
-
-        # Pop class from context stack
-        self.context_stack.pop()
-        if self.fqn_stack:
-            self.fqn_stack.pop()
-
-        # Don't call generic_visit - we've handled children explicitly
-
-    def _visit_method(self, node: ast.FunctionDef | ast.AsyncFunctionDef, parent_id: str) -> None:
-        """Visit a method inside a class."""
-        # Get method ID from inventory or generate
-        method_id = self._get_callable_id(node, "method")
-
-        # Analyze this method as a callable
-        entry = self._analyze_callable(node, method_id, is_method=True)
-
-        # Find parent class in entries and add as child
-        for e in self.entries:
-            if e.id == parent_id:
-                e.children.append(entry)
-                break
-
-        # Check for nested functions
-        self.context_stack.append(method_id)
-        if self.fqn_stack:
-            self.fqn_stack.append(f"{'.'.join(self.fqn_stack)}.{node.name}")
-        item: ast.FunctionDef | ast.AsyncFunctionDef
-        for item in ast.walk(node):
-            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item != node:
-                # This is a nested function
-                self._visit_nested_function(item, method_id)
-        self.context_stack.pop()
-        if self.fqn_stack:
-            self.fqn_stack.pop()
-
-    def _visit_nested_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef, parent_id: str) -> None:
-        """Visit a nested function."""
-        # Generate nested function ID
-        id_from_inventory = self._get_callable_id(node, "function", inventory_only=True)
-        if id_from_inventory:
-            if "_set_attr" in node.name:
-                print(f"DEBUG: Get callable ID Nested function ID from inventory: {id_from_inventory}")
-            nested_id = id_from_inventory
-        else:
-            self.function_counter += 1
-            nested_id = generate_nested_function_id(parent_id, self.function_counter)
-
-        if "_set_attr" in node.name:
-            print(f"DEBUG: Get callable ID Nested function ID: {nested_id}")
-
-        # Analyze as callable
-        entry = self._analyze_callable(node, nested_id, is_method=False)
-
-        # Find parent callable and add as child
-        def find_and_add(entries: list[CallableEntry]) -> bool:
-            for e in entries:
-                if e.id == parent_id:
-                    e.children.append(entry)
-                    return True
-                if e.children and find_and_add(e.children):
-                    return True
-            return False
-
-        find_and_add(self.entries)
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        """Visit a top-level function definition."""
-        # Only process if we're at unit level (not inside a class)
-        if len(self.context_stack) > 1:
-            return  # Inside a class, handled by _visit_method
-
-        # Get function ID from inventory or generate
-        func_id = self._get_callable_id(node, "function")
-        entry = self._analyze_callable(node, func_id, is_method=False)
-        self.entries.append(entry)
-
-        # Check for nested functions
-        self.context_stack.append(func_id)
-        if self.fqn_stack:
-            self.fqn_stack.append(node.name)
-        elif self.module_fqn:
-            self.fqn_stack.append(node.name)
-        item: ast.FunctionDef | ast.AsyncFunctionDef
-        for item in ast.walk(node):
-            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item != node:
-                self._visit_nested_function(item, func_id)
-        self.context_stack.pop()
-        if self.fqn_stack:
-            self.fqn_stack.pop()
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        """Visit an async function definition."""
-        # Only process if we're at unit level
-        if len(self.context_stack) > 1:
-            return
-
-        # Get function ID from inventory or generate
-        func_id = self._get_callable_id(node, "function")
-
-        entry = self._analyze_callable(node, func_id, is_method=False)
-        self.entries.append(entry)
-
-        # Check for nested functions
-        self.context_stack.append(func_id)
-        if self.fqn_stack:
-            self.fqn_stack.append(f"{'.'.join(self.fqn_stack)}.{node.name}")
-        elif self.module_fqn:
-            self.fqn_stack.append(f"{self.module_fqn}.{node.name}")
-        item: ast.FunctionDef | ast.AsyncFunctionDef
-        for item in ast.walk(node):
-            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item != node:
-                self._visit_nested_function(item, func_id)
-        self.context_stack.pop()
-        if self.fqn_stack:
-            self.fqn_stack.pop()
-
-    def _analyze_callable(
-            self,
-            node: ast.FunctionDef | ast.AsyncFunctionDef,
-            callable_id: str,
-            is_method: bool
-    ) -> CallableEntry:
-        """Analyze a callable (function or method) and return CallableEntry object."""
-
-        # Extract signature
-        signature = self._build_signature(node)
-
-        # Extract decorators (both regular and operation metadata)
-        decorators = self._extract_decorators(node.decorator_list)
-        op_metadata_decorators = extract_callable_decorators(node, self.source_lines)
-        all_decorators = decorators + op_metadata_decorators
-
-        # Extract modifiers
-        modifiers = self._extract_modifiers(node)
-
-        # Extract visibility
-        visibility = self._extract_visibility(node.name)
-
-        # Extract params with types
-        params = self._extract_params(node)
-
-        # Extract return type
-        return_type = self._extract_type_ref(node.returns)
-
-        # Build parameter type map for type resolution
+    def _analyze_callable(self, entry: UnitIndexEntry, node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, Any]:
+        decorators = self._extract_decorators(node.decorator_list) + extract_callable_decorators(node,
+                                                                                                 self.source_lines)
         param_types = self._build_param_type_map(node)
-
-        # Find types for local variables
         local_types = self._build_local_type_map(node)
-
-        # Find integration candidates (with type resolution)
-        integration_candidates = self._find_integration_candidates(node, param_types, local_types)
-
-        return CallableEntry(
-            id=callable_id,
-            kind='method' if is_method else 'function',
-            name=node.name,
-            line_start=node.lineno,
-            line_end=node.end_lineno or node.lineno,
+        known_types = {**param_types, **local_types}
+        kind = "method" if entry.kind == "method" else "function"
+        payload = CallableEntry(
+            id=entry.id,
+            kind=kind,
+            name=entry.name,
+            line_start=entry.lineno,
+            line_end=entry.end_lineno,
+            signature=self._build_signature(node),
+            visibility=self._extract_visibility(entry.name),
+            decorators=decorators,
+            modifiers=self._extract_modifiers(node),
+            params=self._extract_params(node),
+            return_type=self._extract_type_ref(node.returns),
+            integration_candidates=[],
             needs_callable_analysis=True,
-            visibility=visibility,
-            signature=signature,
-            decorators=all_decorators,
-            modifiers=modifiers,
-            params=params,
-            return_type=return_type,
-            integration_candidates=integration_candidates
-        )
+        ).to_dict()
+        payload["_known_types"] = known_types
+        return payload
+
+    def _analyze_assignment(self, entry: UnitIndexEntry, node: ast.Assign | ast.AnnAssign | ast.AugAssign) -> dict[
+        str, Any]:
+        local_types = self._build_local_type_map(node)
+        return {
+            "id": entry.id,
+            "kind": "assignment",
+            "name": entry.name,
+            "line_start": entry.lineno,
+            "line_end": entry.end_lineno,
+            "visibility": self._extract_visibility(entry.name),
+            "needs_callable_analysis": True,
+            "_known_types": local_types,
+            "ast_analysis": {
+                "integration_candidates": [],
+            },
+        }
 
     def _build_local_type_map(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str]:
-        """Extract local variable types from the function body."""
         local_types: dict[str, str] = {}
 
         for stmt in ast.walk(node):
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
                 annotation = stmt.annotation
+
                 if isinstance(annotation, ast.Subscript):
-                    # Preserve container and inner type using delimiter
-                    # e.g. type[Foo] -> 'type::Foo', Optional[Foo] -> 'Optional::Foo'
-                    container = ast.unparse(annotation.value)
-                    inner_ref = self._extract_type_ref(annotation.slice)
-                    if inner_ref:
-                        local_types[stmt.target.id] = f'{container}::{inner_ref.name}'
-                elif isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
-                    # X | None or None | X — extract the non-None side
-                    left = ast.unparse(annotation.left)
-                    right = ast.unparse(annotation.right)
-                    if right == 'None':
-                        inner = left
-                    elif left == 'None':
-                        inner = right
+                    base = ast.unparse(annotation.value).strip()
+
+                    if base in GENERIC_CONTAINER_TYPES:
+                        if base == "Optional":
+                            inner_ref = self._extract_type_ref(annotation.slice)
+                            if inner_ref:
+                                local_types[stmt.target.id] = inner_ref.name
+                        elif base == "type":
+                            inner_ref = self._extract_type_ref(annotation.slice)
+                            if inner_ref:
+                                local_types[stmt.target.id] = f"type::{inner_ref.name}"
+                        else:
+                            inner_ref = self._extract_type_ref(annotation.slice)
+                            if inner_ref:
+                                local_types[stmt.target.id] = f"{base}::{inner_ref.name}"
                     else:
-                        inner = left  # multi-union, take left as best guess
-                    local_types[stmt.target.id] = inner
-                else:
-                    type_ref = self._extract_type_ref(annotation)
-                    if type_ref:
-                        local_types[stmt.target.id] = type_ref.name
+                        local_types[stmt.target.id] = base
+                    continue
+
+                if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
+                    left = ast.unparse(annotation.left).strip()
+                    right = ast.unparse(annotation.right).strip()
+                    local_types[stmt.target.id] = left if right == "None" else right if left == "None" else left
+                    continue
+
+                type_ref = self._extract_type_ref(annotation)
+                if type_ref is not None:
+                    local_types[stmt.target.id] = type_ref.name
+                continue
+
+            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+                target_name = stmt.targets[0].id
+                value = stmt.value
+
+                if isinstance(value, ast.Call):
+                    func = value.func
+
+                    if isinstance(func, ast.Name):
+                        return_type = self.local_return_types.get(func.id)
+                        if return_type:
+                            local_types[target_name] = return_type
+                            continue
+
+                    if isinstance(func, ast.Attribute):
+                        attr_name = func.attr
+                        return_type = self.local_return_types.get(attr_name)
+                        if return_type:
+                            local_types[target_name] = return_type
+                            continue
 
         return local_types
 
     def _build_signature(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
-        """Build function signature string."""
         try:
-            # Get the line containing the function definition
             start_line = node.lineno - 1
             sig_line = self.source_lines[start_line].strip()
-
-            # If signature spans multiple lines, get all of them
-            if not sig_line.endswith(':'):
-                end_line = start_line
+            if not sig_line.endswith(":"):
                 for i in range(start_line + 1, min(start_line + 20, len(self.source_lines))):
-                    sig_line += ' ' + self.source_lines[i].strip()
-                    if self.source_lines[i].strip().endswith(':'):
+                    sig_line += " " + self.source_lines[i].strip()
+                    if self.source_lines[i].strip().endswith(":"):
                         break
-
-            # Remove 'def ' and trailing ':'
-            sig_line = sig_line.replace('async def ', '').replace('def ', '')
-            if sig_line.endswith(':'):
+            sig_line = sig_line.replace("async def ", "").replace("def ", "")
+            if sig_line.endswith(":"):
                 sig_line = sig_line[:-1].strip()
-
-            # Normalize whitespace (collapse multiple spaces to single space)
-            import re
-            sig_line = re.sub(r'\s+', ' ', sig_line)
-            sig_line = (sig_line
-                        .replace('  ', ' ')
-                        .replace('( ', '(')
-                        .replace(' )', ')')
-                        .replace(' ,', ','))
-            return sig_line
+            sig_line = re.sub(r"\s+", " ", sig_line)
+            return sig_line.replace("( ", "(").replace(" )", ")").replace(" ,", ",")
         except Exception:
-            # Fallback to unparsing
             return f"{node.name}(...)"
 
-    def _extract_decorators(self, decorator_list: list[ast.expr]) -> list[dict[str, Any]]:
-        """Extract decorators from AST nodes."""
+    @staticmethod
+    def _extract_decorators(decorator_list: list[ast.expr]) -> list[dict[str, Any]]:
         decorators: list[dict[str, Any]] = []
-
         for dec in decorator_list:
-            decorator_info: dict[str, Any] = {}
-
+            info: dict[str, Any] = {}
             if isinstance(dec, ast.Name):
-                decorator_info['name'] = dec.id
+                info["name"] = dec.id
             elif isinstance(dec, ast.Call):
-                decorator_info['name'] = ast.unparse(dec.func)
+                info["name"] = ast.unparse(dec.func)
                 if dec.args:
-                    decorator_info['args'] = [ast.unparse(arg) for arg in dec.args]
+                    info["args"] = [ast.unparse(arg) for arg in dec.args]
                 if dec.keywords:
-                    decorator_info['kwargs'] = {kw.arg: ast.unparse(kw.value) for kw in dec.keywords if kw.arg}
+                    info["kwargs"] = {kw.arg: ast.unparse(kw.value) for kw in dec.keywords if kw.arg}
             else:
-                decorator_info['name'] = ast.unparse(dec)
-
-            decorators.append(decorator_info)
-
+                info["name"] = ast.unparse(dec)
+            decorators.append(info)
         return decorators
 
-    def _extract_modifiers(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
-        """Extract modifiers (async, static, class, property, etc.)."""
-        modifiers: list[str] = []
+    @staticmethod
+    def _extract_modifiers(node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[str]:
+        return ["async"] if isinstance(node, ast.AsyncFunctionDef) else []
 
-        if isinstance(node, ast.AsyncFunctionDef):
-            modifiers.append('async')
-
-        return modifiers
-
-    def _extract_visibility(self, name: str) -> str:
-        """Extract visibility from name (public/protected/private)."""
-        if name.startswith('__') and not name.endswith('__'):
-            return 'private'
-        elif name.startswith('_'):
-            return 'protected'
-        else:
-            return 'public'
+    @staticmethod
+    def _extract_visibility(name: str) -> str:
+        if name.startswith("__") and not name.endswith("__"):
+            return "private"
+        if name.startswith("_"):
+            return "protected"
+        return "public"
 
     def _extract_params(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ParamSpec]:
-        """Extract parameter information as ParamSpec objects."""
         params: list[ParamSpec] = []
-
         for arg in node.args.args:
-            param_type = self._extract_type_ref(arg.annotation)
-            param = ParamSpec(
-                name=arg.arg,
-                type=param_type,
-                default=None
-            )
-            params.append(param)
-
-        # Add defaults
+            params.append(ParamSpec(name=arg.arg, type=self._extract_type_ref(arg.annotation), default=None))
         defaults = node.args.defaults
         if defaults:
-            num_params = len(params)
-            num_defaults = len(defaults)
-            start_idx = num_params - num_defaults
-
+            start_idx = len(params) - len(defaults)
             for i, default in enumerate(defaults):
                 params[start_idx + i].default = ast.unparse(default)
-
         return params
 
     def _build_param_type_map(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str]:
-        """
-        Build a map of parameter names to their annotated type names.
-
-        Returns:
-            dict mapping param_name -> type_name (e.g., {'path': 'Path', 'fmt': 'str'})
-            For subscript types, uses delimiter format: 'container::inner_type'
-            e.g. type[Foo] -> 'type::Foo', Optional[Foo] -> 'Optional::Foo'
-        """
-        type_map = {}
-
+        type_map: dict[str, str] = {}
         for arg in node.args.args + node.args.kwonlyargs:
-            if arg.annotation:
-                annotation = arg.annotation
-                if isinstance(annotation, ast.Subscript):
-                    container = ast.unparse(annotation.value)
-                    inner_ref = self._extract_type_ref(annotation.slice)
-                    if inner_ref:
-                        type_map[arg.arg] = f'{container}::{inner_ref.name}'
-                else:
-                    type_map[arg.arg] = ast.unparse(annotation)
-
+            type_ref = TypeRef.from_annotation_ast(arg.annotation)
+            if type_ref is not None:
+                type_map[arg.arg] = type_ref.to_resolver_string()
         return type_map
 
     def _extract_type_ref(self, annotation: ast.expr | None) -> TypeRef | None:
-        """Extract TypeRef from type annotation."""
-        if not annotation:
-            return None
+        return TypeRef.from_annotation_ast(annotation)
 
-        if isinstance(annotation, ast.Name):
-            return TypeRef(name=annotation.id)
-
-        if isinstance(annotation, ast.Subscript):
-            base_type = ast.unparse(annotation.value)
-            args: list[TypeRef] = []
-
-            if isinstance(annotation.slice, ast.Tuple):
-                for elt in annotation.slice.elts:
-                    arg_ref = self._extract_type_ref(elt)
-                    if arg_ref:
-                        args.append(arg_ref)
-            else:
-                arg_ref = self._extract_type_ref(annotation.slice)
-                if arg_ref:
-                    args.append(arg_ref)
-
-            return TypeRef(name=base_type, args=args)
-
-        if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
-            left_ref = self._extract_type_ref(annotation.left)
-            right_ref = self._extract_type_ref(annotation.right)
-            args = []
-            if left_ref:
-                args.append(left_ref)
-            if right_ref:
-                args.append(right_ref)
-            return TypeRef(name='Union', args=args)
-
-        return TypeRef(name=ast.unparse(annotation))
-
-    def _find_integration_candidates(
+    def find_integration_candidates(
             self,
-            node: ast.FunctionDef | ast.AsyncFunctionDef,
-            param_types: dict[str, str],
-            local_types: dict[str, str]
-    ) -> list[IntegrationCandidate]:
-        """Find all potential integration points (function/method calls)."""
-        candidates: list[IntegrationCandidate] = []
-
-        # Combine param and local types for full known types
-        known_types = {**param_types, **local_types}
-
-        # Build parent map: child -> parent
-        parent_map: dict[ast.AST, ast.AST] = {}
-        for parent in ast.walk(node):
-            for child in ast.iter_child_nodes(parent):
-                parent_map[child] = parent
-
-        # Find all Call nodes
-        for child in ast.walk(node):
-            if isinstance(child, ast.Call):
-                target = self._get_call_target(child)
-                if target and self._is_external_call(target):
-                    resolved_target, resolved_type = self._resolve_target(target, known_types)
-
-                    # Walk up parent chain to find containing statement
-                    current = child
-                    containing_stmt = None
-                    while current in parent_map:
-                        parent = parent_map[current]
-                        if isinstance(parent, ast.stmt):
-                            containing_stmt = parent
-                            break
-                        current = parent
-
-                    # Use statement line if found, otherwise call line
-                    line = containing_stmt.lineno if containing_stmt else child.lineno
-
-                    # If the resolved target is in the inventory and belongs to this unit, skip it
-                    lookup_val = (
-                        resolved_target if resolved_target in self.callable_inventory  # Check the full resolved target first
-                        else resolved_type if (
-                                    resolved_type and resolved_type in self.callable_inventory)  # Fall back to checking by type
-                        else None
-                    )
-                    if lookup_val:
-                        inv_id = self.callable_inventory[lookup_val]
-                        inv_unit = re.split(r'_[CFM]\d+', inv_id)[0]
-                        if inv_unit == self.unit_id:
-                            continue
-
-                    candidate = IntegrationCandidate(
-                        type='call',
-                        target=resolved_target,
-                        line=line,
-                        signature=ast.unparse(child)
-                    )
-                    candidates.append(candidate)
-
-        return candidates
+            *,
+            branches: list[Branch],
+            callable_id: str,
+            callable_fqn: str,
+            known_types: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        integrations = build_integration_entries(
+            branches=branches,
+            callable_id=callable_id,
+            callable_fqn=callable_fqn,
+            unit_fqn=self.unit_fqn,
+            project_fqns=self.project_fqns,
+            callable_inventory=self.callable_inventory,
+            known_types=known_types,
+            resolve_target=self._resolve_target,
+            signature_for_branch=_integration_signature_for_branch,
+        )
+        return [integration.to_dict() for integration in integrations]
 
     def _resolve_target(self, target: str, param_types: dict[str, str]) -> tuple[str, str]:
-        """
-        Resolve target to FQN using import map and type annotations.
+        parts = target.split(".")
+        first_part = parts[0].strip()
 
-        Resolution strategies:
-        1. Import resolution: bare_name -> FQN from imports
-        2. Type annotation resolution: param.method -> Type.method
-        """
-        first_part = target.split('.')[0]
+        if len(parts) > 2:
+            return target, ""
 
-        # Strategy 1: Import resolution
-        if first_part in self.import_map:
-            fqn_first = self.import_map[first_part]
-            return target.replace(first_part, fqn_first, 1), ''
+        # Bare imported symbol: urlparse, url2pathname, Path, Version, Requirement, etc.
+        if len(parts) == 1 and first_part in self.import_map:
+            imported_fqn = self.import_map[first_part]
+            return imported_fqn, imported_fqn
 
-        # Strategy 2: Type annotation resolution
+        # Imported root target with one receiver hop: json.loads, pathlib.Path.read_text, etc.
+        if len(parts) == 2 and first_part in self.import_map:
+            imported_root = self.import_map[first_part]
+            return target.replace(first_part, imported_root, 1), imported_root
+
         if first_part in param_types:
             param_type = param_types[first_part]
 
-            # Extract container and inner type if delimiter present
-            # Container is unused at the moment, but available for
-            # future use, if needed.
-            container = None
-            if '::' in param_type:
-                container, param_type = param_type.split('::', 1)
+            if "::" in param_type:
+                container, inner_type = param_type.split("::", 1)
+                method_name = parts[-1]
 
-            # If we have a container type, check if the method belongs to it
-            if container:
-                method_name = target.split('.')[-1]
-                container_type = getattr(builtins, container, None)
-                if container_type and method_name in dir(container_type):
-                    # Method is on the container - resolve against container
-                    if container in self.import_map:
-                        fqn_container = self.import_map[container]
-                        return target.replace(first_part, fqn_container, 1), fqn_container
-                    return target.replace(first_part, container, 1), container
+                if is_builtin_container_method(container, method_name):
+                    resolved_container = self.import_map.get(container, container)
+                    resolved_target = target.replace(first_part, resolved_container, 1)
+                    return resolved_target, resolved_container
 
-            # Strip | None in either position
-            param_type = re.sub(r'\s*\|\s*None', '', param_type).strip()
-            param_type = re.sub(r'None\s*\|\s*', '', param_type).strip()
+                param_type = inner_type
 
-            # Extract from Optional[X]
-            optional_match = re.match(r'^Optional\[(.+)]$', param_type)
+            param_type = re.sub(r"\s*\|\s*None", "", param_type).strip()
+            param_type = re.sub(r"None\s*\|\s*", "", param_type).strip()
+
+            optional_match = re.match(r"^Optional\[(.+)]$", param_type)
             if optional_match:
                 param_type = optional_match.group(1).strip()
 
-            # Extract inner type from type[X] (for param_types path without delimiter)
-            type_match = re.match(r'^type\[(.+)]$', param_type)
+            type_match = re.match(r"^type\[(.+)]$", param_type)
             if type_match:
                 param_type = type_match.group(1).strip()
 
-            base_type = param_type.split('[')[0]
+            base_type = param_type.split("[", 1)[0].strip()
 
-            # Don't resolve if type is Any - leave as variable name
-            if base_type == 'Any':
-                return target, ''
+            if base_type == "Any":
+                return target, ""
 
-            # Try to find FQN for the type
             if base_type in self.import_map:
-                # Type was imported, use FQN from imports
                 fqn_type = self.import_map[base_type]
-                return target.replace(first_part, fqn_type, 1), fqn_type
+                method_name = parts[-1]
+                return f"{fqn_type}.{method_name}", fqn_type
 
-            # Try to find in callable inventory (search for FQN ending with .TypeName)
-            for fqn in self.callable_inventory.keys():
-                if fqn.endswith(f'.{base_type}'):
-                    return target.replace(first_part, fqn, 1), fqn
+            for fqn in self.callable_inventory:
+                if fqn.endswith(f".{base_type}"):
+                    method_name = parts[-1]
+                    return f"{fqn}.{method_name}", fqn
 
-            # Fallback: just use the short type name
-            return target.replace(first_part, base_type, 1), base_type
+            method_name = parts[-1]
+            return f"{base_type}.{method_name}", base_type
 
-        return target, ''
+        if "." not in target:
+            local_candidate = f"{self.unit_fqn}.{target}"
+            if local_candidate in self.callable_inventory:
+                return local_candidate, local_candidate
+            return target, ""
+
+        local_root_candidate = f"{self.unit_fqn}.{first_part}"
+        if local_root_candidate in self.callable_inventory:
+            return target.replace(first_part, local_root_candidate, 1), local_root_candidate
+
+        return target, ""
 
     def _is_external_call(self, target: str) -> bool:
-        """
-        Check if target is a call outside the current unit.
-
-        Returns False for:
-        - super() calls
-        - self.* calls (same class methods)
-        - cls.* calls (same class methods)
-        - Python builtins
-        - Builtin collection methods
-        - Same-unit function/method calls
-        """
-
-        # 1. Skip super() calls
-        if target == 'super':
+        if target == "super":
             return False
-
-        # 2. Skip self/cls calls - these are NOT integration points
-        if target.startswith('self.') or target.startswith('cls.') or target.startswith('object.'):
+        if target.startswith("self.") or target.startswith("cls.") or target.startswith("object."):
             return False
-
-        # 3. Skip Python builtins
-        parts = target.split('.')
-        base_name = parts[-1].split('(')[0]
+        base_name = target.split(".")[-1].split("(")[0]
         if base_name in PYTHON_BUILTINS or base_name in BUILTIN_METHODS:
             return False
-
-        # 4. Skip same-unit calls - if the base name is defined in this file
-        # For bare function calls like "_normalize", the base_name is the function itself
-        # For qualified calls like "obj.method", check if base_name (obj) is a class in this file
-        first_part = target.split('.')[0]
-        base_name = first_part.split('[')[0].split('(')[0]
-        if base_name in self.local_symbols:
+        first_part = target.split(".")[0]
+        if first_part.split("[")[0].split("(")[0] in self.local_symbols:
             return False
-
         return True
 
-    def _get_call_target(self, call_node: ast.Call) -> str | None:
-        """Extract the target of a function/method call."""
+    @staticmethod
+    def _get_call_target(call_node: ast.Call) -> str | None:
         try:
             return ast.unparse(call_node.func)
         except Exception:
             return None
 
 
-def derive_fqn(filepath: Path, source_root: Path) -> str:
-    """Derive fully qualified name from filepath."""
-    try:
-        relative = filepath.relative_to(source_root)
-    except ValueError:
-        # If filepath is not relative to source_root, use absolute
-        relative = filepath
+# ============================================================================
+# CFG / path analysis
+# ============================================================================
 
-    # Remove .py extension and convert path separators to dots
-    fqn = str(relative.with_suffix('')).replace('/', '.').replace('\\', '.')
 
-    # Remove __init__ if present
-    if fqn.endswith('.__init__'):
-        fqn = fqn[:-9]
+def iter_successor_outcomes(branch: Branch):
+    if branch.statement_outcome is not None:
+        yield branch.statement_outcome
+    for target in branch.conditional_targets or []:
+        yield target
+    for outcome in branch.disruptive_outcomes or []:
+        yield outcome
 
-    return fqn
+
+def build_cfg(branches: list[Branch]) -> dict[str, list[str]]:
+    by_id = {branch.id: branch for branch in branches}
+    graph: dict[str, list[str]] = {}
+
+    for branch in branches:
+        successors: list[str] = []
+        for outcome in iter_successor_outcomes(branch):
+            if outcome.is_terminal:
+                continue
+            if outcome.target_ei:
+                successors.append(outcome.target_ei)
+
+        seen: set[str] = set()
+        graph[branch.id] = [ei for ei in successors if ei in by_id and not (ei in seen or seen.add(ei))]
+
+    return graph
+
+
+def enumerate_paths(graph: dict[str, list[str]], start_ei: str, target_ei: str) -> list[list[str]]:
+    def dfs(current: str, target: str, path: list[str], visited: set[str]) -> list[list[str]]:
+        if current == target:
+            return [path + [current]]
+        if current in visited:
+            return []
+        visited_copy = visited | {current}
+        all_paths: list[list[str]] = []
+        for next_ei in graph.get(current, []):
+            all_paths.extend(dfs(next_ei, target, path + [current], visited_copy))
+        return all_paths
+
+    return [[target_ei]] if start_ei == target_ei else dfs(start_ei, target_ei, [], set())
+
+
+def add_execution_paths(entries: list[dict[str, Any]]) -> None:
+    for entry in entries:
+        if entry.get("decorators"):
+            for decorator in entry["decorators"]:
+                if has_effect(decorator, "exclude_from_flow"):
+                    for integration in entry.get("ast_analysis", {}).get("integration_candidates", []):
+                        integration["execution_paths"] = []
+                        integration["suppressed_by"] = decorator.get("name")
+                    break
+
+        if entry.get("needs_callable_analysis") and entry.get("branches") and entry.get("ast_analysis", {}).get(
+                "integration_candidates"):
+            branches = [Branch.from_dict(item) for item in entry["branches"]]
+            graph = build_cfg(branches)
+
+            predecessors: dict[str, list[str]] = {branch.id: [] for branch in branches}
+            for src, targets in graph.items():
+                for target in targets:
+                    predecessors.setdefault(target, []).append(src)
+
+            branch_by_id = {branch.id: branch for branch in branches}
+            entry_eis = [
+                ei_id
+                for ei_id, preds in predecessors.items()
+                if not preds
+                   and not (
+                        branch_by_id[ei_id].owner_info is not None
+                        and branch_by_id[ei_id].owner_info.stmt_type == "Try"
+                        and branch_by_id[ei_id].owner_info.region == "except"
+                )
+            ]
+            if not entry_eis and branches:
+                first_line = min(branch.line for branch in branches)
+                entry_eis = [branch.id for branch in branches if branch.line == first_line]
+
+            line_to_eis: dict[int, list[str]] = {}
+            for branch in branches:
+                line_to_eis.setdefault(branch.line, []).append(branch.id)
+
+            for integration in entry["ast_analysis"]["integration_candidates"]:
+                target_ei = integration.get("ei_id")
+                if not target_ei:
+                    integration["execution_paths"] = []
+                    continue
+
+                all_paths: list[list[str]] = []
+                for start_ei in entry_eis:
+                    all_paths.extend(enumerate_paths(graph, start_ei, target_ei))
+
+                unique_paths: list[list[str]] = []
+                for path in all_paths:
+                    if path not in unique_paths:
+                        unique_paths.append(path)
+
+                feasible_paths, feasibility_results = filter_feasible_paths(unique_paths, branches, timeout_ms=5000)
+                integration["execution_paths"] = feasible_paths
+                integration["path_analysis"] = {
+                    "total_syntactic_paths": len(unique_paths),
+                    "feasible_paths": len(feasible_paths),
+                    "infeasible_paths": len(unique_paths) - len(feasible_paths),
+                    "filter_effectiveness": (
+                        100 * (1 - len(feasible_paths) / len(unique_paths)) if unique_paths else 0),
+                }
+
+                witnesses: list[dict[str, Any]] = []
+                for path in feasible_paths:
+                    path_id = "->".join(path)
+                    result = feasibility_results.get(path_id)
+                    if result and result.witness_values:
+                        witnesses.append({"path": path, "witness": result.witness_values})
+                if witnesses:
+                    integration["test_witnesses"] = witnesses
+
+        if entry.get("children"):
+            add_execution_paths(entry["children"])
 
 
 # ============================================================================
-# File Processing
+# Unit processing
 # ============================================================================
 
-def process_file(
-        filepath: Path,
-        fqn: str,
-        inventory_path: Path,
-        unit_id: str,
+
+def attach_children(entries_by_id: dict[str, dict[str, Any]], unit_entries: list[UnitIndexEntry]) -> list[
+    dict[str, Any]]:
+    roots: list[dict[str, Any]] = []
+    for entry in sorted(unit_entries, key=lambda item: item.ordinal_within_parent):
+        payload = entries_by_id[entry.id]
+        payload.setdefault("children", [])
+        if entry.parent_id and entry.parent_id in entries_by_id and entry.parent_id != entry.owner_id and entry.parent_id != entry.id:
+            # defensive, but the structured index uses parent_id as actual parent
+            pass
+        if entry.parent_id and entry.parent_id in entries_by_id and entry.parent_id != entry.id:
+            entries_by_id[entry.parent_id].setdefault("children", []).append(payload)
+        else:
+            roots.append(payload)
+    return roots
+
+
+def merge_stage2(entries_by_id: dict[str, dict[str, Any]], unit_entries: list[UnitIndexEntry],
+                 stage2_lookup: dict[tuple[str, int, int], dict[str, Any]]) -> None:
+    for entry in unit_entries:
+        payload = entries_by_id[entry.id]
+        key = (entry.name, entry.lineno, entry.end_lineno)
+        stage2_item = stage2_lookup.get(key)
+        if stage2_item is None:
+            continue
+        payload["branches"] = stage2_item.get("branches", [])
+        payload["total_eis"] = stage2_item.get("total_eis", len(stage2_item.get("branches", [])))
+
+
+def count_all_entries(entries: list[dict[str, Any]]) -> int:
+    total = 0
+    for entry in entries:
+        total += 1
+        total += count_all_entries(entry.get("children", []))
+    return total
+
+
+def count_needs_analysis(entries: list[dict[str, Any]]) -> int:
+    total = 0
+    for entry in entries:
+        if entry.get("needs_callable_analysis"):
+            total += 1
+        total += count_needs_analysis(entry.get("children", []))
+    return total
+
+
+def count_by_kind(entries: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for entry in entries:
+        kind = entry.get("kind", "unknown")
+        counts[kind] = counts.get(kind, 0) + 1
+        for child_kind, child_count in count_by_kind(entry.get("children", [])).items():
+            counts[child_kind] = counts.get(child_kind, 0) + child_count
+    return counts
+
+
+def resolve_stage2_file(unit: UnitIndex, ei_file: Path | None, ei_root: Path | None) -> Path | None:
+    if ei_file is not None:
+        return ei_file
+    if ei_root is None:
+        return None
+    candidate = ei_root / (unit.fully_qualified_name.replace(".", "/") + "_eis.yaml")
+    return candidate if candidate.exists() else None
+
+
+def process_unit(
+        unit: UnitIndex,
+        project_symbol_fqns: set[str],
+        stage2_file: Path | None,
         output_root: Path,
-        ei_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Process a Python file and generate inventory."""
-    project_types: set[str] = set()
-    with open(inventory_path, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if line and not line.startswith('#'):
-                # Handle both old format (FQN only) and new format (FQN:ID)
-                if ':' in line:
-                    fqn_part = line.split(':', 1)[0]
-                    project_types.add(fqn_part)
-                else:
-                    project_types.add(line)
+    source_path = Path(unit.filepath)
+    source = source_path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    source_lines = source.splitlines()
+    locator = IndexedNodeLocator(unit.fully_qualified_name)
+    locator.visit(tree)
+    callable_inventory = {entry.fully_qualified_name: entry.id for entry in unit.entries}
+    import_map, _ = build_import_map(tree, project_symbol_fqns)
+    local_symbols = build_local_symbols(tree)
+    local_return_types = build_local_return_type_map(tree)
+    analyzer = AstAnalyzer(
+        source_lines=source_lines,
+        unit_id=unit.unit_id,
+        unit_fqn=unit.fully_qualified_name,
+        callable_inventory=callable_inventory,
+        project_fqns=project_symbol_fqns,
+        import_map=import_map,
+        local_symbols=local_symbols,
+        local_return_types=local_return_types,
+    )
 
-    # Load callable inventory if provided
-    callable_inventory = load_callable_inventory(inventory_path) if inventory_path else {}
+    entries_by_id: dict[str, dict[str, Any]] = {}
+    for entry in unit.entries:
+        if entry.kind in CLASS_ENTRY_KINDS:
+            node = locator.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+        elif entry.kind == "module_assignment":
+            node = locator.assignment_nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+        else:
+            node = locator.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
 
-    # Read source
-    with open(filepath, 'r', encoding='utf-8') as f:
-        source = f.read()
+        if node is None:
+            payload = {
+                "id": entry.id,
+                "kind": entry.kind,
+                "name": entry.name,
+                "line_start": entry.lineno,
+                "line_end": entry.end_lineno,
+            }
+        else:
+            payload = analyzer.analyze_entry(entry, node)
+        entries_by_id[entry.id] = payload
 
-    # Parse AST
-    try:
-        tree = ast.parse(source)
-    except SyntaxError as e:
-        print(f"Syntax error in {filepath}: {e}")
-        return {}
+    merge_stage2(entries_by_id, unit.entries, build_stage2_lookup(load_stage2_yaml(stage2_file)))
 
-    # Enumerate callables
-    enumerator = EnhancedCallableEnumerator(source, unit_id, fqn, callable_inventory)
-    enumerator.entries = []  # Initialize entries list
-    enumerator.build_import_map(tree, project_types)
-    enumerator.build_symbol_table(tree)  # Build symbol table for same-unit filtering
-    enumerator.visit(tree)
+    for entry in unit.entries:
+        payload = entries_by_id[entry.id]
+        branches_payload = payload.get("branches")
+        if not branches_payload:
+            continue
 
-    # Convert CallableEntry objects to dicts for downstream processing
-    entries = [e.to_dict() for e in enumerator.entries]
+        branches = [Branch.from_dict(item) for item in branches_payload]
+        known_types = payload.pop("_known_types", {}) or {}
+        payload.setdefault("ast_analysis", {})
+        payload["ast_analysis"]["integration_candidates"] = analyzer.find_integration_candidates(
+            branches=branches,
+            callable_id=payload["id"],
+            callable_fqn=entry.fully_qualified_name,
+            known_types=known_types,
+        )
 
-    # Load and merge EI data if provided
-    if ei_root:
-        # Use FQN to construct EI file path (matches Stage 2 output structure)
-        ei_file = ei_root / (fqn.replace('.', '/') + '_eis.yaml')
+    roots = attach_children(entries_by_id, unit.entries)
+    add_execution_paths(roots)
 
-        if ei_file.exists():
-            print(f"  → Loading EI data: {ei_file}")
-            with open(ei_file, 'r', encoding='utf-8') as f:
-                ei_data = yaml.safe_load(f)
+    for err in validate_feature_co_occurrences(roots):
+        print(f"Warning: {err}")
 
-                if ei_data and 'functions' in ei_data:
-                    def merge_ei_recursive(entries_list: list[dict[str, Any]],
-                                           parent_ei_func: dict | None = None) -> None:
-                        """Recursively merge EI data into entries."""
-                        for entry in entries_list:
-                            current_ei_func = None
-                            if entry.get('needs_callable_analysis', False):
-                                # Match by line range (handles duplicate names like 'resolve')
-                                line_start = entry.get('line_start')
-                                line_end = entry.get('line_end')
-
-                                # Find EI func that matches this line range
-                                ei_func = None
-                                for func in ei_data['functions']:
-                                    if func.get('line_start') == line_start and func.get('line_end') == line_end:
-                                        ei_func = func
-                                        break
-
-                                if ei_func:
-                                    entry['branches'] = ei_func.get('branches', [])
-                                    entry['total_eis'] = ei_func.get('total_eis', 0)
-                                    current_ei_func = ei_func
-                                elif parent_ei_func:
-                                    # Nested function - extract branches from parent by line range
-                                    parent_branches = parent_ei_func.get('branches', [])
-                                    nested_branches = [
-                                        b for b in parent_branches
-                                        if line_start <= b['line'] <= line_end
-                                    ]
-                                    entry['branches'] = nested_branches
-                                    entry['total_eis'] = len(nested_branches)
-                                    current_ei_func = None
-                                else:
-                                    current_ei_func = None
-
-                            # Recurse into children
-                            if 'children' in entry and entry['children']:
-                                merge_ei_recursive(entry['children'], current_ei_func or parent_ei_func)
-
-                    merge_ei_recursive(entries)
-
-    # Mark implicit returns and yields BEFORE path enumeration
-    mark_terminal_exits(entries)
-
-    # Add execution paths to integration candidates
-    add_execution_paths(entries)
-
-    co_occurrence_errors = validate_feature_co_occurrences(entries)
-    if co_occurrence_errors:
-        for err in co_occurrence_errors:
-            print(f"Warning: {err}")
-
-    # Count entries
-    def count_all_entries(entries_list: list[dict[str, Any]]) -> int:
-        """Recursively count all entries including nested."""
-        count = 0
-        for entry in entries_list:
-            count += 1
-            if 'children' in entry and entry['children']:
-                count += count_all_entries(entry['children'])
-        return count
-
-    total_entries = count_all_entries(entries)
-
-    # Count callables that need analysis
-    def count_needs_analysis(entries_list: list[dict[str, Any]]) -> int:
-        """Recursively count entries that need callable analysis."""
-        count = 0
-        for entry in entries_list:
-            if entry.get('needs_callable_analysis', False):
-                count += 1
-            if 'children' in entry and entry['children']:
-                count += count_needs_analysis(entry['children'])
-        return count
-
-    needs_analysis = count_needs_analysis(entries)
-
-    # Count by kind
-    def count_by_kind(entries_list: list[dict[str, Any]]) -> dict[str, int]:
-        """Recursively count entries by kind."""
-        counts: dict[str, int] = {}
-        for entry in entries_list:
-            kind = entry['kind']
-            counts[kind] = counts.get(kind, 0) + 1
-            if 'children' in entry and entry['children']:
-                child_counts = count_by_kind(entry['children'])
-                for k, v in child_counts.items():
-                    counts[k] = counts.get(k, 0) + v
-        return counts
-
-    kind_counts = count_by_kind(entries)
-
-    # Build inventory
-    inventory: dict[str, Any] = {
-        'unit': filepath.stem,
-        'fully_qualified_name': fqn,
-        'unit_id': unit_id,
-        'filepath': str(filepath),
-        'language': 'python',
-        'entries': entries,
-        'summary': {
-            'total_entries': total_entries,
-            'needs_analysis': needs_analysis,
-            'classes': kind_counts.get('class', 0),
-            'enums': kind_counts.get('enum', 0),
-            'methods': kind_counts.get('method', 0),
-            'functions': kind_counts.get('function', 0),
-        }
+    kind_counts = count_by_kind(roots)
+    inventory = {
+        "unit": source_path.stem,
+        "fully_qualified_name": unit.fully_qualified_name,
+        "unit_id": unit.unit_id,
+        "filepath": str(source_path),
+        "language": unit.language,
+        "entries": roots,
+        "summary": {
+            "total_entries": count_all_entries(roots),
+            "needs_analysis": count_needs_analysis(roots),
+            "classes": kind_counts.get("class", 0),
+            "enums": kind_counts.get("enum", 0),
+            "methods": kind_counts.get("method", 0),
+            "functions": kind_counts.get("function", 0),
+            "assignments": kind_counts.get("assignment", 0),
+        },
     }
 
-    # Save inventory
-    output_path = output_root / (fqn.replace('.', '/') + '.inventory.yaml')
+    output_path = output_root / (unit.fully_qualified_name.replace(".", "/") + ".inventory.yaml")
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(yaml.dump(inventory, sort_keys=False, allow_unicode=True, width=float("inf")),
+                           encoding="utf-8")
 
-    with open(output_path, 'w', encoding='utf-8') as f:
-        yaml.dump(inventory, f, sort_keys=False, allow_unicode=True, width=float('inf'))
-
-    print(f"  → Unit ID: {unit_id}")
-    print(f"  → {total_entries} entries, {needs_analysis} need analysis")
+    print(f"  → Unit ID: {unit.unit_id}")
+    print(
+        f"  → {inventory['summary']['total_entries']} entries, {inventory['summary']['needs_analysis']} need analysis")
     print(f"  → Saved: {output_path}")
-
     return inventory
 
 
@@ -1362,33 +895,61 @@ def process_file(
 # CLI
 # ============================================================================
 
+
+def select_unit(project_index: ProjectIndex, file_arg: Path | None, fqn_arg: str | None) -> UnitIndex | None:
+    if file_arg is not None:
+        resolved = file_arg.resolve()
+        for unit in project_index.units:
+            if Path(unit.filepath).resolve() == resolved:
+                return unit
+    if fqn_arg is not None:
+        for unit in project_index.units:
+            if unit.fully_qualified_name == fqn_arg:
+                return unit
+    return None
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(
-        description='Enumerate callables from Python source with AST analysis',
-        formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-
-    parser.add_argument('--file', type=Path, required=True, help='Python source file')
-    parser.add_argument('--fqn', type=str, required=True, help='Fully qualified name')
-    parser.add_argument('--callable-inventory', type=Path, help='Path to callable inventory file (FQN:ID pairs)')
-    parser.add_argument('--unit-id', type=str, required=True, help='Unique ID for unit')
-    parser.add_argument('--output-root', type=Path, default=Path('dist/inventory'),
-                        help='Root directory for inventory output')
-    parser.add_argument('--ei-root', type=Path, help='Root directory containing EI YAML files')
-
+    parser = argparse.ArgumentParser(description="Build stage 3 inventory from structured stage 1 and stage 2 outputs")
+    parser.add_argument("--unit-index", type=Path, required=True, help="Structured stage 1 project index JSON")
+    parser.add_argument("--file", type=Path, help="Python source file for the unit")
+    parser.add_argument("--fqn", type=str, help="Fully qualified module name for the unit")
+    parser.add_argument("--ei-file", type=Path, help="Stage 2 EI YAML for this unit")
+    parser.add_argument("--ei-root", type=Path, help="Root directory containing per-unit stage 2 YAML files")
+    parser.add_argument("--output-root", type=Path, default=Path("dist/inventory"),
+                        help="Root directory for inventory output")
     args = parser.parse_args()
 
-    if not args.file.exists():
-        print(f"Error: File not found: {args.file}")
+    if args.file is None and args.fqn is None:
+        print("Error: provide --file or --fqn", file=sys.stderr)
+        return 1
+    if not args.unit_index.exists():
+        print(f"Error: Unit index not found: {args.unit_index}", file=sys.stderr)
         return 1
 
-    print(f"Processing: {args.file}")
-    print(f"  → FQN: {args.fqn}")
+    project_index = load_project_index(args.unit_index)
+    unit = select_unit(project_index, args.file, args.fqn)
+    if unit is None:
+        print("Error: could not resolve unit from --file/--fqn", file=sys.stderr)
+        return 1
 
-    process_file(args.file, args.fqn, args.callable_inventory, args.unit_id, args.output_root, args.ei_root)
+    stage2_file = resolve_stage2_file(unit, args.ei_file, args.ei_root)
+    print(f"Processing: {unit.filepath}")
+    print(f"  → FQN: {unit.fully_qualified_name}")
+    if stage2_file is not None:
+        print(f"  → Stage 2: {stage2_file}")
+    else:
+        print("  → Stage 2: none (inventory will be built without EI merge)")
 
+    project_symbol_fqns: set[str] = set()
+    for indexed_unit in project_index.units:
+        project_symbol_fqns.add(indexed_unit.fully_qualified_name)
+        for entry in indexed_unit.entries:
+            project_symbol_fqns.add(entry.fully_qualified_name)
+
+    process_unit(unit, project_symbol_fqns, stage2_file, args.output_root)
     return 0
 
 
-if __name__ == '__main__':
-    sys.exit(main())
+if __name__ == "__main__":
+    raise SystemExit(main())

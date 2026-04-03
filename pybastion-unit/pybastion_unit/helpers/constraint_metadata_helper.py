@@ -328,7 +328,6 @@ def parse_outcome_to_constraint(
             operands=operands,
             smt_expr=smt_expr,
             operation_target=operation_target,
-            skips_eis=skip_eis,
             metadata=metadata
         )
 

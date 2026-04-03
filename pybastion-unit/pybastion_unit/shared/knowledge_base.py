@@ -7,6 +7,7 @@ Contains known patterns for:
 - Deterministic operations (never raise)
 - Standard library modules
 """
+import builtins
 
 # Operations that ALWAYS can raise specific exceptions
 OPERATIONS_THAT_RAISE = {
@@ -582,17 +583,35 @@ COMMON_EXTLIB_MODULES = {
 
 BUILTIN_METHODS = {
     # Known builtin method patterns (never integrations)
-    'items', 'keys', 'values',  # dict methods
-    'get', 'setdefault', 'update',  # dict methods
-    'append', 'extend', 'pop',  # list methods
+    'items', 'keys', 'values', 'get', 'setdefault', 'update',  # dict methods
+    'append', 'extend', 'pop', 'sort',  # list methods
     'add', 'remove', 'discard',  # set methods
-    'split', 'join', 'strip',  # str methods
+    'split', 'join', 'strip', "lower", "endswith",  # str methods
 }
 
 NO_OP_CALLS = {
     'typing.cast',
     'typing_extensions.cast'
 }
+
+
+GENERIC_CONTAINER_TYPES = {
+    "list",
+    "set",
+    "tuple",
+    "dict",
+    "frozenset",
+    "Sequence",
+    "Iterable",
+    "Iterator",
+    "Optional",
+    "type",
+}
+
+
+def is_builtin_container_method(container_name: str, method_name: str) -> bool:
+    container_type = getattr(builtins, container_name, None)
+    return container_type is not None and method_name in dir(container_type)
 
 
 def get_operation_info(target: str) -> dict | None:

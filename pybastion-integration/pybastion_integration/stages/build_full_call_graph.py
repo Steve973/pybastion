@@ -901,8 +901,9 @@ def process_callable(
     for i, branch in enumerate(branches):
         ei_id = branch['id']
 
-        if branch.get('is_terminal') and branch.get('terminates_via') in ('raise', 'exception'):
-            # Terminal exception - no outgoing edges
+        # Terminal EIs do not get ordinary outgoing edges.
+        # Return/call-return behavior is handled separately by the call/return machinery.
+        if branch.get('is_terminal'):
             continue
 
         # Check for conditional branching (if/elif evaluation EIs)
@@ -922,6 +923,7 @@ def process_callable(
                         condition=ct.get('condition')
                     )
             continue  # Done with this EI
+
         # Check if branch has explicit next_ei
         next_ei_target = branch.get('next_ei')
         if next_ei_target:

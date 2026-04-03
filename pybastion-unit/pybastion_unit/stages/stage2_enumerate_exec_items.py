@@ -1,216 +1,228 @@
 #!/usr/bin/env python3
 """
-Execution Item Enumerator - Complete Python Statement Coverage
+Execution Item Enumerator - stage 2 using structured unit index.
 
-Enumerates all execution items (EIs) in Python source code.
-Outputs YAML format for integration with pipeline.
+This keeps the current EI decomposition and resolution behavior, but changes how
+callables/scopes are discovered. Instead of rediscovering callables from a flat
+inventory, it consumes the structured stage 1 unit index and analyzes entries in
+that deterministic order.
+
+Key changes:
+- structured unit index is the authoritative callable/scope inventory
+- AST is parsed once per file
+- a lightweight locator maps indexed entries to AST nodes
+- EI generation/resolution logic remains intentionally close to the current stage 2
 """
 
 from __future__ import annotations
 
 import argparse
 import ast
+import json
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from pybastion_common.models import Branch
-from pybastion_unit.helpers.constraint_metadata_helper import enrich_outcome_with_constraint, \
-    populate_constraint_relationships
+from pybastion_common.models import Branch, StatementOutcome, ConditionalTarget, DisruptiveOutcome, OwnerInfo, \
+    ProjectIndex, UnitIndex, UnitIndexEntry
+from pybastion_unit.helpers.constraint_metadata_helper import (
+    enrich_outcome_with_constraint,
+    populate_constraint_relationships,
+)
 from pybastion_unit.helpers.decorator_processing import extract_statement_decorators
-from pybastion_unit.helpers.statement_decomposition import decompose_statement, DecomposerResult
-from pybastion_unit.shared.callable_id_generation import generate_function_id, generate_ei_id, generate_assignment_id, \
-    generate_function_entry_ei_id, FUNC_ID_EXPR
+from pybastion_unit.semantic_decomposition import decompose_statement
+from pybastion_unit.semantic_decomposition.decomp_types import DecompositionContext, ControlOwner, OwnerKind, DecomposerResult
+from pybastion_unit.shared.callable_id_generation import (
+    FUNC_ID_EXPR,
+    generate_ei_id,
+    generate_function_entry_ei_id,
+)
 
-ENUM_BASES: set[str] = {'Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag'}
-
-
-def load_callable_inventory(filepath: Path | None) -> dict[str, str]:
-    """
-    Load callable inventory file (FQN:ID pairs).
-
-    Returns:
-        Dict mapping fully qualified names to callable IDs
-    """
-    inventory = {}
-    print(f"inventory file path: {filepath}")
-    if not filepath or not filepath.exists():
-        return inventory
-
-    with open(filepath, 'r', encoding='utf-8') as f:
-        for line in f:
-            line = line.strip()
-            if not line or ':' not in line:
-                continue
-            fqn, callable_id = line.split(':', 1)
-            inventory[fqn] = callable_id
-
-    return inventory
-
-
-def derive_fqn_from_path(filepath: Path, source_root: Path | None) -> str:
-    """
-    Convert file path to module FQN.
-
-    Example:
-        src/project/model/keys.py -> project.model.keys
-    """
-    if not source_root:
-        return filepath.stem
-
-    try:
-        relative = filepath.relative_to(source_root)
-    except ValueError:
-        # filepath not relative to source_root, use name only
-        return filepath.stem
-
-    parts = list(relative.parts[:-1]) + [relative.stem]
-
-    # Remove __init__ from end
-    if parts and parts[-1] == "__init__":
-        parts = parts[:-1]
-
-    return ".".join(parts)
+ENUM_BASES: set[str] = {"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"}
+ANALYZABLE_ENTRY_KINDS: set[str] = {
+    "unit_function",
+    "method",
+    "nested_function",
+    "class",
+    "nested_class",
+    "module_assignment",
+}
+IMPLICIT_RETURN_EI_NUM = 9999
 
 
 # ============================================================================
-# Operation Extraction
+# Unit index model
 # ============================================================================
 
-def extract_all_operations(node: ast.AST) -> list[ast.Call]:
-    """
-    Extract ALL Call nodes from an AST in execution order.
 
-    For nested/chained calls like Path(fetch(url)).resolve():
-    - Returns: [fetch(url), Path(...), Path(...).resolve()]
-    - Execution order: innermost first (by depth), then left-to-right
-
-    Returns:
-        List of ast.Call nodes in execution order
-    """
-    operations = []
-
-    # Collect all Call nodes with their depth
-    def collect_calls_with_depth(n: ast.AST, depth: int = 0) -> None:
-        """Recursively collect calls with their nesting depth."""
-        if isinstance(n, ast.Call):
-            # Record this call with its depth and position
-            operations.append((n, depth, n.lineno, n.col_offset))
-
-        # Recurse into children with increased depth
-        for child in ast.iter_child_nodes(n):
-            collect_calls_with_depth(child, depth + 1)
-
-    collect_calls_with_depth(node)
-
-    # Sort by: depth (deepest/innermost first), then line, then column
-    # This gives us execution order: inner calls before outer calls
-    operations.sort(key=lambda x: (-x[1], x[2], x[3]))
-
-    # Return just the Call nodes
-    return [op[0] for op in operations]
+def load_project_index(filepath: Path) -> ProjectIndex:
+    payload = json.loads(filepath.read_text(encoding="utf-8"))
+    units: list[UnitIndex] = []
+    for unit_payload in payload.get("units", []):
+        entries = [UnitIndexEntry(**entry) for entry in unit_payload.get("entries", [])]
+        units.append(
+            UnitIndex(
+                unit_id=unit_payload["unit_id"],
+                fully_qualified_name=unit_payload["fully_qualified_name"],
+                filepath=unit_payload["filepath"],
+                language=unit_payload["language"],
+                source_hash=unit_payload["source_hash"],
+                entries=entries,
+            )
+        )
+    return ProjectIndex(source_root=payload["source_root"], units=units)
 
 
 # ============================================================================
-# AST Traversal
+# Statement context model
 # ============================================================================
 
-def get_all_statements(node: ast.AST) -> list[ast.stmt]:
-    """Get all statements in a function's body, respecting callable boundaries."""
-    statements: list[ast.stmt] = []
 
-    # Start from the function body, not the function node itself
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        body_nodes = node.body
-    else:
-        body_nodes = [node]
-
-    def collect_statements(n: ast.AST) -> None:
-        """Recursively collect statements, stopping at nested callables."""
-        # If this is a nested function/method definition, stop here
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            return
-
-        # If this is a statement, collect it
-        if isinstance(n, ast.stmt):
-            statements.append(n)
-
-        # Recurse into children
-        for child in ast.iter_child_nodes(n):
-            collect_statements(child)
-
-    # Start collecting from the body
-    for stmt in body_nodes:
-        collect_statements(stmt)
-
-    # Sort by line number
-    statements.sort(key=lambda s: s.lineno)
-
-    return statements
+@dataclass(frozen=True)
+class StatementContext:
+    stmt: ast.stmt
+    next_stmt_lines: list[int] | None
+    owners: tuple[ControlOwner, ...] = field(default_factory=tuple)
 
 
-def get_statements_with_next_sibling(
-        node: ast.AST,
-) -> list[tuple[ast.stmt, list[int] | None]]:
-    """
-    Get all statements with their continuation line chain.
+def _prepend_next_line(
+        local_next_line: int | None,
+        inherited_next_lines: list[int] | None,
+) -> list[int] | None:
+    if local_next_line is None:
+        return inherited_next_lines
+    if inherited_next_lines is None:
+        return [local_next_line]
+    return [local_next_line, *inherited_next_lines]
 
-    Returns list of (statement, next_lines) tuples.
 
-    For each statement:
-    - if it has a next sibling in the current block, that line is prepended
-      to the inherited outer continuation chain
-    - if it does not, it inherits the outer continuation chain unchanged
-    - if there is no continuation at any level, next_lines is None
-
-    Ordering of next_lines:
-    - index 0 is the nearest continuation line
-    - index 1 is the next outer continuation line
-    - etc.
-    """
-    result: list[tuple[ast.stmt, list[int] | None]] = []
-
-    def prepend_next_line(
-            local_next_line: int | None,
-            inherited_next_lines: list[int] | None,
-    ) -> list[int] | None:
-        if local_next_line is None:
-            return inherited_next_lines
-        if inherited_next_lines is None:
-            return [local_next_line]
-        return [local_next_line, *inherited_next_lines]
+def get_statement_contexts(node: ast.AST) -> list[StatementContext]:
+    result: list[StatementContext] = []
 
     def visit_block(
             statements: list[ast.stmt],
             inherited_next_lines: list[int] | None = None,
+            owners: tuple[ControlOwner, ...] = (),
     ) -> None:
         for i, stmt in enumerate(statements):
-            local_next_line = (
-                statements[i + 1].lineno if i + 1 < len(statements) else None
+            local_next_line = statements[i + 1].lineno if i + 1 < len(statements) else None
+            next_lines = _prepend_next_line(local_next_line, inherited_next_lines)
+
+            result.append(
+                StatementContext(
+                    stmt=stmt,
+                    next_stmt_lines=next_lines,
+                    owners=owners,
+                )
             )
 
-            next_lines = prepend_next_line(local_next_line, inherited_next_lines)
-            result.append((stmt, next_lines))
-
             if isinstance(stmt, ast.If):
-                visit_block(stmt.body, next_lines)
-                visit_block(stmt.orelse, next_lines)
+                visit_block(
+                    stmt.body,
+                    next_lines,
+                    (*owners, ControlOwner(
+                        kind=OwnerKind.IF,
+                        node=stmt,
+                        region="body",
+                        next_stmt_lines=next_lines
+                    )),
+                )
+                visit_block(
+                    stmt.orelse,
+                    next_lines,
+                    (*owners, ControlOwner(
+                        kind=OwnerKind.IF,
+                        node=stmt,
+                        region="orelse",
+                        next_stmt_lines=next_lines
+                    )),
+                )
+                continue
 
-            elif isinstance(stmt, (ast.For, ast.While)):
-                visit_block(stmt.body, next_lines)
-                visit_block(stmt.orelse, next_lines)
+            if isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
+                visit_block(
+                    stmt.body,
+                    next_lines,
+                    (*owners, ControlOwner(
+                        kind=OwnerKind.LOOP,
+                        node=stmt,
+                        region="body",
+                        next_stmt_lines=next_lines
+                    ))
+                )
+                visit_block(
+                    stmt.orelse,
+                    next_lines,
+                    (*owners, ControlOwner(
+                        kind=OwnerKind.LOOP,
+                        node=stmt,
+                        region="orelse",
+                        next_stmt_lines=next_lines
+                    ))
+                )
+                continue
 
-            elif isinstance(stmt, ast.With):
-                visit_block(stmt.body, next_lines)
+            if isinstance(stmt, (ast.With, ast.AsyncWith)):
+                visit_block(
+                    stmt.body,
+                    next_lines,
+                    (*owners, ControlOwner(
+                        kind=OwnerKind.WITH,
+                        node=stmt,
+                        region="body",
+                        next_stmt_lines=next_lines
+                    )),
+                )
+                continue
 
-            elif isinstance(stmt, ast.Try):
-                visit_block(stmt.body, next_lines)
-                visit_block(stmt.orelse, next_lines)
+            if isinstance(stmt, ast.Try):
+                visit_block(
+                    stmt.body,
+                    next_lines,
+                    (*owners, ControlOwner(
+                        kind=OwnerKind.TRY,
+                        node=stmt,
+                        region="body",
+                        next_stmt_lines=next_lines,
+                    )),
+                )
+
+                visit_block(
+                    stmt.orelse,
+                    next_lines,
+                    (*owners, ControlOwner(
+                        kind=OwnerKind.TRY,
+                        node=stmt,
+                        region="else",
+                        next_stmt_lines=next_lines,
+                    )),
+                )
+
                 for handler in stmt.handlers:
-                    visit_block(handler.body, next_lines)
-                visit_block(stmt.finalbody, next_lines)
+                    visit_block(
+                        handler.body,
+                        next_lines,
+                        (*owners, ControlOwner(
+                            kind=OwnerKind.TRY,
+                            node=stmt,
+                            region="except",
+                            next_stmt_lines=next_lines,
+                        )),
+                    )
+
+                visit_block(
+                    stmt.finalbody,
+                    next_lines,
+                    (*owners, ControlOwner(
+                        kind=OwnerKind.TRY,
+                        node=stmt,
+                        region="finally",
+                        next_stmt_lines=next_lines,
+                    )),
+                )
 
     if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)):
         visit_block(node.body)
@@ -218,13 +230,19 @@ def get_statements_with_next_sibling(
     return result
 
 
+def _build_decomposition_context(context: StatementContext) -> DecompositionContext:
+    return DecompositionContext(
+        next_stmt_lines=context.next_stmt_lines,
+        owners=context.owners,
+    )
+
+
 # ============================================================================
 # Result structures
 # ============================================================================
 
-class FunctionResult:
-    """Result of EI enumeration for a single function."""
 
+class FunctionResult:
     def __init__(self, name: str, line_start: int, line_end: int, branches: list[Branch]) -> None:
         self.name = name
         self.line_start = line_start
@@ -233,13 +251,12 @@ class FunctionResult:
         self.total_eis = len(branches)
 
     def to_dict(self) -> dict[str, Any]:
-        """Convert to dict for YAML output."""
         return {
-            'name': self.name,
-            'line_start': self.line_start,
-            'line_end': self.line_end,
-            'total_eis': self.total_eis,
-            'branches': [b.to_dict() for b in self.branches]
+            "name": self.name,
+            "line_start": self.line_start,
+            "line_end": self.line_end,
+            "total_eis": self.total_eis,
+            "branches": [branch.to_dict() for branch in self.branches],
         }
 
 
@@ -248,29 +265,29 @@ def create_function_entry_branch(
         line_num: int,
         target_line: int | None = None,
 ) -> Branch:
-    """Create a Branch for the function entry point."""
-    entry_ei_id = generate_function_entry_ei_id(callable_id)
     return Branch(
-        id=entry_ei_id,
-        condition=f"enters function {callable_id}",
-        outcome="function start",
-        stmt_type="FunctionInvocation",
-        synthetic=True,
+        id=generate_function_entry_ei_id(callable_id),
         line=line_num,
-        target_line=target_line,
+        condition=f"enters function {callable_id}",
+        description="function start",
+        stmt_type="FunctionInvocation",
+        statement_outcome=StatementOutcome(
+            outcome="function start",
+            target_line=target_line,
+            synthetic=True,
+        ),
     )
 
 
-def get_first_ei_line(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
-    if not node.body:
+def get_first_ei_line(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> int:
+    if not getattr(node, "body", None):
         return node.lineno
 
     first_stmt = node.body[0]
-
     if (
-        isinstance(first_stmt, ast.Expr)
-        and isinstance(first_stmt.value, ast.Constant)
-        and isinstance(first_stmt.value.value, str)
+            isinstance(first_stmt, ast.Expr)
+            and isinstance(first_stmt.value, ast.Constant)
+            and isinstance(first_stmt.value.value, str)
     ):
         if len(node.body) > 1:
             return node.body[1].lineno
@@ -279,347 +296,575 @@ def get_first_ei_line(node: ast.FunctionDef | ast.AsyncFunctionDef) -> int:
     return first_stmt.lineno
 
 
-def enumerate_function_eis(
-        func_node: ast.FunctionDef | ast.AsyncFunctionDef,
-        source_lines: list[str],
-        callable_id
-) -> FunctionResult:
-    """
-    Enumerate all EIs in a function.
+# ============================================================================
+# Resolution helpers
+# ============================================================================
 
-    Returns FunctionResult with Branch objects.
-    """
-    branches: list[Branch] = []
-    ei_counter = 1
 
-    pattern = re.compile(FUNC_ID_EXPR)
-    if bool(pattern.match(callable_id)):
-        first_ei_line = get_first_ei_line(func_node)
-        branches.append(create_function_entry_branch(callable_id, func_node.lineno, first_ei_line))
+def _implicit_return_ei_id(callable_id: str) -> str:
+    return generate_ei_id(callable_id, IMPLICIT_RETURN_EI_NUM)
 
-    # Get all statements with their next sibling info
-    statements_with_next = get_statements_with_next_sibling(func_node)
 
-    for stmt, next_stmt_lines in statements_with_next:
-        # Filter to only this function's line range
-        if not (func_node.lineno <= stmt.lineno <= func_node.end_lineno):
-            continue
-        if stmt == func_node:
-            continue
+def _redirect_implicit_return_outcome(
+        outcome: StatementOutcome | ConditionalTarget | DisruptiveOutcome,
+        sink_id: str,
+) -> bool:
+    if not outcome.is_terminal:
+        return False
+    if outcome.terminates_via != "implicit-return":
+        return False
 
-        print(f"DEBUG: About to decompose stmt at line {stmt.lineno}, next_stmt_lines={str(next_stmt_lines)}")
-        outcomes: list[DecomposerResult] = decompose_statement(stmt, source_lines, next_stmt_lines)
+    outcome.is_terminal = False
+    outcome.terminates_via = None
+    outcome.target_line = None
+    outcome.target_ei = sink_id
+    return True
 
-        # Extract decorators for this statement
-        stmt_decorators = extract_statement_decorators(stmt, source_lines)
 
-        if outcomes:
-            for decompose_result in outcomes:
-                outcome = decompose_result.outcome
-                call_node = decompose_result.call_node
-                target_line = decompose_result.target_line
-                conditional_targets = decompose_result.conditional_targets
-                skips_lines = decompose_result.skips_lines
-                ei_id = generate_ei_id(callable_id, ei_counter)
+def _redirect_explicit_implicit_returns(branches: list[Branch], callable_id: str) -> bool:
+    sink_id = _implicit_return_ei_id(callable_id)
+    referenced = False
 
-                condition, result, constraint = enrich_outcome_with_constraint(
-                    outcome, call_node, stmt, ei_id, stmt.lineno, skips_lines
-                )
-
-                branches.append(
-                    Branch(
-                        id=ei_id,
-                        line=stmt.lineno,
-                        condition=condition,
-                        outcome=result,
-                        constraint=constraint,
-                        stmt_type=type(stmt).__name__,
-                        decorators=stmt_decorators,
-                        target_line=target_line,
-                        conditional_targets=conditional_targets,
-                    )
-                )
-
-                ei_counter += 1
-
-    # Resolve target_line to next_ei
     for branch in branches:
-        if branch.target_line:
-            print(f"DEBUG: Resolving {branch.id} target_line={branch.target_line}")
-            for target_branch in branches:
-                if target_branch.line == branch.target_line:
-                    print(f"DEBUG: Found match: {target_branch.id}")
-                    branch.next_ei = target_branch.id
-                    break
-            else:
-                print(f"DEBUG: No match found for {branch.id} target_line={branch.target_line}")
-            # Clear target_line after resolution
-            branch.target_line = None
+        for outcome in _iter_resolvable_outcomes(branch):
+            if _redirect_implicit_return_outcome(outcome, sink_id):
+                referenced = True
 
-    # Resolve conditional_targets target_line to target_ei
+    return referenced
+
+
+def _append_implicit_return_sink_if_referenced(
+        branches: list[Branch],
+        callable_id: str,
+        sink_line: int,
+) -> None:
+    sink_id = _implicit_return_ei_id(callable_id)
+
+    if any(branch.id == sink_id for branch in branches):
+        return
+
+    referenced = False
     for branch in branches:
-        if branch.conditional_targets:
-            for ct in branch.conditional_targets:
-                if ct.target_line:
-                    for target_branch in branches:
-                        if target_branch.line == ct.target_line:
-                            ct.target_ei = target_branch.id
-                            break
-
-    # Resolve skips_eis from line number strings to EI IDs
-    for branch in branches:
-        if branch.constraint and branch.constraint.skips_eis:
-            resolved_ids = []
-            for line_str in branch.constraint.skips_eis:
-                line_num = int(line_str)
-                for target_branch in branches:
-                    if target_branch.line == line_num:
-                        resolved_ids.append(target_branch.id)
-            branch.constraint.skips_eis = resolved_ids
-
-    # After all branches are created and target_line resolution is done
-    for i, branch in enumerate(branches):
-        # Skip if already has next_ei or is terminal
-        if branch.next_ei or branch.is_terminal:
-            continue
-
-        # Get this branch's skipped EIs
-        skips = set(branch.constraint.skips_eis if branch.constraint and branch.constraint.skips_eis else [])
-
-        # Find the next non-terminal EI that this branch doesn't skip
-        for j in range(i + 1, len(branches)):
-            next_branch = branches[j]
-            # Skip terminal branches
-            if next_branch.is_terminal:
-                continue
-            # Skip if this branch explicitly skips that EI
-            if next_branch.id in skips:
-                continue
-            branch.next_ei = next_branch.id
+        for outcome in _iter_resolvable_outcomes(branch):
+            if outcome.target_ei == sink_id:
+                referenced = True
+                break
+        if referenced:
             break
 
-    return FunctionResult(
-        name=func_node.name,
-        line_start=func_node.lineno,
-        line_end=func_node.end_lineno,
-        branches=branches
+    if not referenced:
+        return
+
+    branches.append(
+        Branch(
+            id=sink_id,
+            line=sink_line,
+            condition="implicit return",
+            description="implicit return",
+            stmt_type="ImplicitReturn",
+            statement_outcome=StatementOutcome(
+                outcome="implicit return",
+                is_terminal=True,
+                terminates_via="implicit-return",
+                synthetic=True,
+            ),
+        )
     )
 
 
-# ============================================================================
-# File Processing
-# ============================================================================
+def _iter_resolvable_outcomes(branch: Branch) -> list[StatementOutcome | ConditionalTarget | DisruptiveOutcome]:
+    outcomes: list[StatementOutcome | ConditionalTarget | DisruptiveOutcome] = []
 
-class CallableFinder(ast.NodeVisitor):
-    """Find all callables with proper FQN tracking."""
+    if branch.statement_outcome is not None:
+        outcomes.append(branch.statement_outcome)
 
-    def __init__(self, module_fqn: str, source_lines: list[str], inventory: dict[str, str], unit_id: str,
-                 target_name: str | None):
-        self.module_fqn = module_fqn
-        self.source_lines = source_lines
-        self.inventory = inventory
-        self.unit_id = unit_id
-        self.target_name = target_name
-        self.results: list[FunctionResult] = []
-        self.fqn_stack = [module_fqn] if module_fqn else []
-        self.func_counter = 1
-        self.assignment_counter = 1
-        self.function_depth = 0
+    if branch.conditional_targets:
+        outcomes.extend(branch.conditional_targets)
 
-    @staticmethod
-    def _is_enum_class(node: ast.ClassDef) -> bool:
-        for base in node.bases:
-            if isinstance(base, ast.Name) and base.id in ENUM_BASES:
-                return True
-            if isinstance(base, ast.Attribute) and base.attr in ENUM_BASES:
-                return True
+    if branch.disruptive_outcomes:
+        outcomes.extend(branch.disruptive_outcomes)
+
+    return outcomes
+
+
+def _iter_skippable_outcomes(branch: Branch) -> list[StatementOutcome | ConditionalTarget | DisruptiveOutcome]:
+    return _iter_resolvable_outcomes(branch)
+
+
+def _resolve_branch_target_line(branches: list[Branch], branch: Branch) -> None:
+    for outcome in _iter_resolvable_outcomes(branch):
+        if outcome.target_line is None:
+            continue
+
+        for candidate in branches:
+            if candidate.line == outcome.target_line:
+                outcome.target_ei = candidate.id
+                break
+
+        outcome.target_line = None
+
+
+def _resolve_same_line_if_target(branches: list[Branch], branch: Branch, condition: bool) -> str | None:
+    for candidate in branches:
+        if candidate.line != branch.line:
+            continue
+        if candidate.id == branch.id:
+            continue
+        if candidate.stmt_type != "If":
+            continue
+        if candidate.constraint is None:
+            continue
+        if candidate.constraint.constraint_type != "condition":
+            continue
+        if candidate.constraint.polarity != condition:
+            continue
+        return candidate.id
+
+    return None
+
+
+def _resolve_conditional_targets(branches: list[Branch]) -> None:
+    for branch in branches:
+        if not branch.conditional_targets:
+            continue
+
+        for target in branch.conditional_targets:
+            if target.is_terminal or target.target_line is None:
+                continue
+
+            if (
+                    branch.stmt_type == "If"
+                    and branch.description.startswith("evaluates ")
+                    and target.target_line == branch.line
+            ):
+                sibling_target = _resolve_same_line_if_target(
+                    branches,
+                    branch,
+                    target.condition_result,
+                )
+                if sibling_target:
+                    target.target_ei = sibling_target
+                    continue
+
+            for candidate in branches:
+                if candidate.line == target.target_line:
+                    target.target_ei = candidate.id
+                    break
+
+
+def _resolve_skip_eis(branches: list[Branch]) -> None:
+    line_to_eis: dict[int, list[str]] = {}
+    for branch in branches:
+        line_to_eis.setdefault(branch.line, []).append(branch.id)
+
+    for branch in branches:
+        for outcome in _iter_skippable_outcomes(branch):
+            if not outcome.skips_lines:
+                continue
+
+            resolved_ids: list[str] = []
+            for line_num in outcome.skips_lines:
+                resolved_ids.extend(line_to_eis.get(line_num, []))
+
+            seen: set[str] = set()
+            outcome.skips_eis = [ei for ei in resolved_ids if not (ei in seen or seen.add(ei))]
+
+
+def _is_forbidden_successor(_: Branch, candidate: Branch) -> bool:
+    owner = candidate.owner_info
+
+    predicates = [
+        owner is not None
+        and owner.stmt_type == "Try"
+        and owner.region == "except",
+    ]
+
+    return any(predicates)
+
+
+def _is_excluded_successor(current: Branch, candidate: Branch) -> bool:
+    if current.constraint is None:
         return False
+    return candidate.id in (current.constraint.excludes or [])
 
-    def _enumerate_and_record(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef, fqn: str) -> None:
-        callable_id = self.inventory.get(fqn)
-        if not callable_id:
-            callable_id = generate_function_id(self.unit_id, self.func_counter)
-            print(f"Warning: {fqn} not in inventory, generated {callable_id}")
 
-        result = enumerate_function_eis(node, self.source_lines, callable_id)
-        populate_constraint_relationships(result.branches)
-        self.results.append(result)
-        self.func_counter += 1
+def _is_skipped_successor(
+    candidate: Branch,
+    outcome: StatementOutcome | ConditionalTarget | DisruptiveOutcome | None = None,
+) -> bool:
+    if outcome is None:
+        return False
+    return candidate.id in (outcome.skips_eis or [])
 
-    def visit_Assign(self, node) -> None:
-        self._process_assignment(node)
 
-    def visit_AnnAssign(self, node) -> None:
-        if self.function_depth == 0:
-            self._process_assignment(node)
+def _same_statement_successor(
+    branches: list[Branch],
+    index: int,
+    branch: Branch,
+) -> Branch | None:
+    outcome = branch.statement_outcome
+    if outcome is None:
+        return None
 
-    def visit_AugAssign(self, node) -> None:
-        self._process_assignment(node)
+    for candidate in branches[index + 1:]:
+        if candidate.line != branch.line:
+            break
+
+        if _is_skipped_successor(candidate, outcome):
+            continue
+        if _is_excluded_successor(branch, candidate):
+            continue
+        if _is_forbidden_successor(branch, candidate):
+            continue
+
+        # Prefer same-line normal statement outcomes first.
+        if candidate.statement_outcome is not None:
+            return candidate
+
+        # If there are no more same-line normal outcomes, allow a same-line
+        # disruptive/terminal branch as the final step.
+        if candidate.disruptive_outcomes:
+            return candidate
+
+    return None
+
+
+def _assign_fallthrough_next_eis(branches: list[Branch], callable_id: str) -> None:
+    """
+    Final safe fallthrough for normal statement outcomes.
+
+    Priority:
+    1. explicit target_ei already assigned on statement_outcome
+    2. same-statement sequential continuation for Raise/Return
+    3. generic forward fallthrough respecting skips/excludes
+    4. implicit return sink when no next EI exists
+    """
+    implicit_return_sink = _implicit_return_ei_id(callable_id)
+
+    for index, branch in enumerate(branches):
+        outcome = branch.statement_outcome
+        if outcome is None:
+            continue
+
+        if outcome.target_ei or outcome.is_terminal:
+            continue
+
+        same_stmt = _same_statement_successor(branches, index, branch)
+        if same_stmt is not None:
+            outcome.target_ei = same_stmt.id
+            continue
+
+        for candidate in branches[index + 1:]:
+            if _is_skipped_successor(candidate, outcome):
+                continue
+            if _is_excluded_successor(branch, candidate):
+                continue
+            outcome.target_ei = candidate.id
+            break
+
+        if outcome.target_ei is None:
+            outcome.target_ei = implicit_return_sink
+
+
+# ============================================================================
+# AST node locator
+# ============================================================================
+
+
+class IndexedNodeLocator(ast.NodeVisitor):
+    def __init__(self, module_fqn: str):
+        self.module_fqn = module_fqn
+        self.scope_stack: list[str] = [module_fqn] if module_fqn else []
+        self.nodes_by_fqn_and_line: dict[tuple[str, int], ast.AST] = {}
+        self.assignment_nodes_by_fqn_and_line: dict[tuple[str, int], ast.AST] = {}
+
+    def current_fqn_prefix(self) -> str:
+        return ".".join(self.scope_stack)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        self.fqn_stack.append(node.name)
-
-        if self._is_enum_class(node):
-            # Emit the enum class itself as an entry so it appears in the ledger
-            fqn = '.'.join(self.fqn_stack)
-            self._enumerate_and_record(node, fqn)
-            # Don't generic_visit — enum members aren't callable children
-        else:
-            self.generic_visit(node)
-
-        self.fqn_stack.pop()
+        fqn = f"{self.current_fqn_prefix()}.{node.name}" if self.scope_stack else node.name
+        self.nodes_by_fqn_and_line[(fqn, node.lineno)] = node
+        self.scope_stack.append(node.name)
+        self.generic_visit(node)
+        self.scope_stack.pop()
 
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        self.function_depth += 1
-        self._process_function(node)
-        self.function_depth -= 1
+        fqn = f"{self.current_fqn_prefix()}.{node.name}" if self.scope_stack else node.name
+        self.nodes_by_fqn_and_line[(fqn, node.lineno)] = node
+        self.scope_stack.append(node.name)
+        self.generic_visit(node)
+        self.scope_stack.pop()
 
     def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        self.function_depth += 1
-        self._process_function(node)
-        self.function_depth -= 1
+        fqn = f"{self.current_fqn_prefix()}.{node.name}" if self.scope_stack else node.name
+        self.nodes_by_fqn_and_line[(fqn, node.lineno)] = node
+        self.scope_stack.append(node.name)
+        self.generic_visit(node)
+        self.scope_stack.pop()
 
-    def _process_function(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        # Skip if we're looking for a specific function
-        if self.target_name and node.name != self.target_name:
-            return
+    def visit_Assign(self, node: ast.Assign) -> None:
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                fqn = f"{self.module_fqn}.{target.id}" if self.module_fqn else target.id
+                self.assignment_nodes_by_fqn_and_line[(fqn, node.lineno)] = node
+                break
+        self.generic_visit(node)
 
-        # Build FQN
-        if self.fqn_stack:
-            fqn = f"{'.'.join(self.fqn_stack)}.{node.name}"
-        else:
-            fqn = node.name
+    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+        if isinstance(node.target, ast.Name):
+            fqn = f"{self.module_fqn}.{node.target.id}" if self.module_fqn else node.target.id
+            self.assignment_nodes_by_fqn_and_line[(fqn, node.lineno)] = node
+        self.generic_visit(node)
 
-        # Get callable ID from inventory or generate
-        self._enumerate_and_record(node, fqn)
+    def visit_AugAssign(self, node: ast.AugAssign) -> None:
+        if isinstance(node.target, ast.Name):
+            fqn = f"{self.module_fqn}.{node.target.id}" if self.module_fqn else node.target.id
+            self.assignment_nodes_by_fqn_and_line[(fqn, node.lineno)] = node
+        self.generic_visit(node)
 
-        # Process nested functions
-        self.fqn_stack.append(node.name)
-        item: ast.FunctionDef | ast.AsyncFunctionDef
-        for item in ast.walk(node):
-            if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item != node:
-                # This is a nested function - process it recursively
-                self._process_function(item)
-        self.fqn_stack.pop()
 
-    def _process_assignment(self, node: ast.Assign | ast.AnnAssign | ast.AugAssign):
-        if not isinstance(node.value, ast.Call):
-            return
+# ============================================================================
+# Function enumeration
+# ============================================================================
 
-        # Get target name(s) - Assign has targets (list), others have target (single)
-        if isinstance(node, ast.Assign):
-            # For multiple targets like a = b = value, just use the first one
-            if not node.targets:
-                return
-            first_target = node.targets[0]
-            if not isinstance(first_target, ast.Name):
-                return  # Skip non-Name targets (tuples, attributes, etc.)
-            target_name = first_target.id
-        else:  # AnnAssign or AugAssign
-            if not isinstance(node.target, ast.Name):
-                return
-            target_name = node.target.id
 
-        fqn = f"{self.module_fqn}.{target_name}"
-        callable_id = self.inventory.get(fqn)
-        if not callable_id:
-            callable_id = generate_assignment_id(self.unit_id, self.assignment_counter)
-            print(f"Warning: {fqn} not in inventory, generated {callable_id}")
+def _owner_info_from_context(context: StatementContext) -> OwnerInfo | None:
+    if not context.owners:
+        return None
 
-        self.assignment_counter += 1
-        branches: list[Branch] = []
-        ei_counter = 0
+    owner = context.owners[-1]
+    return OwnerInfo(
+        stmt_type=type(owner.node).__name__,
+        region=owner.region,
+        line=getattr(owner.node, "lineno", None),
+    )
 
-        # No next statement for single assignment
-        outcomes: list[DecomposerResult] = decompose_statement(node, self.source_lines, next_stmt_lines=None)
 
-        if outcomes:
-            for decompose_result in outcomes:
-                # Handle both EIOutcome and LineOutcome
-                outcome = decompose_result.outcome
-                call_node = decompose_result.call_node
-                target_line = decompose_result.target_line
+def enumerate_function_eis(
+        func_node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+        source_lines: list[str],
+        callable_id: str,
+) -> FunctionResult:
+    branches: list[Branch] = []
+    ei_counter = 1
 
-                ei_counter += 1
-                ei_id = generate_ei_id(callable_id, ei_counter)
+    if re.compile(FUNC_ID_EXPR).match(callable_id):
+        first_ei_line = get_first_ei_line(func_node)
+        branches.append(create_function_entry_branch(callable_id, func_node.lineno, first_ei_line))
 
-                # Extract constraint metadata
-                condition, result, constraint = enrich_outcome_with_constraint(
-                    outcome,
-                    call_node,
-                    node,
-                    ei_id,
-                    node.lineno,
-                )
+    statement_contexts = get_statement_contexts(func_node)
 
-                branches.append(
-                    Branch(
-                        id=ei_id,
-                        line=node.lineno,
-                        condition=condition,
-                        outcome=result,
-                        constraint=constraint,
-                        stmt_type=type(node).__name__,
-                        target_line=target_line
-                    )
-                )
+    for context in statement_contexts:
+        stmt = context.stmt
 
-            function_result = FunctionResult(
-                name=target_name,
-                line_start=node.lineno,
-                line_end=node.end_lineno,
-                branches=branches
+        if stmt == func_node:
+            continue
+        if not (func_node.lineno <= stmt.lineno <= func_node.end_lineno):
+            continue
+
+        decomp_context = _build_decomposition_context(context)
+        outcomes = decompose_statement(stmt, source_lines, decomp_context)
+        stmt_decorators = extract_statement_decorators(stmt, source_lines)
+
+        for decomposed in outcomes or []:
+            ei_id = generate_ei_id(callable_id, ei_counter)
+            skips_lines: list[int] = []
+            if decomposed.statement_outcome is not None:
+                skips_lines = decomposed.statement_outcome.skips_lines
+
+            condition, result, constraint = enrich_outcome_with_constraint(
+                decomposed.description,
+                decomposed.call_node,
+                stmt,
+                ei_id,
+                stmt.lineno,
+                skips_lines,
             )
-            populate_constraint_relationships(branches)
-            self.results.append(function_result)
+
+            owner_info = _owner_info_from_context(context)
+
+            branches.append(
+                Branch(
+                    id=ei_id,
+                    line=stmt.lineno,
+                    condition=condition,
+                    description=decomposed.description,
+                    constraint=constraint,
+                    stmt_type=type(stmt).__name__,
+                    decorators=stmt_decorators,
+                    statement_outcome=decomposed.statement_outcome,
+                    conditional_targets=decomposed.conditional_targets,
+                    disruptive_outcomes=decomposed.disruptive_outcomes,
+                    owner_info=owner_info,
+                )
+            )
+            ei_counter += 1
+
+    for branch in branches:
+        _resolve_branch_target_line(branches, branch)
+
+    _resolve_conditional_targets(branches)
+    _resolve_skip_eis(branches)
+
+    _redirect_explicit_implicit_returns(branches, callable_id)
+    _assign_fallthrough_next_eis(branches, callable_id)
+    _append_implicit_return_sink_if_referenced(branches, callable_id, func_node.end_lineno)
+
+    return FunctionResult(
+        name=getattr(func_node, "name", "<class>"),
+        line_start=func_node.lineno,
+        line_end=func_node.end_lineno,
+        branches=branches,
+    )
 
 
-def enumerate_file(
+def enumerate_assignment_eis(
+        node: ast.Assign | ast.AnnAssign | ast.AugAssign,
+        source_lines: list[str],
+        callable_id: str,
+        target_name: str,
+) -> FunctionResult | None:
+    value = getattr(node, "value", None)
+    if not isinstance(value, ast.Call):
+        return None
+
+    branches: list[Branch] = []
+    ei_counter = 0
+
+    outcomes: list[DecomposerResult] = decompose_statement(
+        node,
+        source_lines,
+        DecompositionContext(
+            next_stmt_lines=None,
+        ),
+    )
+
+    for decomposed in outcomes or []:
+        ei_counter += 1
+        ei_id = generate_ei_id(callable_id, ei_counter)
+        skips_lines: list[int] = []
+        if decomposed.statement_outcome is not None:
+            skips_lines = decomposed.statement_outcome.skips_lines
+
+        condition, result, constraint = enrich_outcome_with_constraint(
+            decomposed.description,
+            decomposed.call_node,
+            node,
+            ei_id,
+            node.lineno,
+            skips_lines,
+        )
+        branches.append(
+            Branch(
+                id=ei_id,
+                line=node.lineno,
+                condition=condition,
+                description=decomposed.description,
+                constraint=constraint,
+                stmt_type=type(node).__name__,
+                statement_outcome=decomposed.statement_outcome,
+                conditional_targets=decomposed.conditional_targets,
+                disruptive_outcomes=decomposed.disruptive_outcomes,
+            )
+        )
+
+    _resolve_skip_eis(branches)
+    for branch in branches:
+        _resolve_branch_target_line(branches, branch)
+    _resolve_conditional_targets(branches)
+
+    _redirect_explicit_implicit_returns(branches, callable_id)
+    _assign_fallthrough_next_eis(branches, callable_id)
+    _append_implicit_return_sink_if_referenced(branches, callable_id, node.end_lineno)
+
+    function_result = FunctionResult(
+        name=target_name,
+        line_start=node.lineno,
+        line_end=node.end_lineno,
+        branches=branches,
+    )
+    populate_constraint_relationships(branches)
+    return function_result
+
+
+def _is_enum_class(node: ast.ClassDef) -> bool:
+    for base in node.bases:
+        if isinstance(base, ast.Name) and base.id in ENUM_BASES:
+            return True
+        if isinstance(base, ast.Attribute) and base.attr in ENUM_BASES:
+            return True
+    return False
+
+
+def _matches_target(entry: UnitIndexEntry, target_name: str | None) -> bool:
+    return target_name is None or entry.name == target_name
+
+
+def enumerate_unit_from_index(
         filepath: Path,
-        unit_id: str,
+        unit_index: UnitIndex,
         function_name: str | None = None,
-        callable_inventory: dict[str, str] | None = None,
-        module_fqn: str | None = None
 ) -> list[FunctionResult]:
-    """
-    Enumerate EIs for all functions in a file (or just one).
-
-    Args:
-        filepath: Path to Python file
-        unit_id: Unit ID (fallback if inventory not available)
-        function_name: Optional specific function to enumerate
-        callable_inventory: Dict of FQN -> callable ID
-        module_fqn: Module fully qualified name
-    """
-
-    with open(filepath, 'r', encoding='utf-8') as f:
-        source = f.read()
-
-    source_lines = source.split('\n')
+    source = filepath.read_text(encoding="utf-8")
+    source_lines = source.split("\n")
     tree = ast.parse(source)
 
-    inventory = callable_inventory or {}
+    locator = IndexedNodeLocator(unit_index.fully_qualified_name)
+    locator.visit(tree)
 
-    # Use visitor to track class context
-    finder = CallableFinder(module_fqn or "", source_lines, inventory, unit_id, function_name)
-    finder.visit(tree)
+    results: list[FunctionResult] = []
 
-    return finder.results
+    for entry in unit_index.entries:
+        if entry.kind not in ANALYZABLE_ENTRY_KINDS:
+            continue
+        if not _matches_target(entry, function_name):
+            continue
+
+        if entry.kind == "module_assignment":
+            node: ast.Assign | ast.AnnAssign | ast.AugAssign | None = locator.assignment_nodes_by_fqn_and_line.get(
+                (entry.fully_qualified_name, entry.lineno)
+            )
+            if node is None:
+                continue
+            assignment_result = enumerate_assignment_eis(node, source_lines, entry.id, entry.name)
+            if assignment_result is not None:
+                results.append(assignment_result)
+            continue
+
+        node = locator.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+        if node is None:
+            continue
+
+        if isinstance(node, ast.ClassDef):
+            if not _is_enum_class(node):
+                continue
+            result = enumerate_function_eis(node, source_lines, entry.id)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            result = enumerate_function_eis(node, source_lines, entry.id)
+        else:
+            continue
+
+        populate_constraint_relationships(result.branches)
+        results.append(result)
+
+    return results
+
+
+# ============================================================================
+# CLI / formatting
+# ============================================================================
 
 
 def format_for_yaml(results: list[FunctionResult]) -> dict[str, Any]:
-    """Format results as dict for YAML output."""
     if not results:
         return {}
-
     return {
-        'module': "unknown",
-        'functions': [r.to_dict() for r in results]
+        "module": "unknown",
+        "functions": [result.to_dict() for result in results],
     }
 
 
 def format_outcome_map_text(result: FunctionResult) -> str:
-    """Format the branches for display."""
     lines: list[str] = []
     lines.append(f"=== {result.name} (lines {result.line_start}-{result.line_end}) ===")
     lines.append(f"Total EIs: {result.total_eis}")
@@ -629,79 +874,66 @@ def format_outcome_map_text(result: FunctionResult) -> str:
     for branch in result.branches:
         lines.append(f"\n{branch.id} (Line {branch.line}):")
         lines.append(f"  Condition: {branch.condition}")
-        lines.append(f"  Outcome: {branch.outcome}")
+        lines.append(f"  Description: {branch.description}")
 
-    return '\n'.join(lines)
+    return "\n".join(lines)
 
 
-# ============================================================================
-# CLI
-# ============================================================================
+def _select_unit(project_index: ProjectIndex, filepath: Path) -> UnitIndex | None:
+    resolved_file = filepath.resolve()
+
+    for unit in project_index.units:
+        if Path(unit.filepath).resolve() == resolved_file:
+            return unit
+
+    return None
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description='Enumerate Execution Items (EIs) from Python source',
+        description="Enumerate Execution Items (EIs) from Python source using unit index",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Enumerate all functions in a file (YAML output)
-  %(prog)s mymodule.py --output mymodule_eis.yaml
-
-  # Enumerate a specific function
-  %(prog)s mymodule.py --function validate_typed_dict
-
-  # Human-readable text output
-  %(prog)s mymodule.py --text
-        """
     )
 
-    parser.add_argument('file', type=Path, help='Python source file')
-    parser.add_argument('--unit-id', '-u', required=True, help='Unit ID (required)')
-    parser.add_argument('--function', '-f', help='Specific function name to enumerate')
-    parser.add_argument('--callable-inventory', type=Path, help='Callable inventory file (FQN:ID pairs)')
-    parser.add_argument('--source-root', type=Path, help='Source root for deriving FQN')
-    parser.add_argument('--text', action='store_true', help='Output human-readable text instead of YAML')
-    parser.add_argument('--output', '-o', type=Path, help='Save output to file')
+    parser.add_argument("file", type=Path, help="Python source file")
+    parser.add_argument("--unit-index", required=True, type=Path, help="Structured stage 1 project index JSON")
+    parser.add_argument("--function", "-f", help="Specific function name to enumerate")
+    parser.add_argument("--text", action="store_true", help="Output human readable text instead of YAML")
+    parser.add_argument("--output", "-o", type=Path, help="Save output to file")
 
     args = parser.parse_args()
 
     if not args.file.exists():
         print(f"Error: File not found: {args.file}")
         return 1
+    if not args.unit_index.exists():
+        print(f"Error: Unit index not found: {args.unit_index}")
+        return 1
 
-    # Load callable inventory if provided
-    inventory = load_callable_inventory(args.callable_inventory) if args.callable_inventory else {}
+    project_index = load_project_index(args.unit_index)
+    unit = _select_unit(project_index, args.file)
+    if unit is None:
+        print(f"Error: No unit entry found in index for {args.file}")
+        return 1
 
-    # Derive module FQN if source root provided
-    module_fqn = None
-    if args.source_root:
-        module_fqn = derive_fqn_from_path(args.file, args.source_root)
-
-    # Enumerate
-    results = enumerate_file(args.file, args.unit_id, args.function, inventory, module_fqn)
+    results = enumerate_unit_from_index(args.file, unit, args.function)
 
     if not results:
         if args.function:
-            print(f"Error: Function '{args.function}' not found in {args.file}")
+            print(f"Error: Function '{args.function}' not found in indexed entries for {args.file}")
         else:
-            print(f"Error: No functions found in {args.file}")
+            print(f"Error: No analyzable indexed entries found in {args.file}")
         return 1
 
-    # Format output
     if args.text:
-        # Human-readable format
-        output = '\n\n'.join(format_outcome_map_text(r) for r in results)
+        output = "\n\n".join(format_outcome_map_text(result) for result in results)
     else:
-        # YAML format (default for pipeline)
         data = format_for_yaml(results)
-        # Set module name from filename
-        data['module'] = args.file.stem
-        output = yaml.dump(data, sort_keys=False, allow_unicode=True, width=float('inf'))
+        data["module"] = unit.fully_qualified_name
+        output = yaml.dump(data, sort_keys=False, allow_unicode=True, width=float("inf"))
 
-    # Save or print
     if args.output:
-        with open(args.output, 'w', encoding='utf-8') as f:
-            f.write(output)
+        args.output.write_text(output, encoding="utf-8")
         print(f"Saved to {args.output}")
     else:
         print(output)
@@ -709,5 +941,5 @@ Examples:
     return 0
 
 
-if __name__ == '__main__':
-    exit(main())
+if __name__ == "__main__":
+    raise SystemExit(main())

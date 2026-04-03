@@ -1,0 +1,37 @@
+# Default unit analysis configuration.
+# This file belongs in pybastion_unit/unit_config.toml.
+# In the normal case you only need:
+#   python pybastion_unit/run_project_analysis.py /path/to/target/project
+#
+# Paths under [paths] are resolved relative to the target project root.
+# Paths under [scripts] are resolved relative to the pybastion_unit package root.
+
+[paths]
+# Default: <target-project>/src if it exists, else <target-project>
+source_root = "src"
+
+# Default: <target-project>/dist/pybastion
+output_root = "dist/pybastion"
+
+# These default under output_root. Override only if you want a different layout.
+inspect_root = "dist/pybastion/inspect"
+eis_root = "dist/pybastion/eis"
+inventory_root = "dist/pybastion/inventory"
+logs_root = "dist/pybastion/logs"
+
+[scripts]
+# These resolve relative to the pybastion_unit package root.
+stage1 = "stages/stage1_inspect_units.py"
+stage2 = "stages/stage2_enumerate_exec_items.py"
+stage3 = "stages/stage3_enumerate_callables.py"
+
+[run]
+stage1 = true
+stage2 = true
+stage3 = true
+
+[behavior]
+emit_legacy_inventory = false
+continue_on_error = true
+clean_logs = true
+clean_outputs = true
