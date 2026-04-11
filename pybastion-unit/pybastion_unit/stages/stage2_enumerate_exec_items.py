@@ -142,6 +142,20 @@ def get_statement_contexts(node: ast.AST) -> list[StatementContext]:
                 )
                 continue
 
+            if isinstance(stmt, ast.Match):
+                for case_index, case in enumerate(stmt.cases, start=1):
+                    visit_block(
+                        case.body,
+                        next_lines,
+                        (*owners, ControlOwner(
+                            kind=OwnerKind.MATCH,
+                            node=stmt,
+                            region=f"case[{case_index}]",
+                            next_stmt_lines=next_lines,
+                        )),
+                    )
+                continue
+
             if isinstance(stmt, (ast.For, ast.AsyncFor, ast.While)):
                 visit_block(
                     stmt.body,
@@ -470,13 +484,22 @@ def _resolve_skip_eis(branches: list[Branch]) -> None:
             outcome.skips_eis = [ei for ei in resolved_ids if not (ei in seen or seen.add(ei))]
 
 
-def _is_forbidden_successor(_: Branch, candidate: Branch) -> bool:
+def _is_forbidden_successor(current: Branch, candidate: Branch) -> bool:
     owner = candidate.owner_info
+    current_owner = current.owner_info
 
     predicates = [
         owner is not None
         and owner.stmt_type == "Try"
         and owner.region == "except",
+
+        current_owner is not None
+        and owner is not None
+        and current_owner.stmt_type == "If"
+        and owner.stmt_type == "If"
+        and current_owner.line == owner.line
+        and current_owner.region == "body"
+        and owner.region == "orelse",
     ]
 
     return any(predicates)
@@ -558,6 +581,8 @@ def _assign_fallthrough_next_eis(branches: list[Branch], callable_id: str) -> No
             if _is_skipped_successor(candidate, outcome):
                 continue
             if _is_excluded_successor(branch, candidate):
+                continue
+            if _is_forbidden_successor(branch, candidate):
                 continue
             outcome.target_ei = candidate.id
             break

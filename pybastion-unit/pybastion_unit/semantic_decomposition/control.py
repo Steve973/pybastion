@@ -140,27 +140,34 @@ class MatchDecomposer(ControlOwnerDecomposer):
     @staticmethod
     def _is_unconditional_wildcard(case: ast.match_case) -> bool:
         return (
-                isinstance(case.pattern, ast.MatchAs)
-                and case.pattern.name is None
-                and case.guard is None
+            isinstance(case.pattern, ast.MatchAs)
+            and case.pattern.name is None
+            and case.guard is None
         )
 
     @classmethod
     def semantic_eis(
-            cls,
-            stmt: ast.Match,
-            source_lines: list[str],
-            context: DecompositionContext,
+        cls,
+        stmt: ast.Match,
+        source_lines: list[str],
+        context: DecompositionContext,
     ) -> list[DecomposerResult]:
         subject = ast.unparse(stmt.subject)
 
         conditional_targets: list[ConditionalTarget] = []
         prior_failures: list[str] = []
 
+        all_case_lines: list[int] = []
+        for case in stmt.cases:
+            all_case_lines.extend(body_lines(case.body))
+
         for index, case in enumerate(stmt.cases, start=1):
             case_label = cls._case_label(index, case)
-            case_target = case.body[0].lineno if case.body else (
-                context.next_stmt_lines[0] if context.next_stmt_lines else None
+            case_lines = body_lines(case.body)
+
+            case_target = case.body[0].lineno if case.body else select_target_from_chain(
+                context.next_stmt_lines,
+                case_lines,
             )
 
             success_condition = cls._join_and([*prior_failures, case_label])
@@ -184,7 +191,10 @@ class MatchDecomposer(ControlOwnerDecomposer):
             prior_failures.append(f"not ({case_label})")
 
         if not any(cls._is_unconditional_wildcard(case) for case in stmt.cases):
-            fallthrough_target = context.next_stmt_lines[0] if context.next_stmt_lines else None
+            fallthrough_target = select_target_from_chain(
+                context.next_stmt_lines,
+                all_case_lines,
+            )
 
             no_match_condition = cls._join_and(prior_failures) if prior_failures else "no match cases"
 

@@ -218,6 +218,65 @@ def _integration_signature_for_branch(branch: Branch) -> str:
     return (branch.description or "").strip()
 
 
+def has_abstractmethod_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    for dec in node.decorator_list:
+        if isinstance(dec, ast.Name) and dec.id == "abstractmethod":
+            return True
+        if isinstance(dec, ast.Attribute) and dec.attr == "abstractmethod":
+            return True
+    return False
+
+
+def is_non_executable_callable_body(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """
+    Return True for declarative/contract callables that should not participate
+    in executable flow graphs.
+
+    Cases:
+    - body is just `pass`
+    - body is just `...`
+    - body is just `raise NotImplementedError(...)`
+    - same as above, but preceded by a docstring
+    """
+    body = list(node.body)
+
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+
+    if len(body) != 1:
+        return False
+
+    stmt = body[0]
+
+    if isinstance(stmt, ast.Pass):
+        return True
+
+    if (
+        isinstance(stmt, ast.Expr)
+        and isinstance(stmt.value, ast.Constant)
+        and stmt.value.value is Ellipsis
+    ):
+        return True
+
+    if isinstance(stmt, ast.Raise) and stmt.exc is not None:
+        exc = stmt.exc
+
+        if isinstance(exc, ast.Name) and exc.id == "NotImplementedError":
+            return True
+
+        if isinstance(exc, ast.Call):
+            func = exc.func
+            if isinstance(func, ast.Name) and func.id == "NotImplementedError":
+                return True
+
+    return False
+
+
 class AstAnalyzer:
     def __init__(
             self,
@@ -332,6 +391,10 @@ class AstAnalyzer:
             integration_candidates=[],
             needs_callable_analysis=True,
         ).to_dict()
+
+        if has_abstractmethod_decorator(node) or is_non_executable_callable_body(node):
+            payload["is_executable"] = False
+
         payload["_known_types"] = known_types
         return payload
 
