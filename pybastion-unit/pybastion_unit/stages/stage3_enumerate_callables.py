@@ -1,12 +1,10 @@
 #!/usr/bin/env python3
-"""Stage 3 callable inventory builder for structured stage 1 + new stage 2 output.
+"""Stage 3 callable inventory builder for structured stage 1 and stage 2 output.
 
-This version consumes:
+This module consumes:
   - stage 1 structured unit index JSON
   - stage 2 EI YAML for a unit
   - source files referenced by the unit index
-
-It replaces the old flat callable inventory-based stage 3.
 """
 
 from __future__ import annotations
@@ -16,18 +14,23 @@ import ast
 import json
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import yaml
+
 from pybastion_common.models import (
-    CallableEntry,
-    ParamSpec,
-    TypeRef,
     Branch,
+    CallableAnalysisInfo,
+    CallableEntry,
+    CallableHierarchyInfo,
+    CallableSignatureInfo,
+    ParamSpec,
     ProjectIndex,
+    TypeRef,
     UnitIndex,
-    UnitIndexEntry
+    UnitIndexEntry,
 )
 from pybastion_common.smt_path_checker import filter_feasible_paths
 from pybastion_unit.helpers.decorator_processing import (
@@ -36,12 +39,30 @@ from pybastion_unit.helpers.decorator_processing import (
     validate_feature_co_occurrences,
 )
 from pybastion_unit.helpers.integration_analysis import build_integration_entries
-from pybastion_unit.shared.knowledge_base import PYTHON_BUILTINS, BUILTIN_METHODS, GENERIC_CONTAINER_TYPES, \
-    is_builtin_container_method
+from pybastion_unit.shared.knowledge_base import (
+    BUILTIN_METHODS,
+    GENERIC_CONTAINER_TYPES,
+    PYTHON_BUILTINS,
+    is_builtin_container_method,
+)
 
 ENUM_BASES: set[str] = {"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"}
-CALLABLE_ENTRY_KINDS: set[str] = {"unit_function", "method", "nested_function", "module_assignment"}
+CALLABLE_ENTRY_KINDS: set[str] = {
+    "unit_function",
+    "method",
+    "nested_function",
+    "module_assignment",
+}
 CLASS_ENTRY_KINDS: set[str] = {"class", "nested_class"}
+
+
+@dataclass(frozen=True)
+class TargetResolution:
+    original_target: str
+    resolved_target: str
+    resolution_kind: str
+    resolution_basis: str | None = None
+    candidate_targets: list[str] | None = None
 
 
 # ============================================================================
@@ -193,6 +214,7 @@ def build_local_return_type_map(tree: ast.Module) -> dict[str, str]:
 
     return local_return_types
 
+
 # ============================================================================
 # AST analysis helpers
 # ============================================================================
@@ -227,6 +249,73 @@ def has_abstractmethod_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef) -
     return False
 
 
+def resolve_base_class_fqn(
+        base_expr: ast.expr,
+        unit_fqn: str,
+        import_map: dict[str, str],
+        callable_inventory: dict[str, str],
+) -> str:
+    raw = ast.unparse(base_expr).strip()
+
+    if raw in import_map:
+        return import_map[raw]
+
+    if "." not in raw:
+        same_unit = f"{unit_fqn}.{raw}"
+        if same_unit in callable_inventory:
+            return same_unit
+
+        for fqn in callable_inventory:
+            if fqn.endswith(f".{raw}"):
+                return fqn
+
+    return raw
+
+
+def is_contract_base_name(base_fqn: str) -> bool:
+    short = base_fqn.rsplit(".", 1)[-1]
+    return short in {"ABC", "Protocol", "ArtifactResolver"}
+
+
+def is_abstract_base_class(node: ast.ClassDef) -> bool:
+    for base in node.bases:
+        if isinstance(base, ast.Name) and base.id == "ABC":
+            return True
+        if isinstance(base, ast.Attribute) and base.attr == "ABC":
+            return True
+    return False
+
+
+def signature_info(entry: dict[str, Any]) -> dict[str, Any]:
+    return entry.setdefault("signature_info", {})
+
+
+def hierarchy_info(entry: dict[str, Any]) -> dict[str, Any]:
+    return entry.setdefault("hierarchy_info", {})
+
+
+def analysis_info(entry: dict[str, Any]) -> dict[str, Any]:
+    return entry.setdefault("analysis_info", {})
+
+
+def mark_contract_methods(entries: list[dict[str, Any]], in_contract_class: bool = False) -> None:
+    for entry in entries:
+        hinfo = hierarchy_info(entry)
+
+        entry_is_contract_class = (
+                in_contract_class
+                or bool(hinfo.get("is_abstract", False))
+                or bool(hinfo.get("contract_base_classes", []))
+        )
+
+        if entry.get("kind") == "method" and entry_is_contract_class:
+            hinfo["is_contract_method"] = True
+
+        children = entry.get("children", []) or []
+        if children:
+            mark_contract_methods(children, entry_is_contract_class)
+
+
 def is_non_executable_callable_body(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     """
     Return True for declarative/contract callables that should not participate
@@ -241,10 +330,10 @@ def is_non_executable_callable_body(node: ast.FunctionDef | ast.AsyncFunctionDef
     body = list(node.body)
 
     if (
-        body
-        and isinstance(body[0], ast.Expr)
-        and isinstance(body[0].value, ast.Constant)
-        and isinstance(body[0].value.value, str)
+            body
+            and isinstance(body[0], ast.Expr)
+            and isinstance(body[0].value, ast.Constant)
+            and isinstance(body[0].value.value, str)
     ):
         body = body[1:]
 
@@ -257,9 +346,9 @@ def is_non_executable_callable_body(node: ast.FunctionDef | ast.AsyncFunctionDef
         return True
 
     if (
-        isinstance(stmt, ast.Expr)
-        and isinstance(stmt.value, ast.Constant)
-        and stmt.value.value is Ellipsis
+            isinstance(stmt, ast.Expr)
+            and isinstance(stmt.value, ast.Constant)
+            and stmt.value.value is Ellipsis
     ):
         return True
 
@@ -275,6 +364,52 @@ def is_non_executable_callable_body(node: ast.FunctionDef | ast.AsyncFunctionDef
                 return True
 
     return False
+
+
+def annotate_method_owners(
+        entries: list[dict[str, Any]],
+        unit_fqn: str,
+        ancestors: list[str] | None = None,
+) -> None:
+    if ancestors is None:
+        ancestors = []
+
+    for entry in entries:
+        kind = entry.get("kind")
+        name = entry.get("name", "")
+
+        current_ancestors = [*ancestors]
+        if kind in {"class", "enum"}:
+            current_ancestors.append(name)
+
+        if kind == "method" and ancestors:
+            hierarchy_info(entry)["owner_class_fqn"] = ".".join([unit_fqn, *ancestors])
+
+        children = entry.get("children", []) or []
+        if children:
+            annotate_method_owners(children, unit_fqn, current_ancestors)
+
+
+def annotate_entry_fqns(
+        entries: list[dict[str, Any]],
+        unit_fqn: str,
+        ancestors: list[str] | None = None,
+) -> None:
+    if ancestors is None:
+        ancestors = []
+
+    for entry in entries:
+        name = entry.get("name", "")
+        kind = entry.get("kind")
+        entry["_fqn"] = ".".join([unit_fqn, *ancestors, name])
+
+        child_ancestors = [*ancestors]
+        if kind in {"class", "enum", "method", "function", "assignment"}:
+            child_ancestors.append(name)
+
+        children = entry.get("children", []) or []
+        if children:
+            annotate_entry_fqns(children, unit_fqn, child_ancestors)
 
 
 class AstAnalyzer:
@@ -325,7 +460,6 @@ class AstAnalyzer:
         if owner_type in self.import_map:
             owner_type = self.import_map[owner_type]
 
-        # project-local class lookup by short name or FQN
         candidate_fqns = []
         if owner_type in self.callable_inventory:
             candidate_fqns.append(owner_type)
@@ -334,9 +468,6 @@ class AstAnalyzer:
                 if fqn.endswith(f".{owner_type}"):
                     candidate_fqns.append(fqn)
 
-        # If we know the owner class in-project, inspect its source annotation info later.
-        # For now, we can only continue when the owner type itself is already imported/FQN.
-        # This keeps behavior bounded and non-magical.
         if owner_type:
             return owner_type
 
@@ -359,61 +490,102 @@ class AstAnalyzer:
 
     def _analyze_class(self, entry: UnitIndexEntry, node: ast.ClassDef) -> dict[str, Any]:
         kind = "enum" if is_enum_class(node) else "class"
+
+        raw_bases = [ast.unparse(base) for base in node.bases]
+        resolved_bases = [
+            resolve_base_class_fqn(
+                base,
+                self.unit_fqn,
+                self.import_map,
+                self.callable_inventory,
+            )
+            for base in node.bases
+        ]
+        contract_bases = [base for base in resolved_bases if is_contract_base_name(base)]
+
         return CallableEntry(
             id=entry.id,
             kind=kind,
             name=entry.name,
             line_start=entry.lineno,
             line_end=entry.end_lineno,
-            decorators=self._extract_decorators(node.decorator_list),
-            base_classes=[ast.unparse(base) for base in node.bases],
+            signature_info=CallableSignatureInfo(
+                decorators=self._extract_decorators(node.decorator_list),
+            ),
+            hierarchy_info=CallableHierarchyInfo(
+                base_classes=raw_bases,
+                resolved_base_classes=resolved_bases,
+                contract_base_classes=contract_bases,
+                is_abstract=is_abstract_base_class(node),
+            ),
         ).to_dict()
 
     def _analyze_callable(self, entry: UnitIndexEntry, node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, Any]:
-        decorators = self._extract_decorators(node.decorator_list) + extract_callable_decorators(node,
-                                                                                                 self.source_lines)
+        decorators = self._extract_decorators(node.decorator_list) + extract_callable_decorators(
+            node,
+            self.source_lines,
+        )
         param_types = self._build_param_type_map(node)
         local_types = self._build_local_type_map(node)
         known_types = {**param_types, **local_types}
         kind = "method" if entry.kind == "method" else "function"
+
         payload = CallableEntry(
             id=entry.id,
             kind=kind,
             name=entry.name,
             line_start=entry.lineno,
             line_end=entry.end_lineno,
-            signature=self._build_signature(node),
-            visibility=self._extract_visibility(entry.name),
-            decorators=decorators,
-            modifiers=self._extract_modifiers(node),
-            params=self._extract_params(node),
-            return_type=self._extract_type_ref(node.returns),
-            integration_candidates=[],
-            needs_callable_analysis=True,
+            signature_info=CallableSignatureInfo(
+                signature=self._build_signature(node),
+                visibility=self._extract_visibility(entry.name),
+                decorators=decorators,
+                modifiers=self._extract_modifiers(node),
+                params=self._extract_params(node),
+                return_type=self._extract_type_ref(node.returns),
+            ),
+            hierarchy_info=CallableHierarchyInfo(),
+            analysis_info=CallableAnalysisInfo(
+                integration_candidates=[],
+                needs_callable_analysis=True,
+            ),
         ).to_dict()
 
-        if has_abstractmethod_decorator(node) or is_non_executable_callable_body(node):
+        if is_non_executable_callable_body(node):
             payload["is_executable"] = False
+            hierarchy_info(payload)["is_contract_method"] = True
+
+        if has_abstractmethod_decorator(node):
+            hierarchy_info(payload)["is_contract_method"] = True
 
         payload["_known_types"] = known_types
         return payload
 
-    def _analyze_assignment(self, entry: UnitIndexEntry, node: ast.Assign | ast.AnnAssign | ast.AugAssign) -> dict[
-        str, Any]:
+    def _analyze_assignment(
+            self,
+            entry: UnitIndexEntry,
+            node: ast.Assign | ast.AnnAssign | ast.AugAssign,
+    ) -> dict[str, Any]:
         local_types = self._build_local_type_map(node)
-        return {
-            "id": entry.id,
-            "kind": "assignment",
-            "name": entry.name,
-            "line_start": entry.lineno,
-            "line_end": entry.end_lineno,
-            "visibility": self._extract_visibility(entry.name),
-            "needs_callable_analysis": True,
-            "_known_types": local_types,
-            "ast_analysis": {
-                "integration_candidates": [],
-            },
-        }
+
+        payload = CallableEntry(
+            id=entry.id,
+            kind="assignment",
+            name=entry.name,
+            line_start=entry.lineno,
+            line_end=entry.end_lineno,
+            signature_info=CallableSignatureInfo(
+                visibility=self._extract_visibility(entry.name),
+            ),
+            hierarchy_info=CallableHierarchyInfo(),
+            analysis_info=CallableAnalysisInfo(
+                integration_candidates=[],
+                needs_callable_analysis=True,
+            ),
+        ).to_dict()
+
+        payload["_known_types"] = local_types
+        return payload
 
     def _build_local_type_map(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str]:
         local_types: dict[str, str] = {}
@@ -563,24 +735,66 @@ class AstAnalyzer:
             resolve_target=self._resolve_target,
             signature_for_branch=_integration_signature_for_branch,
         )
-        return [integration.to_dict() for integration in integrations]
 
-    def _resolve_target(self, target: str, param_types: dict[str, str]) -> tuple[str, str]:
+        enriched: list[dict[str, Any]] = []
+        for integration in integrations:
+            payload = integration.to_dict()
+            original_target = payload.get("target")
+
+            if original_target:
+                resolution = self._resolve_target_details(original_target, known_types)
+                payload["resolved_target"] = resolution.resolved_target
+                payload["resolution_kind"] = resolution.resolution_kind
+                if resolution.resolution_basis:
+                    payload["resolution_basis"] = resolution.resolution_basis
+                if resolution.candidate_targets:
+                    payload["candidate_targets"] = resolution.candidate_targets
+            else:
+                payload["resolved_target"] = original_target
+                payload["resolution_kind"] = "unresolved"
+
+            enriched.append(payload)
+
+        return enriched
+
+    def _resolve_target_details(self, target: str, param_types: dict[str, str]) -> TargetResolution:
         parts = target.split(".")
         first_part = parts[0].strip()
 
-        if len(parts) > 2:
-            return target, ""
+        def unresolved(basis: str = "fallback_original") -> TargetResolution:
+            return TargetResolution(
+                original_target=target,
+                resolved_target=target,
+                resolution_kind="unresolved",
+                resolution_basis=basis,
+                candidate_targets=[],
+            )
 
-        # Bare imported symbol: urlparse, url2pathname, Path, Version, Requirement, etc.
+        if len(parts) > 2:
+            return unresolved()
+
         if len(parts) == 1 and first_part in self.import_map:
             imported_fqn = self.import_map[first_part]
-            return imported_fqn, imported_fqn
+            kind = "exact" if imported_fqn in self.callable_inventory else "normalized"
+            return TargetResolution(
+                original_target=target,
+                resolved_target=imported_fqn,
+                resolution_kind=kind,
+                resolution_basis="import_map",
+                candidate_targets=[],
+            )
 
-        # Imported root target with one receiver hop: json.loads, pathlib.Path.read_text, etc.
         if len(parts) == 2 and first_part in self.import_map:
             imported_root = self.import_map[first_part]
-            return target.replace(first_part, imported_root, 1), imported_root
+            resolved = target.replace(first_part, imported_root, 1)
+            kind = "exact" if resolved in self.callable_inventory else "normalized"
+            return TargetResolution(
+                original_target=target,
+                resolved_target=resolved,
+                resolution_kind=kind,
+                resolution_basis="import_map",
+                candidate_targets=[],
+            )
 
         if first_part in param_types:
             param_type = param_types[first_part]
@@ -591,8 +805,14 @@ class AstAnalyzer:
 
                 if is_builtin_container_method(container, method_name):
                     resolved_container = self.import_map.get(container, container)
-                    resolved_target = target.replace(first_part, resolved_container, 1)
-                    return resolved_target, resolved_container
+                    resolved = target.replace(first_part, resolved_container, 1)
+                    return TargetResolution(
+                        original_target=target,
+                        resolved_target=resolved,
+                        resolution_kind="normalized",
+                        resolution_basis="container_method",
+                        candidate_targets=[],
+                    )
 
                 param_type = inner_type
 
@@ -608,34 +828,83 @@ class AstAnalyzer:
                 param_type = type_match.group(1).strip()
 
             base_type = param_type.split("[", 1)[0].strip()
+            method_name = parts[-1]
 
             if base_type == "Any":
-                return target, ""
+                return unresolved("param_type_any")
 
             if base_type in self.import_map:
                 fqn_type = self.import_map[base_type]
-                method_name = parts[-1]
-                return f"{fqn_type}.{method_name}", fqn_type
+                resolved = f"{fqn_type}.{method_name}"
+                kind = "exact" if resolved in self.callable_inventory else "contract"
+                return TargetResolution(
+                    original_target=target,
+                    resolved_target=resolved,
+                    resolution_kind=kind,
+                    resolution_basis="param_type_import",
+                    candidate_targets=[],
+                )
 
-            for fqn in self.callable_inventory:
-                if fqn.endswith(f".{base_type}"):
-                    method_name = parts[-1]
-                    return f"{fqn}.{method_name}", fqn
+            matches = [fqn for fqn in self.callable_inventory if fqn.endswith(f".{base_type}")]
+            if len(matches) == 1:
+                resolved = f"{matches[0]}.{method_name}"
+                kind = "exact" if resolved in self.callable_inventory else "contract"
+                return TargetResolution(
+                    original_target=target,
+                    resolved_target=resolved,
+                    resolution_kind=kind,
+                    resolution_basis="param_type_project",
+                    candidate_targets=[],
+                )
 
-            method_name = parts[-1]
-            return f"{base_type}.{method_name}", base_type
+            if len(matches) > 1:
+                candidates = [f"{match}.{method_name}" for match in matches]
+                return TargetResolution(
+                    original_target=target,
+                    resolved_target=target,
+                    resolution_kind="ambiguous",
+                    resolution_basis="param_type_project_multi",
+                    candidate_targets=candidates,
+                )
+
+            resolved = f"{base_type}.{method_name}"
+            return TargetResolution(
+                original_target=target,
+                resolved_target=resolved,
+                resolution_kind="contract",
+                resolution_basis="param_type_fallback",
+                candidate_targets=[],
+            )
 
         if "." not in target:
             local_candidate = f"{self.unit_fqn}.{target}"
             if local_candidate in self.callable_inventory:
-                return local_candidate, local_candidate
-            return target, ""
+                return TargetResolution(
+                    original_target=target,
+                    resolved_target=local_candidate,
+                    resolution_kind="exact",
+                    resolution_basis="same_unit_local",
+                    candidate_targets=[],
+                )
+            return unresolved()
 
         local_root_candidate = f"{self.unit_fqn}.{first_part}"
         if local_root_candidate in self.callable_inventory:
-            return target.replace(first_part, local_root_candidate, 1), local_root_candidate
+            resolved = target.replace(first_part, local_root_candidate, 1)
+            kind = "exact" if resolved in self.callable_inventory else "normalized"
+            return TargetResolution(
+                original_target=target,
+                resolved_target=resolved,
+                resolution_kind=kind,
+                resolution_basis="same_unit_root",
+                candidate_targets=[],
+            )
 
-        return target, ""
+        return unresolved()
+
+    def _resolve_target(self, target: str, param_types: dict[str, str]) -> tuple[str, str]:
+        resolution = self._resolve_target_details(target, param_types)
+        return resolution.resolved_target, resolution.resolution_basis or ""
 
     def _is_external_call(self, target: str) -> bool:
         if target == "super":
@@ -707,17 +976,23 @@ def enumerate_paths(graph: dict[str, list[str]], start_ei: str, target_ei: str) 
 
 def add_execution_paths(entries: list[dict[str, Any]]) -> None:
     for entry in entries:
-        if entry.get("decorators"):
-            for decorator in entry["decorators"]:
+        sinfo = signature_info(entry)
+        ainfo = analysis_info(entry)
+
+        if sinfo.get("decorators"):
+            for decorator in sinfo["decorators"]:
                 if has_effect(decorator, "exclude_from_flow"):
-                    for integration in entry.get("ast_analysis", {}).get("integration_candidates", []):
+                    for integration in ainfo.get("integration_candidates", []):
                         integration["execution_paths"] = []
                         integration["suppressed_by"] = decorator.get("name")
                     break
 
-        if entry.get("needs_callable_analysis") and entry.get("branches") and entry.get("ast_analysis", {}).get(
-                "integration_candidates"):
-            branches = [Branch.from_dict(item) for item in entry["branches"]]
+        if (
+                ainfo.get("needs_callable_analysis")
+                and ainfo.get("branches")
+                and ainfo.get("integration_candidates")
+        ):
+            branches = [Branch.from_dict(item) for item in ainfo["branches"]]
             graph = build_cfg(branches)
 
             predecessors: dict[str, list[str]] = {branch.id: [] for branch in branches}
@@ -731,10 +1006,10 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
                 branch.id
                 for branch in branches
                 if (
-                    branch.statement_outcome is not None
-                    and branch.statement_outcome.synthetic
-                    and branch.stmt_type == "FunctionInvocation"
-                    and branch.description == "function start"
+                        branch.statement_outcome is not None
+                        and branch.statement_outcome.synthetic
+                        and branch.stmt_type == "FunctionInvocation"
+                        and branch.description == "function start"
                 )
             ]
 
@@ -756,11 +1031,7 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
                     first_line = min(branch.line for branch in branches)
                     entry_eis = [branch.id for branch in branches if branch.line == first_line]
 
-            line_to_eis: dict[int, list[str]] = {}
-            for branch in branches:
-                line_to_eis.setdefault(branch.line, []).append(branch.id)
-
-            for integration in entry["ast_analysis"]["integration_candidates"]:
+            for integration in ainfo["integration_candidates"]:
                 target_ei = integration.get("ei_id")
                 if not target_ei:
                     integration["execution_paths"] = []
@@ -782,7 +1053,8 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
                     "feasible_paths": len(feasible_paths),
                     "infeasible_paths": len(unique_paths) - len(feasible_paths),
                     "filter_effectiveness": (
-                        100 * (1 - len(feasible_paths) / len(unique_paths)) if unique_paths else 0),
+                        100 * (1 - len(feasible_paths) / len(unique_paths)) if unique_paths else 0
+                    ),
                 }
 
                 witnesses: list[dict[str, Any]] = []
@@ -798,6 +1070,80 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
             add_execution_paths(entry["children"])
 
 
+def build_class_hierarchy(entries: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    classes: dict[str, dict[str, Any]] = {}
+
+    def recurse(items: list[dict[str, Any]]) -> None:
+        for entry in items:
+            if entry.get("kind") in {"class", "enum"}:
+                class_fqn = entry.get("_fqn")
+                hinfo = hierarchy_info(entry)
+                if class_fqn:
+                    classes[class_fqn] = {
+                        "bases": hinfo.get("resolved_base_classes", []),
+                        "is_abstract": hinfo.get("is_abstract", False),
+                        "contract_bases": hinfo.get("contract_base_classes", []),
+                    }
+            recurse(entry.get("children", []) or [])
+
+    recurse(entries)
+    return classes
+
+
+def find_methods_by_owner(entries: list[dict[str, Any]]) -> dict[str, dict[str, dict[str, Any]]]:
+    methods_by_owner: dict[str, dict[str, dict[str, Any]]] = {}
+
+    def recurse(items: list[dict[str, Any]]) -> None:
+        for entry in items:
+            if entry.get("kind") == "method":
+                owner = hierarchy_info(entry).get("owner_class_fqn")
+                name = entry.get("name")
+                if owner and name:
+                    methods_by_owner.setdefault(owner, {})[name] = entry
+            recurse(entry.get("children", []) or [])
+
+    recurse(entries)
+    return methods_by_owner
+
+
+def annotate_method_overrides(
+        entries: list[dict[str, Any]],
+        class_hierarchy: dict[str, dict[str, Any]],
+) -> dict[str, list[str]]:
+    methods_by_owner = find_methods_by_owner(entries)
+    contract_methods: dict[str, list[str]] = {}
+
+    def recurse(items: list[dict[str, Any]]) -> None:
+        for entry in items:
+            if entry.get("kind") == "method":
+                hinfo = hierarchy_info(entry)
+                owner = hinfo.get("owner_class_fqn")
+                name = entry.get("name")
+                if owner and name:
+                    overrides: list[str] = []
+                    implements_contract = False
+
+                    for base in class_hierarchy.get(owner, {}).get("bases", []):
+                        base_methods = methods_by_owner.get(base, {})
+                        base_method = base_methods.get(name)
+                        if base_method:
+                            base_fqn = f"{base}.{name}"
+                            overrides.append(base_fqn)
+                            if hierarchy_info(base_method).get("is_contract_method", False):
+                                implements_contract = True
+                                contract_methods.setdefault(base_fqn, []).append(entry.get("_fqn", ""))
+
+                    if overrides:
+                        hinfo["overrides"] = overrides
+                    if implements_contract:
+                        hinfo["implements_contract_method"] = True
+
+            recurse(entry.get("children", []) or [])
+
+    recurse(entries)
+    return contract_methods
+
+
 # ============================================================================
 # Unit processing
 # ============================================================================
@@ -809,8 +1155,12 @@ def attach_children(entries_by_id: dict[str, dict[str, Any]], unit_entries: list
     for entry in sorted(unit_entries, key=lambda item: item.ordinal_within_parent):
         payload = entries_by_id[entry.id]
         payload.setdefault("children", [])
-        if entry.parent_id and entry.parent_id in entries_by_id and entry.parent_id != entry.owner_id and entry.parent_id != entry.id:
-            # defensive, but the structured index uses parent_id as actual parent
+        if (
+                entry.parent_id
+                and entry.parent_id in entries_by_id
+                and entry.parent_id != entry.owner_id
+                and entry.parent_id != entry.id
+        ):
             pass
         if entry.parent_id and entry.parent_id in entries_by_id and entry.parent_id != entry.id:
             entries_by_id[entry.parent_id].setdefault("children", []).append(payload)
@@ -819,16 +1169,21 @@ def attach_children(entries_by_id: dict[str, dict[str, Any]], unit_entries: list
     return roots
 
 
-def merge_stage2(entries_by_id: dict[str, dict[str, Any]], unit_entries: list[UnitIndexEntry],
-                 stage2_lookup: dict[tuple[str, int, int], dict[str, Any]]) -> None:
+def merge_stage2(
+        entries_by_id: dict[str, dict[str, Any]],
+        unit_entries: list[UnitIndexEntry],
+        stage2_lookup: dict[tuple[str, int, int], dict[str, Any]],
+) -> None:
     for entry in unit_entries:
         payload = entries_by_id[entry.id]
         key = (entry.name, entry.lineno, entry.end_lineno)
         stage2_item = stage2_lookup.get(key)
         if stage2_item is None:
             continue
-        payload["branches"] = stage2_item.get("branches", [])
-        payload["total_eis"] = stage2_item.get("total_eis", len(stage2_item.get("branches", [])))
+
+        ainfo = analysis_info(payload)
+        ainfo["branches"] = stage2_item.get("branches", [])
+        ainfo["total_eis"] = stage2_item.get("total_eis", len(stage2_item.get("branches", [])))
 
 
 def count_all_entries(entries: list[dict[str, Any]]) -> int:
@@ -910,14 +1265,14 @@ def process_unit(
 
     for entry in unit.entries:
         payload = entries_by_id[entry.id]
-        branches_payload = payload.get("branches")
+        ainfo = analysis_info(payload)
+        branches_payload = ainfo.get("branches")
         if not branches_payload:
             continue
 
         branches = [Branch.from_dict(item) for item in branches_payload]
         known_types = payload.pop("_known_types", {}) or {}
-        payload.setdefault("ast_analysis", {})
-        payload["ast_analysis"]["integration_candidates"] = analyzer.find_integration_candidates(
+        ainfo["integration_candidates"] = analyzer.find_integration_candidates(
             branches=branches,
             callable_id=payload["id"],
             callable_fqn=entry.fully_qualified_name,
@@ -925,6 +1280,13 @@ def process_unit(
         )
 
     roots = attach_children(entries_by_id, unit.entries)
+    annotate_entry_fqns(roots, unit.fully_qualified_name)
+    annotate_method_owners(roots, unit.fully_qualified_name)
+    mark_contract_methods(roots)
+
+    class_hierarchy = build_class_hierarchy(roots)
+    contract_methods = annotate_method_overrides(roots, class_hierarchy)
+
     add_execution_paths(roots)
 
     for err in validate_feature_co_occurrences(roots):
@@ -932,7 +1294,7 @@ def process_unit(
 
     for entry in unit.entries:
         payload = entries_by_id[entry.id]
-        payload.pop("needs_callable_analysis", None)
+        analysis_info(payload).pop("needs_callable_analysis", None)
 
     kind_counts = count_by_kind(roots)
     inventory = {
@@ -941,6 +1303,8 @@ def process_unit(
         "unit_id": unit.unit_id,
         "filepath": str(source_path),
         "language": unit.language,
+        "type_hierarchy": class_hierarchy,
+        "contract_methods": contract_methods,
         "entries": roots,
         "summary": {
             "total_entries": count_all_entries(roots),
@@ -954,8 +1318,10 @@ def process_unit(
 
     output_path = output_root / (unit.fully_qualified_name.replace(".", "/") + ".inventory.yaml")
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(yaml.dump(inventory, sort_keys=False, allow_unicode=True, width=float("inf")),
-                           encoding="utf-8")
+    output_path.write_text(
+        yaml.dump(inventory, sort_keys=False, allow_unicode=True, width=float("inf")),
+        encoding="utf-8",
+    )
 
     print(f"  → Unit ID: {unit.unit_id}")
     print(f"  → {inventory['summary']['total_entries']} entries")
@@ -988,8 +1354,12 @@ def main() -> int:
     parser.add_argument("--fqn", type=str, help="Fully qualified module name for the unit")
     parser.add_argument("--ei-file", type=Path, help="Stage 2 EI YAML for this unit")
     parser.add_argument("--ei-root", type=Path, help="Root directory containing per-unit stage 2 YAML files")
-    parser.add_argument("--output-root", type=Path, default=Path("dist/inventory"),
-                        help="Root directory for inventory output")
+    parser.add_argument(
+        "--output-root",
+        type=Path,
+        default=Path("dist/inventory"),
+        help="Root directory for inventory output",
+    )
     args = parser.parse_args()
 
     if args.file is None and args.fqn is None:

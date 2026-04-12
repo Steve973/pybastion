@@ -4,13 +4,6 @@ Diagnostics for inventory-first execution-instance control-flow graphs.
 
 This checker is designed for graphs built by build_full_call_graph_from_inventory.py.
 It avoids old EI numbering heuristics and instead relies on graph node metadata.
-
-Checks included:
-- callable integrity (entry exists, exits exist, entry can reach an exit)
-- return-edge coverage for callable exits
-- call coverage (which callables are never called)
-- execution-path verification against recorded inventory paths
-- detailed per-callable inspection
 """
 
 from __future__ import annotations
@@ -30,13 +23,24 @@ CALLABLE_KINDS: set[str] = {"function", "method", "assignment"}
 LOW_SIGNAL_DUNDER_NAMES: set[str] = {
     "__lt__", "__le__", "__gt__", "__ge__", "__eq__", "__ne__",
     "__hash__", "__repr__", "__str__", "__bool__", "__len__",
-    "__iter__", "__next__", "__contains__",
+    "__iter__", "__next__", "__contains__", "__init__", "__setattr__",
+    "__post_init__",
+}
+LOW_SIGNAL_DECORATORS: set[str] = {
+    "property", "FrameworkInvokedMethod", "PermitUnused"
 }
 
 
-# =============================================================================
-# Loading
-# =============================================================================
+def signature_info(entry: dict[str, Any]) -> dict[str, Any]:
+    return entry.get("signature_info", {}) or {}
+
+
+def hierarchy_info(entry: dict[str, Any]) -> dict[str, Any]:
+    return entry.get("hierarchy_info", {}) or {}
+
+
+def analysis_info(entry: dict[str, Any]) -> dict[str, Any]:
+    return entry.get("analysis_info", {}) or {}
 
 
 def load_cfg(cfg_path: Path) -> nx.DiGraph:
@@ -50,20 +54,12 @@ def discover_inventory_files(inventories_root: Path) -> list[Path]:
     return sorted(set(inventory_files))
 
 
-# =============================================================================
-# Inventory indexing for execution-path verification
-# =============================================================================
-
-
 def build_callable_fqn(unit_fqn: str, ancestor_names: list[str], entry_name: str) -> str:
     parts = [unit_fqn, *ancestor_names, entry_name]
     return ".".join(part for part in parts if part)
 
 
 def index_inventory_execution_paths(inventory_paths: list[Path]) -> dict[str, dict[str, Any]]:
-    """
-    Returns callable_id -> info containing execution path expectations.
-    """
     indexed: dict[str, dict[str, Any]] = {}
 
     for path in inventory_paths:
@@ -78,44 +74,40 @@ def index_inventory_execution_paths(inventory_paths: list[Path]) -> dict[str, di
         def recurse(entries: list[dict[str, Any]], ancestors: list[str]) -> None:
             for entry in entries:
                 kind = entry.get("kind", "unknown")
+                name = entry.get("name", "unknown")
+                children = entry.get("children", []) or []
+
                 if kind not in CALLABLE_KINDS:
-                    recurse(entry.get("children", []) or [], [*ancestors, entry.get("name", "unknown")])
+                    recurse(children, [*ancestors, name])
                     continue
 
                 callable_id = entry["id"]
-                callable_name = entry.get("name", "unknown")
-                callable_fqn = build_callable_fqn(unit_fqn, ancestors, callable_name)
-                branches = entry.get("branches", []) or []
-                integration_candidates = ((entry.get("ast_analysis") or {}).get("integration_candidates")) or []
+                callable_fqn = build_callable_fqn(unit_fqn, ancestors, name)
+                ainfo = analysis_info(entry)
+                sinfo = signature_info(entry)
+                hinfo = hierarchy_info(entry)
 
                 indexed[callable_id] = {
                     "callable_id": callable_id,
-                    "callable_name": callable_name,
+                    "callable_name": name,
                     "callable_fqn": callable_fqn,
                     "unit_name": unit_name,
                     "unit_fqn": unit_fqn,
-                    "branches": branches,
-                    "integration_candidates": integration_candidates,
-                    "decorators": entry.get("decorators", []) or [],
+                    "branches": ainfo.get("branches", []) or [],
+                    "integration_candidates": ainfo.get("integration_candidates", []) or [],
+                    "decorators": sinfo.get("decorators", []) or [],
                     "is_executable": entry.get("is_executable", True),
+                    "is_contract_method": hinfo.get("is_contract_method", False),
                 }
 
-                recurse(entry.get("children", []) or [], [*ancestors, callable_name])
+                recurse(children, [*ancestors, name])
 
         recurse(inventory.get("entries", []) or [], [])
 
     return indexed
 
 
-# =============================================================================
-# Graph indexing
-# =============================================================================
-
-
 def collect_callables_from_graph(cfg: nx.DiGraph) -> dict[str, dict[str, Any]]:
-    """
-    Build callable metadata from EI nodes in graph.
-    """
     callables: dict[str, dict[str, Any]] = {}
 
     for node_id, node_data in cfg.nodes(data=True):
@@ -179,94 +171,54 @@ def find_exception_exit_eis(cfg: nx.DiGraph, callable_id: str) -> list[str]:
     return sorted(exits, key=_ei_sort_key)
 
 
-# =============================================================================
-# Diagnostics
-# =============================================================================
+def has_incoming_callable_call_edges(cfg: nx.DiGraph, callable_id: str) -> bool:
+    entry = find_entry_ei(cfg, callable_id)
+    if not entry:
+        return False
 
+    for src, _, edge_data in cfg.in_edges(entry, data=True):
+        if edge_data.get("edge_type") != "call":
+            continue
 
-def find_first_failed_recorded_hop(
-        cfg: nx.DiGraph,
-        start_node: str,
-        target_node: str,
-        recorded_path: list[str],
-) -> dict[str, Any] | None:
-    """
-    Return the first failed ordered-reachability step for a recorded execution path.
-    """
-    if not recorded_path:
-        return {
-            "from": start_node,
-            "to": target_node,
-            "reason": "empty_recorded_path",
-        }
-
-    if recorded_path[0] != start_node:
-        if not nx.has_path(cfg, start_node, recorded_path[0]):
-            return {
-                "from": start_node,
-                "to": recorded_path[0],
-                "reason": "entry_cannot_reach_first_recorded_ei",
-            }
-
-    for current, nxt in zip(recorded_path, recorded_path[1:]):
-        if not nx.has_path(cfg, current, nxt):
-            return {
-                "from": current,
-                "to": nxt,
-                "reason": "recorded_hop_not_reachable",
-            }
-
-    if recorded_path[-1] != target_node:
-        if not nx.has_path(cfg, recorded_path[-1], target_node):
-            return {
-                "from": recorded_path[-1],
-                "to": target_node,
-                "reason": "last_recorded_ei_cannot_reach_target",
-            }
-
-    return None
-
-
-def is_subsequence(needle: list[str], haystack: list[str]) -> bool:
-    if not needle:
-        return True
-
-    i = 0
-    for node_id in haystack:
-        if node_id == needle[i]:
-            i += 1
-            if i == len(needle):
-                return True
+        src_callable_id = cfg.nodes[src].get("callable_id")
+        if src_callable_id and src_callable_id != callable_id:
+            return True
 
     return False
 
 
-def path_contains_recorded_execution_path(
-        cfg: nx.DiGraph,
-        start_node: str,
-        target_node: str,
-        recorded_path: list[str],
-) -> bool:
-    """
-    Return True if the graph can traverse the recorded EI path in order.
+def find_first_failed_recorded_hop(cfg: nx.DiGraph, start_node: str, target_node: str, recorded_path: list[str]) -> \
+dict[str, Any] | None:
+    if not recorded_path:
+        return {"from": start_node, "to": target_node, "reason": "empty_recorded_path"}
 
-    This does not require adjacency and does not enumerate full simple paths.
-    It only requires ordered reachability between consecutive recorded EIs.
-    """
+    if recorded_path[0] != start_node and not nx.has_path(cfg, start_node, recorded_path[0]):
+        return {"from": start_node, "to": recorded_path[0], "reason": "entry_cannot_reach_first_recorded_ei"}
+
+    for current, nxt in zip(recorded_path, recorded_path[1:]):
+        if not nx.has_path(cfg, current, nxt):
+            return {"from": current, "to": nxt, "reason": "recorded_hop_not_reachable"}
+
+    if recorded_path[-1] != target_node and not nx.has_path(cfg, recorded_path[-1], target_node):
+        return {"from": recorded_path[-1], "to": target_node, "reason": "last_recorded_ei_cannot_reach_target"}
+
+    return None
+
+
+def path_contains_recorded_execution_path(cfg: nx.DiGraph, start_node: str, target_node: str,
+                                          recorded_path: list[str]) -> bool:
     if not recorded_path:
         return False
 
-    if recorded_path[0] != start_node:
-        if not nx.has_path(cfg, start_node, recorded_path[0]):
-            return False
+    if recorded_path[0] != start_node and not nx.has_path(cfg, start_node, recorded_path[0]):
+        return False
 
     for current, nxt in zip(recorded_path, recorded_path[1:]):
         if not nx.has_path(cfg, current, nxt):
             return False
 
-    if recorded_path[-1] != target_node:
-        if not nx.has_path(cfg, recorded_path[-1], target_node):
-            return False
+    if recorded_path[-1] != target_node and not nx.has_path(cfg, recorded_path[-1], target_node):
+        return False
 
     return True
 
@@ -274,23 +226,14 @@ def path_contains_recorded_execution_path(
 def check_callable_integrity(cfg: nx.DiGraph, callable_id: str) -> dict[str, Any]:
     entry = find_entry_ei(cfg, callable_id)
     if not entry:
-        return {
-            "callable_id": callable_id,
-            "valid": False,
-            "issue": "no_entry_ei",
-        }
+        return {"callable_id": callable_id, "valid": False, "issue": "no_entry_ei"}
 
     success_exits = find_success_exit_eis(cfg, callable_id)
     exception_exits = find_exception_exit_eis(cfg, callable_id)
     all_exits = success_exits + exception_exits
 
     if not all_exits:
-        return {
-            "callable_id": callable_id,
-            "valid": False,
-            "issue": "no_exit_eis",
-            "entry": entry,
-        }
+        return {"callable_id": callable_id, "valid": False, "issue": "no_exit_eis", "entry": entry}
 
     reachable_exit = None
     for exit_ei in all_exits:
@@ -347,12 +290,8 @@ def check_return_edges(cfg: nx.DiGraph, callable_id: str) -> dict[str, Any]:
     }
 
 
-def is_low_signal_callable(
-        callable_info: dict[str, Any],
-        inventory_info: dict[str, Any] | None = None,
-) -> bool:
+def is_low_signal_callable(callable_info: dict[str, Any], inventory_info: dict[str, Any] | None = None) -> bool:
     name = (callable_info.get("callable_name") or "").strip()
-
     if name in LOW_SIGNAL_DUNDER_NAMES:
         return True
 
@@ -363,9 +302,7 @@ def is_low_signal_callable(
             decorators = inventory_decorators
 
     for decorator in decorators:
-        if not isinstance(decorator, dict):
-            continue
-        if decorator.get("name") == "property":
+        if isinstance(decorator, dict) and decorator.get("name") in LOW_SIGNAL_DECORATORS:
             return True
 
     return False
@@ -374,10 +311,7 @@ def is_low_signal_callable(
 def check_call_coverage(cfg: nx.DiGraph, callable_id: str) -> dict[str, Any]:
     entry = find_entry_ei(cfg, callable_id)
     if not entry:
-        return {
-            "callable_id": callable_id,
-            "entry_exists": False,
-        }
+        return {"callable_id": callable_id, "entry_exists": False}
 
     in_edges = list(cfg.in_edges(entry, data=True))
     call_edges = [edge for edge in in_edges if edge[2].get("edge_type") == "call"]
@@ -403,21 +337,14 @@ def check_call_coverage(cfg: nx.DiGraph, callable_id: str) -> dict[str, Any]:
     }
 
 
-def path_exists_exactly(cfg: nx.DiGraph, path: list[str]) -> bool:
-    if not path:
-        return False
-    for idx in range(len(path) - 1):
-        if not cfg.has_edge(path[idx], path[idx + 1]):
-            return False
-    return True
-
-
 def check_execution_paths(cfg: nx.DiGraph, inventory_index: dict[str, dict[str, Any]]) -> dict[str, Any]:
     failures: list[dict[str, Any]] = []
     checked = 0
 
     for callable_id, info in inventory_index.items():
         if not info.get("is_executable", True):
+            continue
+        if info.get("is_contract_method", False):
             continue
 
         entry_ei = find_entry_ei(cfg, callable_id)
@@ -431,15 +358,19 @@ def check_execution_paths(cfg: nx.DiGraph, inventory_index: dict[str, dict[str, 
 
             for recorded_path in candidate.get("execution_paths", []) or []:
                 checked += 1
-
                 ok = path_contains_recorded_execution_path(
                     cfg=cfg,
                     start_node=entry_ei,
                     target_node=target_ei,
                     recorded_path=recorded_path,
                 )
-
                 if not ok:
+                    failure = find_first_failed_recorded_hop(
+                        cfg=cfg,
+                        start_node=entry_ei,
+                        target_node=target_ei,
+                        recorded_path=recorded_path,
+                    )
                     failures.append(
                         {
                             "callable_id": callable_id,
@@ -448,28 +379,9 @@ def check_execution_paths(cfg: nx.DiGraph, inventory_index: dict[str, dict[str, 
                             "ei_id": target_ei,
                             "target": candidate.get("target"),
                             "path": recorded_path,
+                            "failed_hop": failure,
                         }
                     )
-
-                    failure = find_first_failed_recorded_hop(
-                        cfg=cfg,
-                        start_node=entry_ei,
-                        target_node=target_ei,
-                        recorded_path=recorded_path,
-                    )
-
-                    if failure is not None:
-                        failures.append(
-                            {
-                                "callable_id": callable_id,
-                                "callable_fqn": info.get("callable_fqn"),
-                                "integration_id": candidate.get("id"),
-                                "ei_id": target_ei,
-                                "target": candidate.get("target"),
-                                "path": recorded_path,
-                                "failed_hop": failure,
-                            }
-                        )
 
     return {
         "checked_paths": checked,
@@ -479,10 +391,7 @@ def check_execution_paths(cfg: nx.DiGraph, inventory_index: dict[str, dict[str, 
     }
 
 
-def diagnose_all_callables(
-        cfg: nx.DiGraph,
-        inventory_index: dict[str, dict[str, Any]],
-) -> list[dict[str, Any]]:
+def diagnose_all_callables(cfg: nx.DiGraph, inventory_index: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
     callables = collect_callables_from_graph(cfg)
     results: list[dict[str, Any]] = []
 
@@ -493,7 +402,9 @@ def diagnose_all_callables(
         coverage = check_call_coverage(cfg, callable_id)
         inventory_info = inventory_index.get(callable_id, {})
         is_executable = inventory_info.get("is_executable", True)
+        is_contract_method = inventory_info.get("is_contract_method", False)
         low_signal = is_low_signal_callable(callable_info, inventory_info)
+        has_incoming_callable_calls = has_incoming_callable_call_edges(cfg, callable_id)
         results.append(
             {
                 "callable_id": callable_id,
@@ -501,6 +412,8 @@ def diagnose_all_callables(
                 "callable_fqn": callable_info.get("callable_fqn"),
                 "callable_kind": callable_info.get("callable_kind"),
                 "is_executable": is_executable,
+                "is_contract_method": is_contract_method,
+                "has_incoming_callable_calls": has_incoming_callable_calls,
                 "low_signal": low_signal,
                 "integrity": integrity,
                 "returns": returns,
@@ -628,30 +541,30 @@ def diagnose_callable_detail(cfg: nx.DiGraph, callable_id: str) -> dict[str, Any
     }
 
 
-# =============================================================================
-# Output helpers
-# =============================================================================
-
-
 def print_diagnostic_summary(results: list[dict[str, Any]], path_check: dict[str, Any]) -> None:
     executable_results = [r for r in results if r.get("is_executable", True)]
+    reportable_results = [r for r in executable_results if not r.get("is_contract_method", False)]
 
-    broken = [r for r in executable_results if r["is_broken"] and not r["low_signal"]]
-    broken_low_signal = [r for r in executable_results if r["is_broken"] and r["low_signal"]]
+    broken = [r for r in reportable_results if r["is_broken"] and not r["low_signal"]]
+    broken_low_signal = [r for r in reportable_results if r["is_broken"] and r["low_signal"]]
     no_returns = [
-        r for r in executable_results
+        r for r in reportable_results
         if r["returns"]["has_exits"]
            and not r["returns"]["all_exits_have_returns"]
            and r["coverage"].get("is_called")
            and not r["low_signal"]
     ]
     never_called = [
-        r for r in executable_results
-        if r["coverage"]["entry_exists"] and not r["coverage"]["is_called"] and not r["low_signal"]
+        r for r in reportable_results
+        if r["coverage"]["entry_exists"]
+           and not r.get("has_incoming_callable_calls", False)
+           and not r["low_signal"]
     ]
     never_called_low_signal = [
-        r for r in executable_results
-        if r["coverage"]["entry_exists"] and not r["coverage"]["is_called"] and r["low_signal"]
+        r for r in reportable_results
+        if r["coverage"]["entry_exists"]
+           and not r.get("has_incoming_callable_calls", False)
+           and r["low_signal"]
     ]
 
     print("\n=== Diagnostic Summary ===")
@@ -663,41 +576,6 @@ def print_diagnostic_summary(results: list[dict[str, Any]], path_check: dict[str
     print(f"Callables never called (low-signal bucket): {len(never_called_low_signal)}")
     print(f"Recorded execution paths checked: {path_check['checked_paths']}")
     print(f"Execution path failures: {path_check['failure_count']}")
-
-    if broken:
-        print("\n=== Broken Callables ===")
-        for item in broken[:10]:
-            print(f"{item['callable_id']} ({item.get('callable_fqn', '')}): {item['integrity']['issue']}")
-
-    if no_returns:
-        print("\n=== Callables Missing Return Edges ===")
-        for item in no_returns[:10]:
-            exits_without_returns = [e for e in item["returns"]["exits"] if not e["has_return_edges"]]
-            print(
-                f"{item['callable_id']} ({item.get('callable_fqn', '')}): {len(exits_without_returns)} exits without returns")
-
-    if never_called:
-        print("\n=== Callables Never Called ===")
-        for item in never_called[:10]:
-            print(f"{item['callable_id']} ({item.get('callable_fqn', '')})")
-
-    if never_called_low_signal:
-        print("\n=== Callables Never Called (Low-Signal Bucket) ===")
-        for item in never_called_low_signal[:10]:
-            print(f"{item['callable_id']} ({item.get('callable_fqn', '')})")
-
-    if path_check["failures"]:
-        print("\n=== Execution Path Failures ===")
-        for failure in path_check["failures"][:10]:
-            hop = failure.get("failed_hop") or {}
-            print(
-                f"{failure['callable_id']} ({failure.get('callable_fqn', '')}) "
-                f"integration={failure.get('integration_id')} "
-                f"ei={failure.get('ei_id')} "
-                f"failed_hop={hop.get('from')} -> {hop.get('to')} "
-                f"reason={hop.get('reason')} "
-                f"path={failure.get('path')}"
-            )
 
 
 def print_callable_detail(detail: dict[str, Any]) -> None:
@@ -715,29 +593,6 @@ def print_callable_detail(detail: dict[str, Any]) -> None:
         print(f"    description: {ei.get('description')}")
         print(f"    owner_info: {ei.get('owner_info')}")
         print(f"    constraint: {ei.get('constraint')}")
-
-    print(f"\nEdges ({len(detail['edges'])}):")
-    for edge in detail["edges"]:
-        print(
-            f"  {edge['from']} --[{edge['edge_type']}, call={edge.get('call_kind')}, return={edge.get('return_kind')}]--> "
-            f"{edge['to']}"
-        )
-        print(
-            f"    target_callable_id={edge.get('target_callable_id')} "
-            f"target_callable_fqn={edge.get('target_callable_fqn')} target_category={edge.get('target_category')}"
-        )
-
-    print(f"\nIncoming edges to entry ({len(detail['entry_incoming'])}):")
-    for edge in detail["entry_incoming"]:
-        print(
-            f"  {edge['from']} ({edge.get('from_callable_id')} / {edge.get('from_callable_fqn')}) "
-            f"--[{edge['edge_type']}, call={edge.get('call_kind')}]--> {detail['entry']}"
-        )
-
-
-# =============================================================================
-# Main
-# =============================================================================
 
 
 def main(argv: list[str] | None = None) -> int:
