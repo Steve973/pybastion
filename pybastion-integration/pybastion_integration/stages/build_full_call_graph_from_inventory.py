@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """
-Build an execution-instance-level control-flow graph directly from stage 3 inventory files.
+Build an execution-instance-level call graph directly from stage 3 inventory files.
 
-This version is inventory-first:
-- It consumes *.inventory.yaml files directly.
-- It preserves explicit within-callable flow from branch metadata.
-- It stitches local/interunit/external call edges from ast_analysis.integration_candidates.
-- It verifies that recorded execution_paths are realizable in the assembled graph.
+This version is inventory-first, but preserves the important behavior from the
+older graph builder:
 
-The goal is assembly, not reconstruction.
+- real project callables are linked whenever they can be resolved
+- local same-unit callables are resolved by name when needed
+- interunit/project callables are resolved by fully qualified target when needed
+- external boundary nodes are fallback only when resolution truly fails
+- return edges are wired from callee exit EIs back to caller continuations
+- recorded execution_paths are verified against the assembled graph
 """
 
 from __future__ import annotations
@@ -24,19 +26,10 @@ from typing import Any
 import networkx as nx
 import yaml
 
-# =============================================================================
-# Constants
-# =============================================================================
 
 CALLABLE_KINDS: set[str] = {"function", "method", "assignment"}
-TERMINAL_TERMINATORS: set[str] = {"return", "implicit-return", "raise", "exception"}
-SUCCESS_EXIT_TERMINATORS: set[str] = {"return", "implicit-return"}
+SUCCESS_EXIT_TERMINATORS: set[str] = {"return", "implicit-return", "yield"}
 EXCEPTION_EXIT_TERMINATORS: set[str] = {"raise", "exception"}
-
-
-# =============================================================================
-# Data structures
-# =============================================================================
 
 
 @dataclass(slots=True)
@@ -52,20 +45,10 @@ class CallableContext:
     integration_by_ei: dict[str, list[dict[str, Any]]]
 
 
-# =============================================================================
-# File discovery
-# =============================================================================
-
-
 def discover_inventory_files(inventories_root: Path) -> list[Path]:
     inventory_files = list(inventories_root.rglob("*.inventory.yaml"))
     inventory_files.extend(inventories_root.rglob("*_inventory.yaml"))
     return sorted(set(inventory_files))
-
-
-# =============================================================================
-# Inventory traversal and indexing
-# =============================================================================
 
 
 def normalize_kind_for_callable(kind: str) -> str:
@@ -79,7 +62,9 @@ def build_callable_fqn(unit_fqn: str, ancestor_names: list[str], entry_name: str
     return ".".join(part for part in parts if part)
 
 
-def index_inventory(inventory: dict[str, Any]) -> tuple[dict[str, CallableContext], dict[str, str], dict[str, str]]:
+def index_inventory(
+    inventory: dict[str, Any],
+) -> tuple[dict[str, CallableContext], dict[str, str], dict[str, str]]:
     """
     Returns:
       callable_contexts: callable_id -> CallableContext
@@ -109,6 +94,7 @@ def index_inventory(inventory: dict[str, Any]) -> tuple[dict[str, CallableContex
                 if entry.get("is_executable") is False:
                     recurse(children, [*ancestors, name])
                     continue
+
                 integration_by_ei: dict[str, list[dict[str, Any]]] = defaultdict(list)
                 for candidate in integration_candidates:
                     ei_id = candidate.get("ei_id")
@@ -137,8 +123,9 @@ def index_inventory(inventory: dict[str, Any]) -> tuple[dict[str, CallableContex
     return callable_contexts, fqn_to_callable_id, ei_to_callable_id
 
 
-def load_all_inventories(inventory_paths: list[Path]) -> tuple[
-    dict[str, CallableContext], dict[str, str], dict[str, str]]:
+def load_all_inventories(
+    inventory_paths: list[Path],
+) -> tuple[dict[str, CallableContext], dict[str, str], dict[str, str]]:
     all_contexts: dict[str, CallableContext] = {}
     fqn_to_callable_id: dict[str, str] = {}
     ei_to_callable_id: dict[str, str] = {}
@@ -157,9 +144,35 @@ def load_all_inventories(inventory_paths: list[Path]) -> tuple[
     return all_contexts, fqn_to_callable_id, ei_to_callable_id
 
 
-# =============================================================================
-# Graph helpers
-# =============================================================================
+def parse_ei_num(ei_id: str) -> int:
+    if "_E" not in ei_id:
+        return 10**9
+    suffix = ei_id.rsplit("_E", 1)[1]
+    digits = []
+    for ch in suffix:
+        if ch.isdigit():
+            digits.append(ch)
+        else:
+            break
+    return int("".join(digits)) if digits else 10**9
+
+
+def entry_ei_for_context(context: CallableContext) -> str:
+    if not context.branches:
+        raise ValueError(f"Callable {context.callable_id} has no branches")
+    return min((branch["id"] for branch in context.branches), key=parse_ei_num)
+
+
+def build_local_callables_by_unit(
+    callable_contexts: dict[str, CallableContext],
+) -> dict[str, dict[str, str]]:
+    """
+    unit_fqn -> callable_name -> callable_id
+    """
+    result: dict[str, dict[str, str]] = defaultdict(dict)
+    for callable_id, context in callable_contexts.items():
+        result[context.unit_fqn][context.callable_name] = callable_id
+    return {unit_fqn: dict(name_map) for unit_fqn, name_map in result.items()}
 
 
 def _decorator_name(decorator: dict[str, Any]) -> str:
@@ -167,10 +180,6 @@ def _decorator_name(decorator: dict[str, Any]) -> str:
 
 
 def is_collapsible_operation_entry(entry: dict[str, Any]) -> tuple[bool, str | None, str | None]:
-    """
-    Return (should_collapse, marker_name, marker_type).
-    Collapse MechanicalOperation and UtilityOperation targets.
-    """
     decorators = entry.get("decorators", []) or []
     for decorator in decorators:
         name = _decorator_name(decorator)
@@ -182,11 +191,14 @@ def is_collapsible_operation_entry(entry: dict[str, Any]) -> tuple[bool, str | N
 
 
 def add_callable_nodes(cfg: nx.DiGraph, context: CallableContext) -> None:
-    decorators = context.entry.get("decorators", []) or []
+    callable_decorators = context.entry.get("decorators", []) or []
 
     for branch in context.branches:
         ei_id = branch["id"]
         statement_outcome = branch.get("statement_outcome") or {}
+        branch_decorators = branch.get("decorators", []) or []
+        merged_decorators = [*callable_decorators, *branch_decorators]
+
         cfg.add_node(
             ei_id,
             category="execution_instance",
@@ -203,7 +215,9 @@ def add_callable_nodes(cfg: nx.DiGraph, context: CallableContext) -> None:
             owner_info=branch.get("owner_info"),
             constraint=branch.get("constraint"),
             statement_outcome=statement_outcome,
-            decorators=decorators,
+            decorators=merged_decorators,
+            callable_decorators=callable_decorators,
+            branch_decorators=branch_decorators,
             is_terminal=bool(statement_outcome.get("is_terminal", False)),
             terminates_via=statement_outcome.get("terminates_via"),
         )
@@ -253,9 +267,9 @@ def add_explicit_within_callable_edges(cfg: nx.DiGraph, context: CallableContext
 
 def classify_integration_target_kind(candidate: dict[str, Any]) -> str:
     return (
-            candidate.get("kind")
-            or ((candidate.get("classification") or {}).get("kind"))
-            or "unknown"
+        candidate.get("kind")
+        or ((candidate.get("classification") or {}).get("kind"))
+        or "unknown"
     )
 
 
@@ -297,17 +311,87 @@ def immediate_intra_callable_successors(cfg: nx.DiGraph, callable_id: str, ei_id
 
 
 def resolve_return_destinations(cfg: nx.DiGraph, context: CallableContext, ei_id: str) -> list[str]:
-    """
-    Return destinations are the immediate within-callable successors of the call EI.
-    """
     return immediate_intra_callable_successors(cfg, context.callable_id, ei_id)
 
 
+def resolve_project_callable_target(
+    target: str | None,
+    operation_target: str | None,
+    context: CallableContext,
+    fqn_to_callable_id: dict[str, str],
+    local_callables_by_unit: dict[str, dict[str, str]],
+) -> tuple[str | None, str | None]:
+    """
+    Resolve only from inventory-provided target information.
+
+    Resolution order:
+      1. exact FQN target from integration candidate
+      2. same-unit prefix fallback from the candidate target itself
+
+    No operation_target-based guessing is performed here.
+    """
+    if target and target in fqn_to_callable_id:
+        return fqn_to_callable_id[target], target
+
+    if target and "." not in target:
+        same_unit_target = f"{context.unit_fqn}.{target}"
+        if same_unit_target in fqn_to_callable_id:
+            return fqn_to_callable_id[same_unit_target], same_unit_target
+
+    return None, None
+
+
+def resolve_collapsible_decorated_target(
+    operation_target: str | None,
+    context: CallableContext,
+    callable_contexts: dict[str, CallableContext],
+    fqn_to_callable_id: dict[str, str],
+) -> tuple[str | None, str | None]:
+    """
+    Narrow fallback used only for decorator-driven collapse.
+
+    If the operation target is an owner-qualified call like self.foo/cls.foo/super.foo
+    and the owning type has a callable with that name that is marked
+    MechanicalOperation or UtilityOperation, resolve that callable so the graph can
+    collapse it and return directly to the caller.
+    """
+    if not operation_target:
+        return None, None
+
+    parts = operation_target.split(".")
+    if len(parts) != 2:
+        return None, None
+
+    receiver, attr = parts
+    if receiver not in {"self", "cls", "super"}:
+        return None, None
+
+    if "." not in context.callable_fqn:
+        return None, None
+
+    owner_prefix = context.callable_fqn.rsplit(".", 1)[0]
+    candidate_fqn = f"{owner_prefix}.{attr}"
+    candidate_id = fqn_to_callable_id.get(candidate_fqn)
+    if candidate_id is None:
+        return None, None
+
+    candidate_context = callable_contexts.get(candidate_id)
+    if candidate_context is None:
+        return None, None
+
+    collapse_target, _, _ = is_collapsible_operation_entry(candidate_context.entry)
+    if not collapse_target:
+        return None, None
+
+    return candidate_id, candidate_fqn
+
+
 def add_call_and_return_edges(
-        cfg: nx.DiGraph,
-        context: CallableContext,
-        callable_contexts: dict[str, CallableContext],
-        fqn_to_callable_id: dict[str, str],
+    cfg: nx.DiGraph,
+    context: CallableContext,
+    callable_contexts: dict[str, CallableContext],
+    fqn_to_callable_id: dict[str, str],
+    local_callables_by_unit: dict[str, dict[str, str]],
 ) -> None:
     success_exit_cache: dict[str, list[str]] = {}
     exception_exit_cache: dict[str, list[str]] = {}
@@ -321,7 +405,64 @@ def add_call_and_return_edges(
         operation_target = operation_target_for_branch(branch)
         return_targets = resolve_return_destinations(cfg, context, ei_id)
 
+        # No integration candidates at all. Still try local/project resolution first.
         if not integration_candidates:
+            resolved_callable_id, resolved_target_repr = resolve_project_callable_target(
+                target=None,
+                operation_target=operation_target,
+                context=context,
+                fqn_to_callable_id=fqn_to_callable_id,
+                local_callables_by_unit=local_callables_by_unit,
+            )
+            if resolved_callable_id is None:
+                resolved_callable_id, resolved_target_repr = resolve_collapsible_decorated_target(
+                    operation_target=operation_target,
+                    context=context,
+                    callable_contexts=callable_contexts,
+                    fqn_to_callable_id=fqn_to_callable_id,
+                )
+
+            if resolved_callable_id is not None:
+                target_context = callable_contexts[resolved_callable_id]
+                target_entry_ei = entry_ei_for_context(target_context)
+
+                cfg.add_edge(
+                    ei_id,
+                    target_entry_ei,
+                    edge_type="call",
+                    call_kind="local",
+                    target_callable_id=resolved_callable_id,
+                    target_fqn=target_context.callable_fqn,
+                    resolved_target=resolved_target_repr,
+                    operation_target=operation_target,
+                    signature=None,
+                )
+
+                if resolved_callable_id not in success_exit_cache:
+                    success_exit_cache[resolved_callable_id] = compute_success_exit_eis(target_context)
+                    exception_exit_cache[resolved_callable_id] = compute_exception_exit_eis(target_context)
+
+                for return_target in return_targets:
+                    for exit_ei in success_exit_cache[resolved_callable_id]:
+                        cfg.add_edge(
+                            exit_ei,
+                            return_target,
+                            edge_type="return",
+                            return_kind="success",
+                            original_call_site=ei_id,
+                            returns_from=resolved_callable_id,
+                        )
+                    for exit_ei in exception_exit_cache[resolved_callable_id]:
+                        cfg.add_edge(
+                            exit_ei,
+                            return_target,
+                            edge_type="return",
+                            return_kind="exception",
+                            original_call_site=ei_id,
+                            returns_from=resolved_callable_id,
+                        )
+                continue
+
             external_node_id = f"external::{ei_id}"
             cfg.add_node(
                 external_node_id,
@@ -332,9 +473,20 @@ def add_call_and_return_edges(
                 callable_id=context.callable_id,
                 callable_fqn=context.callable_fqn,
             )
-            cfg.add_edge(ei_id, external_node_id, edge_type="call", call_kind="unresolved")
+            cfg.add_edge(
+                ei_id,
+                external_node_id,
+                edge_type="call",
+                call_kind="unresolved",
+                operation_target=operation_target,
+            )
             for return_target in return_targets:
-                cfg.add_edge(external_node_id, return_target, edge_type="return", return_kind="external")
+                cfg.add_edge(
+                    external_node_id,
+                    return_target,
+                    edge_type="return",
+                    return_kind="external",
+                )
             continue
 
         for candidate in integration_candidates:
@@ -342,32 +494,49 @@ def add_call_and_return_edges(
             target = candidate.get("target") or ((candidate.get("classification") or {}).get("resolved_target"))
             signature = candidate.get("signature")
 
-            if kind == "interunit" and target and target in fqn_to_callable_id:
-                target_callable_id = fqn_to_callable_id[target]
-                target_context = callable_contexts[target_callable_id]
+            resolved_callable_id, resolved_target_repr = resolve_project_callable_target(
+                target=target,
+                operation_target=operation_target,
+                context=context,
+                fqn_to_callable_id=fqn_to_callable_id,
+                local_callables_by_unit=local_callables_by_unit,
+            )
+            if resolved_callable_id is None:
+                resolved_callable_id, resolved_target_repr = resolve_collapsible_decorated_target(
+                    operation_target=operation_target,
+                    context=context,
+                    callable_contexts=callable_contexts,
+                    fqn_to_callable_id=fqn_to_callable_id,
+                )
+
+            if resolved_callable_id is not None:
+                target_context = callable_contexts[resolved_callable_id]
                 collapse_target, marker_name, marker_type = is_collapsible_operation_entry(target_context.entry)
 
                 if collapse_target:
-                    collapsed_node_id = f"collapsed::{ei_id}::{target_callable_id}"
-
-                    cfg.add_node(
-                        collapsed_node_id,
-                        category="collapsed_internal_operation",
-                        callable_id=target_callable_id,
-                        callable_fqn=target_context.callable_fqn,
-                        callable_name=target_context.callable_name,
-                        marker_name=marker_name,
-                        marker_type=marker_type,
-                        called_from=ei_id,
-                    )
+                    collapsed_node_id = f"collapsed::{ei_id}::{resolved_callable_id}"
+                    if not cfg.has_node(collapsed_node_id):
+                        cfg.add_node(
+                            collapsed_node_id,
+                            category="collapsed_internal_operation",
+                            callable_id=resolved_callable_id,
+                            callable_fqn=target_context.callable_fqn,
+                            callable_name=target_context.callable_name,
+                            marker_name=marker_name,
+                            marker_type=marker_type,
+                            decorators=target_context.entry.get("decorators", []) or [],
+                            callable_decorators=target_context.entry.get("decorators", []) or [],
+                            called_from=ei_id,
+                        )
 
                     cfg.add_edge(
                         ei_id,
                         collapsed_node_id,
                         edge_type="call",
-                        call_kind="collapsed_internal_operation",
-                        target_callable_id=target_callable_id,
-                        target_fqn=target,
+                        call_kind=kind,
+                        target_callable_id=resolved_callable_id,
+                        target_fqn=target_context.callable_fqn,
+                        resolved_target=resolved_target_repr,
                         marker_name=marker_name,
                         marker_type=marker_type,
                         signature=signature,
@@ -380,80 +549,57 @@ def add_call_and_return_edges(
                             edge_type="return",
                             return_kind="collapsed_internal_operation",
                             original_call_site=ei_id,
-                            returns_from=target_callable_id,
+                            returns_from=resolved_callable_id,
                         )
-
                     continue
-                target_context = None
-                # target_context lookup deferred through graph nodes; keep cheap map from callable ids present in graph later
-                target_entry_ei = None
-                for node_id, node_data in cfg.nodes(data=True):
-                    if node_data.get("callable_id") == target_callable_id:
-                        target_entry_ei = node_id
-                        break
 
-                if target_entry_ei is None:
-                    # Target callable exists, but nodes not yet present would indicate bad build ordering.
-                    # Since we add all nodes before edges, this should not happen.
-                    raise ValueError(f"Could not find entry EI for interunit target {target} ({target_callable_id})")
+                target_entry_ei = entry_ei_for_context(target_context)
 
                 cfg.add_edge(
                     ei_id,
                     target_entry_ei,
                     edge_type="call",
-                    call_kind="interunit",
-                    target_callable_id=target_callable_id,
-                    target_fqn=target,
+                    call_kind=kind,
+                    target_callable_id=resolved_callable_id,
+                    target_fqn=target_context.callable_fqn,
+                    resolved_target=resolved_target_repr,
+                    operation_target=operation_target,
                     signature=signature,
                 )
 
-                if target_callable_id not in success_exit_cache:
-                    target_branches = [
-                        {"id": node_id, "statement_outcome": {"is_terminal": data.get("is_terminal", False),
-                                                              "terminates_via": data.get("terminates_via")}}
-                        for node_id, data in cfg.nodes(data=True)
-                        if data.get("callable_id") == target_callable_id
-                    ]
-                    fake_context = CallableContext(
-                        callable_id=target_callable_id,
-                        callable_name="",
-                        callable_kind="",
-                        callable_fqn=target,
-                        unit_name="",
-                        unit_fqn="",
-                        entry={},
-                        branches=target_branches,
-                        integration_by_ei={},
-                    )
-                    success_exit_cache[target_callable_id] = compute_success_exit_eis(fake_context)
-                    exception_exit_cache[target_callable_id] = compute_exception_exit_eis(fake_context)
+                if resolved_callable_id not in success_exit_cache:
+                    success_exit_cache[resolved_callable_id] = compute_success_exit_eis(target_context)
+                    exception_exit_cache[resolved_callable_id] = compute_exception_exit_eis(target_context)
 
                 for return_target in return_targets:
-                    for exit_ei in success_exit_cache[target_callable_id]:
+                    for exit_ei in success_exit_cache[resolved_callable_id]:
                         cfg.add_edge(
                             exit_ei,
                             return_target,
                             edge_type="return",
                             return_kind="success",
                             original_call_site=ei_id,
-                            returns_from=target_callable_id,
+                            returns_from=resolved_callable_id,
                         )
-                    for exit_ei in exception_exit_cache[target_callable_id]:
+                    for exit_ei in exception_exit_cache[resolved_callable_id]:
                         cfg.add_edge(
                             exit_ei,
                             return_target,
                             edge_type="return",
                             return_kind="exception",
                             original_call_site=ei_id,
-                            returns_from=target_callable_id,
+                            returns_from=resolved_callable_id,
                         )
-            else:
-                external_node_id = f"external::{ei_id}::{kind}::{len(return_targets)}::{target or 'unknown'}"
+                continue
+
+            external_node_id = f"external::{ei_id}::{kind}::{target or operation_target or 'unknown'}"
+            if not cfg.has_node(external_node_id):
                 cfg.add_node(
                     external_node_id,
                     category="external_call",
                     external_kind=kind,
                     target=target,
+                    operation_target=operation_target,
                     signature=signature,
                     called_from=ei_id,
                     callable_id=context.callable_id,
@@ -461,27 +607,23 @@ def add_call_and_return_edges(
                     execution_paths=candidate.get("execution_paths", []),
                     path_analysis=candidate.get("path_analysis"),
                 )
+            cfg.add_edge(
+                ei_id,
+                external_node_id,
+                edge_type="call",
+                call_kind=kind,
+                target=target,
+                operation_target=operation_target,
+                signature=signature,
+            )
+            for return_target in return_targets:
                 cfg.add_edge(
-                    ei_id,
                     external_node_id,
-                    edge_type="call",
-                    call_kind=kind,
-                    target=target,
-                    signature=signature,
+                    return_target,
+                    edge_type="return",
+                    return_kind="external",
+                    original_call_site=ei_id,
                 )
-                for return_target in return_targets:
-                    cfg.add_edge(
-                        external_node_id,
-                        return_target,
-                        edge_type="return",
-                        return_kind="external",
-                        original_call_site=ei_id,
-                    )
-
-
-# =============================================================================
-# Verification
-# =============================================================================
 
 
 def path_exists_exactly(cfg: nx.DiGraph, path: list[str]) -> bool:
@@ -494,8 +636,8 @@ def path_exists_exactly(cfg: nx.DiGraph, path: list[str]) -> bool:
 
 
 def verify_recorded_execution_paths(
-        cfg: nx.DiGraph,
-        callable_contexts: dict[str, CallableContext],
+    cfg: nx.DiGraph,
+    callable_contexts: dict[str, CallableContext],
 ) -> list[dict[str, Any]]:
     failures: list[dict[str, Any]] = []
 
@@ -516,37 +658,31 @@ def verify_recorded_execution_paths(
     return failures
 
 
-# =============================================================================
-# Graph build orchestration
-# =============================================================================
-
-
-def build_graph_from_inventories(inventory_paths: list[Path]) -> tuple[
-    nx.DiGraph, dict[str, CallableContext], list[dict[str, Any]]]:
+def build_graph_from_inventories(
+    inventory_paths: list[Path],
+) -> tuple[nx.DiGraph, dict[str, CallableContext], list[dict[str, Any]]]:
     callable_contexts, fqn_to_callable_id, _ei_to_callable_id = load_all_inventories(inventory_paths)
+    local_callables_by_unit = build_local_callables_by_unit(callable_contexts)
 
     cfg = nx.DiGraph()
 
-    # Pass 1: add all EI nodes.
     for context in callable_contexts.values():
         add_callable_nodes(cfg, context)
 
-    # Pass 2: add all explicit within-callable edges.
     for context in callable_contexts.values():
         add_explicit_within_callable_edges(cfg, context)
 
-    # Pass 3: add cross-call / external seam edges.
     for context in callable_contexts.values():
-        add_call_and_return_edges(cfg, context, callable_contexts, fqn_to_callable_id)
+        add_call_and_return_edges(
+            cfg,
+            context,
+            callable_contexts,
+            fqn_to_callable_id,
+            local_callables_by_unit,
+        )
 
-    # Verification: recorded execution paths must be present.
     failures = verify_recorded_execution_paths(cfg, callable_contexts)
     return cfg, callable_contexts, failures
-
-
-# =============================================================================
-# Serialization
-# =============================================================================
 
 
 def serialize_graph(cfg: nx.DiGraph, output_path: Path, fmt: str) -> None:
@@ -570,18 +706,16 @@ def serialize_graph(cfg: nx.DiGraph, output_path: Path, fmt: str) -> None:
     raise ValueError(f"Unsupported format: {fmt}")
 
 
-# =============================================================================
-# CLI
-# =============================================================================
-
-
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Build EI graph directly from inventory files")
+    parser = argparse.ArgumentParser(description="Build EI call graph directly from inventory files")
     parser.add_argument("--inventories-root", type=Path, required=True, help="Root containing *.inventory.yaml files")
     parser.add_argument("--output", type=Path, required=True, help="Output file path")
     parser.add_argument("--format", choices=["pickle", "yaml", "graphml"], default="pickle")
-    parser.add_argument("--fail-on-path-mismatch", action="store_true",
-                        help="Exit nonzero if recorded execution_paths are not realizable")
+    parser.add_argument(
+        "--fail-on-path-mismatch",
+        action="store_true",
+        help="Exit nonzero if recorded execution_paths are not realizable",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 

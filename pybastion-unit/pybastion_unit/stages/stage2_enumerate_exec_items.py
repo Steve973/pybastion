@@ -34,7 +34,8 @@ from pybastion_unit.helpers.constraint_metadata_helper import (
 )
 from pybastion_unit.helpers.decorator_processing import extract_statement_decorators
 from pybastion_unit.semantic_decomposition import decompose_statement
-from pybastion_unit.semantic_decomposition.decomp_types import DecompositionContext, ControlOwner, OwnerKind, DecomposerResult
+from pybastion_unit.semantic_decomposition.decomp_types import DecompositionContext, ControlOwner, OwnerKind, \
+    DecomposerResult
 from pybastion_unit.shared.callable_id_generation import (
     FUNC_ID_EXPR,
     generate_ei_id,
@@ -512,8 +513,8 @@ def _is_excluded_successor(current: Branch, candidate: Branch) -> bool:
 
 
 def _is_skipped_successor(
-    candidate: Branch,
-    outcome: StatementOutcome | ConditionalTarget | DisruptiveOutcome | None = None,
+        candidate: Branch,
+        outcome: StatementOutcome | ConditionalTarget | DisruptiveOutcome | None = None,
 ) -> bool:
     if outcome is None:
         return False
@@ -521,9 +522,9 @@ def _is_skipped_successor(
 
 
 def _same_statement_successor(
-    branches: list[Branch],
-    index: int,
-    branch: Branch,
+        branches: list[Branch],
+        index: int,
+        branch: Branch,
 ) -> Branch | None:
     outcome = branch.statement_outcome
     if outcome is None:
@@ -649,6 +650,35 @@ class IndexedNodeLocator(ast.NodeVisitor):
 
 
 # ============================================================================
+# Statement enumeration
+# ============================================================================
+
+
+def create_statement_anchor_branch(
+        callable_id: str,
+        ei_num: int,
+        line_num: int,
+        target_ei: str,
+        decorators: list[dict[str, Any]],
+        owner_info: OwnerInfo | None = None,
+) -> Branch:
+    return Branch(
+        id=generate_ei_id(callable_id, ei_num),
+        line=line_num,
+        condition="statement anchor",
+        description="statement anchor",
+        stmt_type="StatementAnchor",
+        decorators=decorators,
+        owner_info=owner_info,
+        statement_outcome=StatementOutcome(
+            outcome="statement anchor",
+            target_ei=target_ei,
+            synthetic=True,
+        ),
+    )
+
+
+# ============================================================================
 # Function enumeration
 # ============================================================================
 
@@ -689,9 +719,30 @@ def enumerate_function_eis(
 
         decomp_context = _build_decomposition_context(context)
         outcomes = decompose_statement(stmt, source_lines, decomp_context)
-        stmt_decorators = extract_statement_decorators(stmt, source_lines)
+        if not outcomes:
+            continue
 
-        for decomposed in outcomes or []:
+        stmt_decorators = extract_statement_decorators(stmt, source_lines)
+        owner_info = _owner_info_from_context(context)
+
+        if stmt_decorators:
+            anchor_ei_num = ei_counter
+            first_real_ei_num = ei_counter + 1
+            first_real_ei_id = generate_ei_id(callable_id, first_real_ei_num)
+
+            branches.append(
+                create_statement_anchor_branch(
+                    callable_id=callable_id,
+                    ei_num=anchor_ei_num,
+                    line_num=stmt.lineno,
+                    target_ei=first_real_ei_id,
+                    decorators=stmt_decorators,
+                    owner_info=owner_info,
+                )
+            )
+            ei_counter += 1
+
+        for decomposed in outcomes:
             ei_id = generate_ei_id(callable_id, ei_counter)
             skips_lines: list[int] = []
             if decomposed.statement_outcome is not None:
@@ -706,8 +757,6 @@ def enumerate_function_eis(
                 skips_lines,
             )
 
-            owner_info = _owner_info_from_context(context)
-
             branches.append(
                 Branch(
                     id=ei_id,
@@ -716,7 +765,7 @@ def enumerate_function_eis(
                     description=decomposed.description,
                     constraint=constraint,
                     stmt_type=type(stmt).__name__,
-                    decorators=stmt_decorators,
+                    decorators=[],
                     statement_outcome=decomposed.statement_outcome,
                     conditional_targets=decomposed.conditional_targets,
                     disruptive_outcomes=decomposed.disruptive_outcomes,

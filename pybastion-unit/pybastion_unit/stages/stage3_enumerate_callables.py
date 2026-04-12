@@ -726,19 +726,35 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
                     predecessors.setdefault(target, []).append(src)
 
             branch_by_id = {branch.id: branch for branch in branches}
-            entry_eis = [
-                ei_id
-                for ei_id, preds in predecessors.items()
-                if not preds
-                   and not (
-                        branch_by_id[ei_id].owner_info is not None
-                        and branch_by_id[ei_id].owner_info.stmt_type == "Try"
-                        and branch_by_id[ei_id].owner_info.region == "except"
+
+            explicit_entry_eis = [
+                branch.id
+                for branch in branches
+                if (
+                    branch.statement_outcome is not None
+                    and branch.statement_outcome.synthetic
+                    and branch.stmt_type == "FunctionInvocation"
+                    and branch.description == "function start"
                 )
             ]
-            if not entry_eis and branches:
-                first_line = min(branch.line for branch in branches)
-                entry_eis = [branch.id for branch in branches if branch.line == first_line]
+
+            if explicit_entry_eis:
+                entry_eis = explicit_entry_eis
+            else:
+                entry_eis = [
+                    ei_id
+                    for ei_id, preds in predecessors.items()
+                    if not preds
+                       and not (
+                            branch_by_id[ei_id].owner_info is not None
+                            and branch_by_id[ei_id].owner_info.stmt_type == "Try"
+                            and branch_by_id[ei_id].owner_info.region == "except"
+                    )
+                ]
+
+                if not entry_eis and branches:
+                    first_line = min(branch.line for branch in branches)
+                    entry_eis = [branch.id for branch in branches if branch.line == first_line]
 
             line_to_eis: dict[int, list[str]] = {}
             for branch in branches:
@@ -820,15 +836,6 @@ def count_all_entries(entries: list[dict[str, Any]]) -> int:
     for entry in entries:
         total += 1
         total += count_all_entries(entry.get("children", []))
-    return total
-
-
-def count_needs_analysis(entries: list[dict[str, Any]]) -> int:
-    total = 0
-    for entry in entries:
-        if entry.get("needs_callable_analysis"):
-            total += 1
-        total += count_needs_analysis(entry.get("children", []))
     return total
 
 
@@ -923,6 +930,10 @@ def process_unit(
     for err in validate_feature_co_occurrences(roots):
         print(f"Warning: {err}")
 
+    for entry in unit.entries:
+        payload = entries_by_id[entry.id]
+        payload.pop("needs_callable_analysis", None)
+
     kind_counts = count_by_kind(roots)
     inventory = {
         "unit": source_path.stem,
@@ -933,7 +944,6 @@ def process_unit(
         "entries": roots,
         "summary": {
             "total_entries": count_all_entries(roots),
-            "needs_analysis": count_needs_analysis(roots),
             "classes": kind_counts.get("class", 0),
             "enums": kind_counts.get("enum", 0),
             "methods": kind_counts.get("method", 0),
@@ -948,8 +958,7 @@ def process_unit(
                            encoding="utf-8")
 
     print(f"  → Unit ID: {unit.unit_id}")
-    print(
-        f"  → {inventory['summary']['total_entries']} entries, {inventory['summary']['needs_analysis']} need analysis")
+    print(f"  → {inventory['summary']['total_entries']} entries")
     print(f"  → Saved: {output_path}")
     return inventory
 
