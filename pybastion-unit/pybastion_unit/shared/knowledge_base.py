@@ -581,6 +581,30 @@ COMMON_EXTLIB_MODULES = {
     'yaml',
 }
 
+BUILTIN_RECEIVER_METHODS = {
+    "dict::items",
+    "dict::keys",
+    "dict::values",
+    "dict::get",
+    "dict::setdefault",
+    "dict::update",
+
+    "list::append",
+    "list::extend",
+    "list::pop",
+    "list::sort",
+
+    "set::add",
+    "set::remove",
+    "set::discard",
+
+    "str::split",
+    "str::join",
+    "str::strip",
+    "str::lower",
+    "str::endswith",
+}
+
 BUILTIN_METHODS = {
     # Known builtin method patterns (never integrations)
     'items', 'keys', 'values', 'get', 'setdefault', 'update',  # dict methods

@@ -7,6 +7,7 @@ from typing import Any, Callable
 from pybastion_common.models import Branch
 from pybastion_unit.shared.knowledge_base import (
     BUILTIN_METHODS,
+    BUILTIN_RECEIVER_METHODS,
     COMMON_EXTLIB_MODULES,
     PYTHON_BUILTINS,
     is_stdlib_module,
@@ -65,15 +66,41 @@ def _root_name(target: str) -> str:
     return target.split(".", 1)[0].strip()
 
 
+def _normalize_receiver_type(receiver_type: str | None) -> str | None:
+    if not receiver_type:
+        return None
+
+    normalized = receiver_type.strip()
+
+    if "::" in normalized:
+        container, _inner = normalized.split("::", 1)
+        return container.strip()
+
+    if "[" in normalized:
+        normalized = normalized.split("[", 1)[0].strip()
+
+    if "." in normalized:
+        normalized = normalized.rsplit(".", 1)[-1]
+
+    return normalized or None
+
+
+def is_builtin_receiver_method(receiver_type: str | None, method_name: str) -> bool:
+    normalized = _normalize_receiver_type(receiver_type)
+    if not normalized:
+        return False
+    return f"{normalized}::{method_name}" in BUILTIN_RECEIVER_METHODS
+
+
 def _is_builtin_target(target: str) -> bool:
     base_name = _base_name(target)
-    root_name = _root_name(target)
 
-    return (
-            base_name in PYTHON_BUILTINS
-            or base_name in BUILTIN_METHODS
-            or root_name in {"self", "cls", "object"}
-    )
+    # Only plain builtin-like symbols are filtered here.
+    # Do not treat dotted receiver calls as builtin solely by basename.
+    if "." not in target:
+        return base_name in PYTHON_BUILTINS or base_name in BUILTIN_METHODS
+
+    return base_name in PYTHON_BUILTINS
 
 
 def _is_stdlib_target(target: str) -> bool:
@@ -89,13 +116,45 @@ def _is_extlib_target(target: str) -> bool:
     return root_name in COMMON_EXTLIB_MODULES
 
 
-def _is_forbidden_integration_branch(branch: Branch) -> bool:
+def _is_internal_self_target(
+    target: str,
+    callable_fqn: str,
+    callable_inventory: dict[str, str],
+) -> bool:
+    if not target.startswith("self."):
+        return False
+
+    parts = target.split(".")
+    if len(parts) < 2:
+        return False
+
+    owner_class_fqn = callable_fqn.rsplit(".", 1)[0] if "." in callable_fqn else None
+    if not owner_class_fqn:
+        return False
+
+    first_attr = parts[1]
+
+    if len(parts) == 2 and first_attr.startswith("_"):
+        return True
+
+    if len(parts) == 2:
+        candidate = f"{owner_class_fqn}.{first_attr}"
+        if candidate in callable_inventory:
+            return True
+
+    if len(parts) >= 3:
+        return False
+
+    return False
+
+
+def _is_forbidden_integration_branch(
+    branch: Branch,
+    callable_fqn: str,
+    callable_inventory: dict[str, str],
+) -> bool:
     owner = branch.owner_info
-    if (
-            owner is not None
-            and owner.stmt_type == "Try"
-            and owner.region == "except"
-    ):
+    if owner is not None and owner.stmt_type == "Try" and owner.region == "except":
         return True
 
     constraint = branch.constraint
@@ -106,7 +165,11 @@ def _is_forbidden_integration_branch(branch: Branch) -> bool:
     if not target:
         return False
 
-    if target.startswith("self.") or target.startswith("cls.") or target.startswith("object."):
+    if _is_internal_self_target(
+        target=target,
+        callable_fqn=callable_fqn,
+        callable_inventory=callable_inventory,
+    ):
         return True
 
     if _is_builtin_target(target):
@@ -136,6 +199,7 @@ def _classify_integration_target(
 ) -> dict[str, Any]:
     candidate = (resolved_target or raw_target or "").strip()
     receiver_type = (resolved_type or "").strip()
+    method_name = _base_name(raw_target)
 
     if resolved_target is None or resolved_target == "":
         return {
@@ -170,6 +234,13 @@ def _classify_integration_target(
         return {
             "is_integration": True,
             "kind": "interunit",
+            "resolved_target": candidate,
+        }
+
+    if is_builtin_receiver_method(receiver_type, method_name):
+        return {
+            "is_integration": False,
+            "kind": "builtin",
             "resolved_target": candidate,
         }
 
@@ -250,7 +321,11 @@ def build_integration_entries(
         if not _is_operation_branch(branch):
             continue
 
-        if _is_forbidden_integration_branch(branch):
+        if _is_forbidden_integration_branch(
+                branch,
+                callable_fqn=callable_fqn,
+                callable_inventory=callable_inventory,
+        ):
             continue
 
         constraint = branch.constraint

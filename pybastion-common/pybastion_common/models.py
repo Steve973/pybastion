@@ -19,14 +19,6 @@ from typing import Any
 from typing_extensions import Self
 
 from pybastion_unit.shared.callable_id_generation import ei_id_to_integration_id
-from pybastion_unit.shared.knowledge_base import (
-    BOUNDARY_OPERATIONS,
-    BUILTIN_METHODS,
-    COMMON_EXTLIB_MODULES,
-    PYTHON_BUILTINS,
-    STDLIB_CLASSES,
-    is_stdlib_module,
-)
 
 
 @dataclass(slots=True)

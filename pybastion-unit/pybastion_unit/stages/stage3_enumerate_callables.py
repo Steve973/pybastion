@@ -33,6 +33,11 @@ from pybastion_common.models import (
     UnitIndexEntry,
 )
 from pybastion_common.smt_path_checker import filter_feasible_paths
+from pybastion_unit.helpers.chain_resolution import (
+    build_field_types_by_class,
+    ResolutionContext,
+    resolve_target_chain, extract_element_type
+)
 from pybastion_unit.helpers.decorator_processing import (
     extract_callable_decorators,
     has_effect,
@@ -40,10 +45,7 @@ from pybastion_unit.helpers.decorator_processing import (
 )
 from pybastion_unit.helpers.integration_analysis import build_integration_entries
 from pybastion_unit.shared.knowledge_base import (
-    BUILTIN_METHODS,
     GENERIC_CONTAINER_TYPES,
-    PYTHON_BUILTINS,
-    is_builtin_container_method,
 )
 
 ENUM_BASES: set[str] = {"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"}
@@ -61,6 +63,7 @@ class TargetResolution:
     original_target: str
     resolved_target: str
     resolution_kind: str
+    resolved_receiver_type: str | None = None
     resolution_basis: str | None = None
     candidate_targets: list[str] | None = None
 
@@ -118,6 +121,7 @@ class IndexedNodeLocator(ast.NodeVisitor):
         self.scope_stack: list[str] = [module_fqn] if module_fqn else []
         self.nodes_by_fqn_and_line: dict[tuple[str, int], ast.AST] = {}
         self.assignment_nodes_by_fqn_and_line: dict[tuple[str, int], ast.AST] = {}
+        self.class_nodes: dict[str, ast.ClassDef] = {}
 
     def current_fqn_prefix(self) -> str:
         return ".".join(self.scope_stack)
@@ -125,6 +129,7 @@ class IndexedNodeLocator(ast.NodeVisitor):
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         fqn = f"{self.current_fqn_prefix()}.{node.name}" if self.scope_stack else node.name
         self.nodes_by_fqn_and_line[(fqn, node.lineno)] = node
+        self.class_nodes[fqn] = node
         self.scope_stack.append(node.name)
         self.generic_visit(node)
         self.scope_stack.pop()
@@ -424,6 +429,7 @@ class AstAnalyzer:
             import_map: dict[str, str],
             local_symbols: set[str],
             local_return_types: dict[str, str],
+            field_types_by_class: dict[str, dict[str, str]],
     ):
         self.source_lines = source_lines
         self.unit_id = unit_id
@@ -433,6 +439,7 @@ class AstAnalyzer:
         self.import_map = import_map
         self.local_symbols = local_symbols
         self.local_return_types = local_return_types
+        self.field_types_by_class = field_types_by_class
 
     def _normalize_type_name(self, type_name: str) -> str:
         type_name = re.sub(r"\s*\|\s*None", "", type_name).strip()
@@ -589,6 +596,28 @@ class AstAnalyzer:
 
     def _build_local_type_map(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str]:
         local_types: dict[str, str] = {}
+        owner_class_fqn = self._owner_class_fqn_for_callable(self.current_callable_fqn) if hasattr(self,
+                                                                                                   "current_callable_fqn") else None
+        owner_fields = self.field_types_by_class.get(owner_class_fqn or "", {})
+
+        def infer_expr_type(expr: ast.AST) -> str | None:
+            if isinstance(expr, ast.Name):
+                return local_types.get(expr.id)
+
+            if isinstance(expr, ast.Attribute):
+                if isinstance(expr.value, ast.Name) and expr.value.id == "self":
+                    return owner_fields.get(expr.attr)
+
+            if isinstance(expr, ast.Call):
+                func = expr.func
+
+                if isinstance(func, ast.Name):
+                    return self.local_return_types.get(func.id)
+
+                if isinstance(func, ast.Attribute):
+                    return self.local_return_types.get(func.attr)
+
+            return None
 
         for stmt in ast.walk(node):
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
@@ -629,21 +658,19 @@ class AstAnalyzer:
                 target_name = stmt.targets[0].id
                 value = stmt.value
 
-                if isinstance(value, ast.Call):
-                    func = value.func
+                inferred = infer_expr_type(value)
+                if inferred:
+                    local_types[target_name] = inferred
+                    continue
 
-                    if isinstance(func, ast.Name):
-                        return_type = self.local_return_types.get(func.id)
-                        if return_type:
-                            local_types[target_name] = return_type
-                            continue
+            if isinstance(stmt, ast.For) and isinstance(stmt.target, ast.Name):
+                loop_var = stmt.target.id
+                iter_type = infer_expr_type(stmt.iter)
 
-                    if isinstance(func, ast.Attribute):
-                        attr_name = func.attr
-                        return_type = self.local_return_types.get(attr_name)
-                        if return_type:
-                            local_types[target_name] = return_type
-                            continue
+                if iter_type:
+                    element_type = extract_element_type(iter_type)
+                    if element_type:
+                        local_types[loop_var] = element_type
 
         return local_types
 
@@ -732,7 +759,11 @@ class AstAnalyzer:
             project_fqns=self.project_fqns,
             callable_inventory=self.callable_inventory,
             known_types=known_types,
-            resolve_target=self._resolve_target,
+            resolve_target=lambda target, param_types: self._resolve_target(
+                target,
+                param_types,
+                callable_fqn=callable_fqn,
+            ),
             signature_for_branch=_integration_signature_for_branch,
         )
 
@@ -742,7 +773,11 @@ class AstAnalyzer:
             original_target = payload.get("target")
 
             if original_target:
-                resolution = self._resolve_target_details(original_target, known_types)
+                resolution = self._resolve_target_details(
+                    original_target,
+                    known_types,
+                    callable_fqn=callable_fqn,
+                )
                 payload["resolved_target"] = resolution.resolved_target
                 payload["resolution_kind"] = resolution.resolution_kind
                 if resolution.resolution_basis:
@@ -757,167 +792,55 @@ class AstAnalyzer:
 
         return enriched
 
-    def _resolve_target_details(self, target: str, param_types: dict[str, str]) -> TargetResolution:
-        parts = target.split(".")
-        first_part = parts[0].strip()
+    def _owner_class_fqn_for_callable(self, callable_fqn: str) -> str | None:
+        parts = callable_fqn.split(".")
+        if len(parts) < 2:
+            return None
+        return ".".join(parts[:-1])
 
-        def unresolved(basis: str = "fallback_original") -> TargetResolution:
-            return TargetResolution(
-                original_target=target,
-                resolved_target=target,
-                resolution_kind="unresolved",
-                resolution_basis=basis,
-                candidate_targets=[],
-            )
+    def _resolve_target_details(
+            self,
+            target: str,
+            param_types: dict[str, str],
+            callable_fqn: str | None = None,
+    ) -> TargetResolution:
+        owner_class_fqn = None
+        if callable_fqn:
+            owner_class_fqn = self._owner_class_fqn_for_callable(callable_fqn)
 
-        if len(parts) > 2:
-            return unresolved()
+        ctx = ResolutionContext(
+            unit_fqn=self.unit_fqn,
+            import_map=self.import_map,
+            callable_inventory=self.callable_inventory,
+            local_return_types=self.local_return_types,
+            field_types_by_class=self.field_types_by_class,
+            callable_fqn=callable_fqn or self.unit_fqn,
+            owner_class_fqn=owner_class_fqn,
+            known_types=param_types,
+        )
 
-        if len(parts) == 1 and first_part in self.import_map:
-            imported_fqn = self.import_map[first_part]
-            kind = "exact" if imported_fqn in self.callable_inventory else "normalized"
-            return TargetResolution(
-                original_target=target,
-                resolved_target=imported_fqn,
-                resolution_kind=kind,
-                resolution_basis="import_map",
-                candidate_targets=[],
-            )
+        result = resolve_target_chain(ctx, target)
+        return TargetResolution(
+            original_target=result.original_target,
+            resolved_target=result.resolved_target,
+            resolution_kind=result.resolution_kind,
+            resolved_receiver_type=result.resolved_receiver_type,
+            resolution_basis=result.resolution_basis,
+            candidate_targets=result.candidate_targets,
+        )
 
-        if len(parts) == 2 and first_part in self.import_map:
-            imported_root = self.import_map[first_part]
-            resolved = target.replace(first_part, imported_root, 1)
-            kind = "exact" if resolved in self.callable_inventory else "normalized"
-            return TargetResolution(
-                original_target=target,
-                resolved_target=resolved,
-                resolution_kind=kind,
-                resolution_basis="import_map",
-                candidate_targets=[],
-            )
-
-        if first_part in param_types:
-            param_type = param_types[first_part]
-
-            if "::" in param_type:
-                container, inner_type = param_type.split("::", 1)
-                method_name = parts[-1]
-
-                if is_builtin_container_method(container, method_name):
-                    resolved_container = self.import_map.get(container, container)
-                    resolved = target.replace(first_part, resolved_container, 1)
-                    return TargetResolution(
-                        original_target=target,
-                        resolved_target=resolved,
-                        resolution_kind="normalized",
-                        resolution_basis="container_method",
-                        candidate_targets=[],
-                    )
-
-                param_type = inner_type
-
-            param_type = re.sub(r"\s*\|\s*None", "", param_type).strip()
-            param_type = re.sub(r"None\s*\|\s*", "", param_type).strip()
-
-            optional_match = re.match(r"^Optional\[(.+)]$", param_type)
-            if optional_match:
-                param_type = optional_match.group(1).strip()
-
-            type_match = re.match(r"^type\[(.+)]$", param_type)
-            if type_match:
-                param_type = type_match.group(1).strip()
-
-            base_type = param_type.split("[", 1)[0].strip()
-            method_name = parts[-1]
-
-            if base_type == "Any":
-                return unresolved("param_type_any")
-
-            if base_type in self.import_map:
-                fqn_type = self.import_map[base_type]
-                resolved = f"{fqn_type}.{method_name}"
-                kind = "exact" if resolved in self.callable_inventory else "contract"
-                return TargetResolution(
-                    original_target=target,
-                    resolved_target=resolved,
-                    resolution_kind=kind,
-                    resolution_basis="param_type_import",
-                    candidate_targets=[],
-                )
-
-            matches = [fqn for fqn in self.callable_inventory if fqn.endswith(f".{base_type}")]
-            if len(matches) == 1:
-                resolved = f"{matches[0]}.{method_name}"
-                kind = "exact" if resolved in self.callable_inventory else "contract"
-                return TargetResolution(
-                    original_target=target,
-                    resolved_target=resolved,
-                    resolution_kind=kind,
-                    resolution_basis="param_type_project",
-                    candidate_targets=[],
-                )
-
-            if len(matches) > 1:
-                candidates = [f"{match}.{method_name}" for match in matches]
-                return TargetResolution(
-                    original_target=target,
-                    resolved_target=target,
-                    resolution_kind="ambiguous",
-                    resolution_basis="param_type_project_multi",
-                    candidate_targets=candidates,
-                )
-
-            resolved = f"{base_type}.{method_name}"
-            return TargetResolution(
-                original_target=target,
-                resolved_target=resolved,
-                resolution_kind="contract",
-                resolution_basis="param_type_fallback",
-                candidate_targets=[],
-            )
-
-        if "." not in target:
-            local_candidate = f"{self.unit_fqn}.{target}"
-            if local_candidate in self.callable_inventory:
-                return TargetResolution(
-                    original_target=target,
-                    resolved_target=local_candidate,
-                    resolution_kind="exact",
-                    resolution_basis="same_unit_local",
-                    candidate_targets=[],
-                )
-            return unresolved()
-
-        local_root_candidate = f"{self.unit_fqn}.{first_part}"
-        if local_root_candidate in self.callable_inventory:
-            resolved = target.replace(first_part, local_root_candidate, 1)
-            kind = "exact" if resolved in self.callable_inventory else "normalized"
-            return TargetResolution(
-                original_target=target,
-                resolved_target=resolved,
-                resolution_kind=kind,
-                resolution_basis="same_unit_root",
-                candidate_targets=[],
-            )
-
-        return unresolved()
-
-    def _resolve_target(self, target: str, param_types: dict[str, str]) -> tuple[str, str]:
-        resolution = self._resolve_target_details(target, param_types)
-        return resolution.resolved_target, resolution.resolution_basis or ""
-
-    def _is_external_call(self, target: str) -> bool:
-        if target == "super":
-            return False
-        if target.startswith("self.") or target.startswith("cls.") or target.startswith("object."):
-            return False
-        base_name = target.split(".")[-1].split("(")[0]
-        if base_name in PYTHON_BUILTINS or base_name in BUILTIN_METHODS:
-            return False
-        first_part = target.split(".")[0]
-        if first_part.split("[")[0].split("(")[0] in self.local_symbols:
-            return False
-        return True
+    def _resolve_target(
+            self,
+            target: str,
+            param_types: dict[str, str],
+            callable_fqn: str | None = None,
+    ) -> tuple[str, str]:
+        resolution = self._resolve_target_details(
+            target,
+            param_types,
+            callable_fqn=callable_fqn,
+        )
+        return resolution.resolved_target, resolution.resolved_receiver_type or ""
 
     @staticmethod
     def _get_call_target(call_node: ast.Call) -> str | None:
@@ -1229,6 +1152,11 @@ def process_unit(
     import_map, _ = build_import_map(tree, project_symbol_fqns)
     local_symbols = build_local_symbols(tree)
     local_return_types = build_local_return_type_map(tree)
+    field_types_by_class = build_field_types_by_class(
+        class_nodes=locator.class_nodes,
+        import_map=import_map,
+        local_return_types=local_return_types,
+    )
     analyzer = AstAnalyzer(
         source_lines=source_lines,
         unit_id=unit.unit_id,
@@ -1238,6 +1166,7 @@ def process_unit(
         import_map=import_map,
         local_symbols=local_symbols,
         local_return_types=local_return_types,
+        field_types_by_class=field_types_by_class,
     )
 
     entries_by_id: dict[str, dict[str, Any]] = {}
@@ -1272,11 +1201,27 @@ def process_unit(
 
         branches = [Branch.from_dict(item) for item in branches_payload]
         known_types = payload.pop("_known_types", {}) or {}
+
+        if entry.kind in CLASS_ENTRY_KINDS:
+            node = locator.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+        elif entry.kind == "module_assignment":
+            node = locator.assignment_nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+        else:
+            node = locator.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+
+        analyzer.current_callable_fqn = entry.fully_qualified_name
+
+        if node is None:
+            local_types = {}
+        else:
+            local_types = analyzer._build_local_type_map(node)
+        merged_known_types = {**known_types, **local_types}
+
         ainfo["integration_candidates"] = analyzer.find_integration_candidates(
             branches=branches,
             callable_id=payload["id"],
             callable_fqn=entry.fully_qualified_name,
-            known_types=known_types,
+            known_types=merged_known_types,
         )
 
     roots = attach_children(entries_by_id, unit.entries)
