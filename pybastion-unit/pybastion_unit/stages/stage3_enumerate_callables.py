@@ -36,7 +36,7 @@ from pybastion_common.smt_path_checker import filter_feasible_paths
 from pybastion_unit.helpers.chain_resolution import (
     build_field_types_by_class,
     ResolutionContext,
-    resolve_target_chain, extract_element_type
+    resolve_target_chain,
 )
 from pybastion_unit.helpers.decorator_processing import (
     extract_callable_decorators,
@@ -44,9 +44,6 @@ from pybastion_unit.helpers.decorator_processing import (
     validate_feature_co_occurrences,
 )
 from pybastion_unit.helpers.integration_analysis import build_integration_entries
-from pybastion_unit.shared.knowledge_base import (
-    GENERIC_CONTAINER_TYPES,
-)
 
 ENUM_BASES: set[str] = {"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"}
 CALLABLE_ENTRY_KINDS: set[str] = {
@@ -208,14 +205,14 @@ def build_local_symbols(tree: ast.Module) -> set[str]:
     return local_symbols
 
 
-def build_local_return_type_map(tree: ast.Module) -> dict[str, str]:
-    local_return_types: dict[str, str] = {}
+def build_local_return_type_map(tree: ast.Module) -> dict[str, TypeRef]:
+    local_return_types: dict[str, TypeRef] = {}
 
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns is not None:
             type_ref = TypeRef.from_annotation_ast(node.returns)
             if type_ref is not None:
-                local_return_types[node.name] = type_ref.to_resolver_string()
+                local_return_types[node.name] = type_ref
 
     return local_return_types
 
@@ -428,8 +425,8 @@ class AstAnalyzer:
             project_fqns: set[str],
             import_map: dict[str, str],
             local_symbols: set[str],
-            local_return_types: dict[str, str],
-            field_types_by_class: dict[str, dict[str, str]],
+            local_return_types: dict[str, TypeRef],
+            field_types_by_class: dict[str, dict[str, TypeRef]],
     ):
         self.source_lines = source_lines
         self.unit_id = unit_id
@@ -441,42 +438,27 @@ class AstAnalyzer:
         self.local_return_types = local_return_types
         self.field_types_by_class = field_types_by_class
 
-    def _normalize_type_name(self, type_name: str) -> str:
-        type_name = re.sub(r"\s*\|\s*None", "", type_name).strip()
-        type_name = re.sub(r"None\s*\|\s*", "", type_name).strip()
+    def _normalize_type_name(self, type_name: str | TypeRef) -> str:
+        if isinstance(type_name, TypeRef):
+            return type_name.name
+        return TypeRef.from_annotation_string(type_name).name
 
-        optional_match = re.match(r"^Optional\[(.+)]$", type_name)
-        if optional_match:
-            type_name = optional_match.group(1).strip()
+    def _resolve_attribute_owner_type(self, owner_type: str | TypeRef, attr_name: str) -> str:
+        normalized_owner = self._normalize_type_name(owner_type)
 
-        type_match = re.match(r"^type\[(.+)]$", type_name)
-        if type_match:
-            type_name = type_match.group(1).strip()
-
-        if "::" in type_name:
-            container, inner = type_name.split("::", 1)
-            if container in GENERIC_CONTAINER_TYPES:
-                return container
-            return inner
-
-        return type_name.split("[", 1)[0].strip()
-
-    def _resolve_attribute_owner_type(self, owner_type: str, attr_name: str) -> str:
-        owner_type = self._normalize_type_name(owner_type)
-
-        if owner_type in self.import_map:
-            owner_type = self.import_map[owner_type]
+        if normalized_owner in self.import_map:
+            normalized_owner = self.import_map[normalized_owner]
 
         candidate_fqns = []
-        if owner_type in self.callable_inventory:
-            candidate_fqns.append(owner_type)
+        if normalized_owner in self.callable_inventory:
+            candidate_fqns.append(normalized_owner)
         else:
             for fqn in self.callable_inventory:
-                if fqn.endswith(f".{owner_type}"):
+                if fqn.endswith(f".{normalized_owner}"):
                     candidate_fqns.append(fqn)
 
-        if owner_type:
-            return owner_type
+        if normalized_owner:
+            return normalized_owner
 
         return ""
 
@@ -594,13 +576,16 @@ class AstAnalyzer:
         payload["_known_types"] = local_types
         return payload
 
-    def _build_local_type_map(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str]:
-        local_types: dict[str, str] = {}
-        owner_class_fqn = self._owner_class_fqn_for_callable(self.current_callable_fqn) if hasattr(self,
-                                                                                                   "current_callable_fqn") else None
+    def _build_local_type_map(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, TypeRef]:
+        local_types: dict[str, TypeRef] = {}
+        owner_class_fqn = (
+            self._owner_class_fqn_for_callable(self.current_callable_fqn)
+            if hasattr(self, "current_callable_fqn")
+            else None
+        )
         owner_fields = self.field_types_by_class.get(owner_class_fqn or "", {})
 
-        def infer_expr_type(expr: ast.AST) -> str | None:
+        def infer_expr_type(expr: ast.AST) -> TypeRef | None:
             if isinstance(expr, ast.Name):
                 return local_types.get(expr.id)
 
@@ -621,45 +606,15 @@ class AstAnalyzer:
 
         for stmt in ast.walk(node):
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
-                annotation = stmt.annotation
-
-                if isinstance(annotation, ast.Subscript):
-                    base = ast.unparse(annotation.value).strip()
-
-                    if base in GENERIC_CONTAINER_TYPES:
-                        if base == "Optional":
-                            inner_ref = self._extract_type_ref(annotation.slice)
-                            if inner_ref:
-                                local_types[stmt.target.id] = inner_ref.name
-                        elif base == "type":
-                            inner_ref = self._extract_type_ref(annotation.slice)
-                            if inner_ref:
-                                local_types[stmt.target.id] = f"type::{inner_ref.name}"
-                        else:
-                            inner_ref = self._extract_type_ref(annotation.slice)
-                            if inner_ref:
-                                local_types[stmt.target.id] = f"{base}::{inner_ref.name}"
-                    else:
-                        local_types[stmt.target.id] = base
-                    continue
-
-                if isinstance(annotation, ast.BinOp) and isinstance(annotation.op, ast.BitOr):
-                    left = ast.unparse(annotation.left).strip()
-                    right = ast.unparse(annotation.right).strip()
-                    local_types[stmt.target.id] = left if right == "None" else right if left == "None" else left
-                    continue
-
-                type_ref = self._extract_type_ref(annotation)
+                type_ref = TypeRef.from_annotation_ast(stmt.annotation)
                 if type_ref is not None:
-                    local_types[stmt.target.id] = type_ref.name
+                    local_types[stmt.target.id] = type_ref
                 continue
 
             if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
                 target_name = stmt.targets[0].id
-                value = stmt.value
-
-                inferred = infer_expr_type(value)
-                if inferred:
+                inferred = infer_expr_type(stmt.value)
+                if inferred is not None:
                     local_types[target_name] = inferred
                     continue
 
@@ -667,10 +622,8 @@ class AstAnalyzer:
                 loop_var = stmt.target.id
                 iter_type = infer_expr_type(stmt.iter)
 
-                if iter_type:
-                    element_type = extract_element_type(iter_type)
-                    if element_type:
-                        local_types[loop_var] = element_type
+                if iter_type is not None and iter_type.args:
+                    local_types[loop_var] = iter_type.args[0]
 
         return local_types
 
@@ -732,12 +685,12 @@ class AstAnalyzer:
                 params[start_idx + i].default = ast.unparse(default)
         return params
 
-    def _build_param_type_map(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str]:
-        type_map: dict[str, str] = {}
+    def _build_param_type_map(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, TypeRef]:
+        type_map: dict[str, TypeRef] = {}
         for arg in node.args.args + node.args.kwonlyargs:
             type_ref = TypeRef.from_annotation_ast(arg.annotation)
             if type_ref is not None:
-                type_map[arg.arg] = type_ref.to_resolver_string()
+                type_map[arg.arg] = type_ref
         return type_map
 
     def _extract_type_ref(self, annotation: ast.expr | None) -> TypeRef | None:
@@ -749,7 +702,7 @@ class AstAnalyzer:
             branches: list[Branch],
             callable_id: str,
             callable_fqn: str,
-            known_types: dict[str, str],
+            known_types: dict[str, TypeRef],
     ) -> list[dict[str, Any]]:
         integrations = build_integration_entries(
             branches=branches,
@@ -801,7 +754,7 @@ class AstAnalyzer:
     def _resolve_target_details(
             self,
             target: str,
-            param_types: dict[str, str],
+            param_types: dict[str, TypeRef],
             callable_fqn: str | None = None,
     ) -> TargetResolution:
         owner_class_fqn = None
@@ -832,7 +785,7 @@ class AstAnalyzer:
     def _resolve_target(
             self,
             target: str,
-            param_types: dict[str, str],
+            param_types: dict[str, TypeRef],
             callable_fqn: str | None = None,
     ) -> tuple[str, str]:
         resolution = self._resolve_target_details(
@@ -1072,8 +1025,7 @@ def annotate_method_overrides(
 # ============================================================================
 
 
-def attach_children(entries_by_id: dict[str, dict[str, Any]], unit_entries: list[UnitIndexEntry]) -> list[
-    dict[str, Any]]:
+def attach_children(entries_by_id: dict[str, dict[str, Any]], unit_entries: list[UnitIndexEntry]) -> list[dict[str, Any]]:
     roots: list[dict[str, Any]] = []
     for entry in sorted(unit_entries, key=lambda item: item.ordinal_within_parent):
         payload = entries_by_id[entry.id]
@@ -1200,7 +1152,7 @@ def process_unit(
             continue
 
         branches = [Branch.from_dict(item) for item in branches_payload]
-        known_types = payload.pop("_known_types", {}) or {}
+        known_types: dict[str, TypeRef] = payload.pop("_known_types", {}) or {}
 
         if entry.kind in CLASS_ENTRY_KINDS:
             node = locator.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
@@ -1212,10 +1164,10 @@ def process_unit(
         analyzer.current_callable_fqn = entry.fully_qualified_name
 
         if node is None:
-            local_types = {}
+            local_types: dict[str, TypeRef] = {}
         else:
             local_types = analyzer._build_local_type_map(node)
-        merged_known_types = {**known_types, **local_types}
+        merged_known_types: dict[str, TypeRef] = {**known_types, **local_types}
 
         ainfo["integration_candidates"] = analyzer.find_integration_candidates(
             branches=branches,
@@ -1223,6 +1175,9 @@ def process_unit(
             callable_fqn=entry.fully_qualified_name,
             known_types=merged_known_types,
         )
+
+    for payload in entries_by_id.values():
+        payload.pop("_known_types", None)
 
     roots = attach_children(entries_by_id, unit.entries)
     annotate_entry_fqns(roots, unit.fully_qualified_name)

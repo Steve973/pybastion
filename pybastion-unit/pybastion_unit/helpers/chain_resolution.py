@@ -33,12 +33,17 @@ from __future__ import annotations
 import argparse
 import ast
 import json
-import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+from pybastion_common.models import TypeRef
+from pybastion_unit.helpers.debug_tracing import (
+    debug_print_resolution_state,
+    debug_should_trace_target,
+)
 
 GENERIC_CONTAINER_TYPES: set[str] = {
     "list",
@@ -92,9 +97,9 @@ class CallableForensics:
     callable_fqn: str
     callable_name: str
     owner_class_fqn: str | None
-    param_types: dict[str, str]
-    local_types: dict[str, str]
-    known_types: dict[str, str]
+    param_types: dict[str, TypeRef]
+    local_types: dict[str, TypeRef]
+    known_types: dict[str, TypeRef]
 
 
 @dataclass(frozen=True)
@@ -103,8 +108,8 @@ class ModuleForensics:
     unit_fqn: str
     import_map: dict[str, str]
     callable_inventory: dict[str, str]
-    local_return_types: dict[str, str]
-    field_types_by_class: dict[str, dict[str, str]]
+    local_return_types: dict[str, TypeRef]
+    field_types_by_class: dict[str, dict[str, TypeRef]]
     callable_forensics: dict[str, CallableForensics]
 
 
@@ -113,11 +118,11 @@ class ResolutionContext:
     unit_fqn: str
     import_map: dict[str, str]
     callable_inventory: dict[str, str]
-    local_return_types: dict[str, str]
-    field_types_by_class: dict[str, dict[str, str]]
+    local_return_types: dict[str, TypeRef]
+    field_types_by_class: dict[str, dict[str, TypeRef]]
     callable_fqn: str
     owner_class_fqn: str | None
-    known_types: dict[str, str]
+    known_types: dict[str, TypeRef]
 
 
 # ============================================================================
@@ -138,41 +143,29 @@ def annotation_to_string(node: ast.expr | None) -> str | None:
         return None
 
 
-def normalize_type_name(type_name: str) -> str:
-    type_name = re.sub(r"\s*\|\s*None", "", type_name).strip()
-    type_name = re.sub(r"None\s*\|\s*", "", type_name).strip()
-
-    optional_match = re.match(r"^Optional\[(.+)]$", type_name)
-    if optional_match:
-        type_name = optional_match.group(1).strip()
-
-    type_match = re.match(r"^type\[(.+)]$", type_name)
-    if type_match:
-        type_name = type_match.group(1).strip()
-
-    if "::" in type_name:
-        _, inner = type_name.split("::", 1)
-        return inner.strip()
-
-    return type_name.split("[", 1)[0].strip()
+def normalize_type_name(type_name: str | TypeRef) -> str:
+    if isinstance(type_name, TypeRef):
+        return type_name.name
+    return TypeRef.from_annotation_string(type_name).name
 
 
-def annotation_to_resolver_string(node: ast.expr | None) -> str | None:
-    raw = annotation_to_string(node)
-    if raw is None:
+def type_ref_to_serializable(type_ref: TypeRef | None) -> Any:
+    if type_ref is None:
         return None
+    return type_ref.to_dict()
 
-    if isinstance(node, ast.Subscript):
-        base = annotation_to_string(node.value) or ""
-        inner = annotation_to_string(node.slice) or ""
-        if base in GENERIC_CONTAINER_TYPES:
-            if base == "Optional":
-                return inner
-            if base == "type":
-                return f"type::{inner}"
-            return f"{base}::{inner}"
 
-    return raw
+def type_ref_map_to_serializable(type_map: dict[str, TypeRef]) -> dict[str, Any]:
+    return {key: value.to_dict() for key, value in type_map.items()}
+
+
+def nested_type_ref_map_to_serializable(
+    type_map: dict[str, dict[str, TypeRef]],
+) -> dict[str, dict[str, Any]]:
+    return {
+        owner: {field_name: field_type.to_dict() for field_name, field_type in fields.items()}
+        for owner, fields in type_map.items()
+    }
 
 
 def assignment_target_name(node: ast.Assign | ast.AnnAssign | ast.AugAssign) -> str | None:
@@ -208,14 +201,14 @@ def build_import_map(tree: ast.Module) -> dict[str, str]:
     return import_map
 
 
-def build_local_return_type_map(tree: ast.Module) -> dict[str, str]:
-    local_return_types: dict[str, str] = {}
+def build_local_return_type_map(tree: ast.Module) -> dict[str, TypeRef]:
+    local_return_types: dict[str, TypeRef] = {}
 
     for node in ast.walk(tree):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            rtype = annotation_to_resolver_string(node.returns)
-            if rtype:
-                local_return_types[node.name] = rtype
+            type_ref = TypeRef.from_annotation_ast(node.returns)
+            if type_ref is not None:
+                local_return_types[node.name] = type_ref
 
     return local_return_types
 
@@ -316,27 +309,23 @@ class ModuleIndex(ast.NodeVisitor):
 def build_field_types_by_class(
         class_nodes: dict[str, ast.ClassDef],
         import_map: dict[str, str],
-        local_return_types: dict[str, str],
-) -> dict[str, dict[str, str]]:
-    field_types_by_class: dict[str, dict[str, str]] = {}
+        local_return_types: dict[str, TypeRef],
+) -> dict[str, dict[str, TypeRef]]:
+    field_types_by_class: dict[str, dict[str, TypeRef]] = {}
 
     for class_fqn, class_node in class_nodes.items():
-        field_map: dict[str, str] = {}
+        field_map: dict[str, TypeRef] = {}
 
-        # Class-level annotated fields
         for stmt in class_node.body:
             if isinstance(stmt, ast.AnnAssign):
                 attr_name = self_attribute_name(stmt.target)
-                if attr_name:
-                    rtype = annotation_to_resolver_string(stmt.annotation)
-                    if rtype:
-                        field_map[attr_name] = rtype
-                elif isinstance(stmt.target, ast.Name):
-                    rtype = annotation_to_resolver_string(stmt.annotation)
-                    if rtype:
-                        field_map[stmt.target.id] = rtype
+                type_ref = TypeRef.from_annotation_ast(stmt.annotation)
 
-        # __init__ propagation: self.x = param / self.x = call()
+                if attr_name and type_ref is not None:
+                    field_map[attr_name] = type_ref
+                elif isinstance(stmt.target, ast.Name) and type_ref is not None:
+                    field_map[stmt.target.id] = type_ref
+
         init_node = None
         for stmt in class_node.body:
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == "__init__":
@@ -344,19 +333,18 @@ def build_field_types_by_class(
                 break
 
         if init_node is not None:
-            param_types: dict[str, str] = {}
+            param_types: dict[str, TypeRef] = {}
             for arg in init_node.args.args + init_node.args.kwonlyargs:
-                rtype = annotation_to_resolver_string(arg.annotation)
-                if rtype:
-                    param_types[arg.arg] = rtype
+                type_ref = TypeRef.from_annotation_ast(arg.annotation)
+                if type_ref is not None:
+                    param_types[arg.arg] = type_ref
 
             for stmt in ast.walk(init_node):
                 if isinstance(stmt, ast.AnnAssign):
                     attr_name = self_attribute_name(stmt.target)
-                    if attr_name:
-                        rtype = annotation_to_resolver_string(stmt.annotation)
-                        if rtype:
-                            field_map[attr_name] = rtype
+                    type_ref = TypeRef.from_annotation_ast(stmt.annotation)
+                    if attr_name and type_ref is not None:
+                        field_map[attr_name] = type_ref
 
                 if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
                     attr_name = self_attribute_name(stmt.targets[0])
@@ -378,12 +366,13 @@ def build_field_types_by_class(
                             field_map[attr_name] = local_return_types[func.attr]
                             continue
 
-        # Normalize obvious import aliases
-        normalized: dict[str, str] = {}
+        normalized: dict[str, TypeRef] = {}
         for key, value in field_map.items():
-            norm = normalize_type_name(value)
-            if norm in import_map:
-                normalized[key] = import_map[norm]
+            if value.name in import_map:
+                normalized[key] = TypeRef(
+                    name=import_map[value.name],
+                    args=value.args,
+                )
             else:
                 normalized[key] = value
 
@@ -404,25 +393,25 @@ def owner_class_fqn_for_callable(callable_fqn: str) -> str | None:
     return ".".join(parts[:-1]) if parts[-2][:1].isupper() else None
 
 
-def build_param_type_map(node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, str]:
-    type_map: dict[str, str] = {}
+def build_param_type_map(node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, TypeRef]:
+    type_map: dict[str, TypeRef] = {}
     for arg in node.args.args + node.args.kwonlyargs:
-        rtype = annotation_to_resolver_string(arg.annotation)
-        if rtype:
-            type_map[arg.arg] = rtype
+        type_ref = TypeRef.from_annotation_ast(arg.annotation)
+        if type_ref is not None:
+            type_map[arg.arg] = type_ref
     return type_map
 
 
 def build_local_type_map(
     node: ast.FunctionDef | ast.AsyncFunctionDef,
-    local_return_types: dict[str, str],
-    field_types_by_class: dict[str, dict[str, str]],
+    local_return_types: dict[str, TypeRef],
+    field_types_by_class: dict[str, dict[str, TypeRef]],
     owner_class_fqn: str | None,
-) -> dict[str, str]:
-    local_types: dict[str, str] = {}
+) -> dict[str, TypeRef]:
+    local_types: dict[str, TypeRef] = {}
     owner_fields = field_types_by_class.get(owner_class_fqn or "", {})
 
-    def infer_expr_type(expr: ast.AST) -> str | None:
+    def infer_expr_type(expr: ast.AST) -> TypeRef | None:
         if isinstance(expr, ast.Name):
             return local_types.get(expr.id)
 
@@ -442,9 +431,9 @@ def build_local_type_map(
 
     for stmt in ast.walk(node):
         if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
-            rtype = annotation_to_resolver_string(stmt.annotation)
-            if rtype:
-                local_types[stmt.target.id] = rtype
+            type_ref = TypeRef.from_annotation_ast(stmt.annotation)
+            if type_ref is not None:
+                local_types[stmt.target.id] = type_ref
             continue
 
         if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
@@ -453,11 +442,11 @@ def build_local_type_map(
 
             if isinstance(value, ast.Name) and value.id == "self":
                 if owner_class_fqn:
-                    local_types[target_name] = owner_class_fqn
+                    local_types[target_name] = TypeRef(name=owner_class_fqn)
                 continue
 
             inferred = infer_expr_type(value)
-            if inferred:
+            if inferred is not None:
                 local_types[target_name] = inferred
                 continue
 
@@ -465,9 +454,9 @@ def build_local_type_map(
             loop_var = stmt.target.id
             iter_type = infer_expr_type(stmt.iter)
 
-            if iter_type:
+            if iter_type is not None:
                 element_type = extract_element_type(iter_type)
-                if element_type:
+                if element_type is not None:
                     local_types[loop_var] = element_type
 
     return local_types
@@ -475,8 +464,8 @@ def build_local_type_map(
 
 def build_callable_forensics(
         callable_nodes: dict[str, ast.FunctionDef | ast.AsyncFunctionDef],
-        field_types_by_class: dict[str, dict[str, str]],
-        local_return_types: dict[str, str],
+        field_types_by_class: dict[str, dict[str, TypeRef]],
+        local_return_types: dict[str, TypeRef],
 ) -> dict[str, CallableForensics]:
     result: dict[str, CallableForensics] = {}
 
@@ -508,23 +497,9 @@ def build_callable_forensics(
 # ============================================================================
 
 
-def _strip_generic_args(type_name: str) -> str:
-    if "[" in type_name:
-        return type_name.split("[", 1)[0].strip()
-    return type_name.strip()
-
-
-def extract_element_type(type_name: str) -> str | None:
-    if "::" not in type_name:
-        return None
-
-    container, inner = type_name.split("::", 1)
-    container = container.strip()
-    inner = inner.strip()
-
-    if container in {"list", "set", "tuple", "frozenset", "Sequence"}:
-        return inner
-
+def extract_element_type(type_ref: TypeRef) -> TypeRef | None:
+    if type_ref.name in {"list", "set", "tuple", "frozenset", "Sequence"} and type_ref.args:
+        return type_ref.args[0]
     return None
 
 
@@ -533,7 +508,7 @@ def extract_element_type(type_name: str) -> str | None:
 # ============================================================================
 
 
-def candidate_type_fqns(type_name: str, ctx: ResolutionContext) -> list[str]:
+def candidate_type_fqns(type_name: str | TypeRef, ctx: ResolutionContext) -> list[str]:
     normalized = normalize_type_name(type_name)
     if not normalized or normalized == "Any":
         return []
@@ -564,15 +539,23 @@ def resolve_root_symbol(
         return None, None, None, [], "owner_class_unknown"
 
     if root in ctx.known_types:
-        matches = candidate_type_fqns(ctx.known_types[root], ctx)
+        type_ref = ctx.known_types[root]
+        receiver_type = type_ref.name
+
+        if receiver_type in ctx.import_map:
+            receiver_type = ctx.import_map[receiver_type]
+
+        if receiver_type in GENERIC_CONTAINER_TYPES:
+            return None, receiver_type, "known_type_fallback", [], None
+
+        matches = candidate_type_fqns(receiver_type, ctx)
         if len(matches) == 1:
             return None, matches[0], "known_type", [], None
         if len(matches) > 1:
             return None, None, None, matches, "ambiguous_known_type"
 
-        fallback = normalize_type_name(ctx.known_types[root])
-        if fallback and fallback != "Any":
-            return None, fallback, "known_type_fallback", [], None
+        if receiver_type and receiver_type != "Any":
+            return None, receiver_type, "known_type_fallback", [], None
         return None, None, None, [], "known_type_unknown"
 
     if root in ctx.import_map:
@@ -586,7 +569,7 @@ def resolve_root_symbol(
     return None, None, None, [], "root_unresolved"
 
 
-def field_type_for_owner(owner_fqn: str | None, field_name: str, ctx: ResolutionContext) -> str | None:
+def field_type_for_owner(owner_fqn: str | None, field_name: str, ctx: ResolutionContext) -> TypeRef | None:
     if owner_fqn is None:
         return None
     return ctx.field_types_by_class.get(owner_fqn, {}).get(field_name)
@@ -602,21 +585,35 @@ def resolve_attribute_hop(
 
     field_type = field_type_for_owner(receiver_type, attr_name, ctx)
     if field_type:
-        matches = candidate_type_fqns(field_type, ctx)
+        receiver_name = field_type.name
+
+        if receiver_name in ctx.import_map:
+            receiver_name = ctx.import_map[receiver_name]
+
+        matches = candidate_type_fqns(receiver_name, ctx)
         if len(matches) == 1:
             return None, matches[0], "field_type", [], None
         if len(matches) > 1:
             return None, None, None, matches, "ambiguous_field_type"
 
-        fallback = normalize_type_name(field_type)
-        if fallback and fallback != "Any":
-            return None, fallback, "field_type_fallback", [], None
+        if receiver_name and receiver_name != "Any":
+            return None, receiver_name, "field_type_fallback", [], None
 
     return None, None, None, [], "attribute_type_unknown"
 
 
 def resolve_target_chain(ctx: ResolutionContext, target: str) -> ChainResolutionResult:
+    debug = debug_should_trace_target(target)
+
     parts = split_target_parts(target)
+    if debug:
+        debug_print_resolution_state(
+            "begin",
+            target=target,
+            parts=parts,
+            known_types={k: v.to_dict() for k, v in ctx.known_types.items()},
+        )
+
     if not parts:
         return ChainResolutionResult(
             original_target=target,
@@ -632,6 +629,18 @@ def resolve_target_chain(ctx: ResolutionContext, target: str) -> ChainResolution
 
     root = parts[0]
     resolved_symbol_fqn, receiver_type, basis, candidates, stop_reason = resolve_root_symbol(root, ctx)
+
+    if debug:
+        debug_print_resolution_state(
+            "after_root",
+            root=root,
+            resolved_symbol_fqn=resolved_symbol_fqn,
+            receiver_type=receiver_type,
+            basis=basis,
+            candidates=candidates,
+            stop_reason=stop_reason,
+        )
+
     steps.append(
         ChainStep(
             index=0,
@@ -645,6 +654,16 @@ def resolve_target_chain(ctx: ResolutionContext, target: str) -> ChainResolution
     if len(parts) == 1:
         if resolved_symbol_fqn:
             kind = "exact" if resolved_symbol_fqn in ctx.callable_inventory else "normalized"
+
+            if debug:
+                debug_print_resolution_state(
+                    "return_single_resolved_symbol",
+                    resolved_target=resolved_symbol_fqn,
+                    resolved_receiver_type=receiver_type,
+                    resolution_kind=kind,
+                    resolution_basis=basis,
+                )
+
             return ChainResolutionResult(
                 original_target=target,
                 parts=parts,
@@ -653,6 +672,17 @@ def resolve_target_chain(ctx: ResolutionContext, target: str) -> ChainResolution
                 resolution_kind=kind,
                 resolution_basis=basis,
                 chain_steps=steps,
+            )
+
+        if debug:
+            debug_print_resolution_state(
+                "return_single_unresolved",
+                resolved_target=target,
+                resolved_receiver_type=receiver_type,
+                resolution_kind="ambiguous" if candidates else "unresolved",
+                resolution_basis=basis,
+                candidates=candidates,
+                stop_reason=stop_reason,
             )
 
         return ChainResolutionResult(
@@ -671,6 +701,16 @@ def resolve_target_chain(ctx: ResolutionContext, target: str) -> ChainResolution
     if resolved_symbol_fqn and len(parts) == 2:
         candidate = f"{resolved_symbol_fqn}.{parts[1]}"
         kind = "exact" if candidate in ctx.callable_inventory else "normalized"
+
+        if debug:
+            debug_print_resolution_state(
+                "resolved_symbol_short_circuit",
+                candidate=candidate,
+                resolved_receiver_type=resolved_symbol_fqn,
+                resolution_kind=kind,
+                resolution_basis=basis,
+            )
+
         steps.append(
             ChainStep(
                 index=1,
@@ -691,6 +731,16 @@ def resolve_target_chain(ctx: ResolutionContext, target: str) -> ChainResolution
         )
 
     if receiver_type is None:
+        if debug:
+            debug_print_resolution_state(
+                "return_no_receiver_type",
+                resolved_target=target,
+                resolution_kind="ambiguous" if candidates else "unresolved",
+                resolution_basis=basis,
+                candidates=candidates,
+                stop_reason=stop_reason,
+            )
+
         return ChainResolutionResult(
             original_target=target,
             parts=parts,
@@ -705,11 +755,31 @@ def resolve_target_chain(ctx: ResolutionContext, target: str) -> ChainResolution
         )
 
     for index, part in enumerate(parts[1:-1], start=1):
+        if debug:
+            debug_print_resolution_state(
+                "before_attribute_hop",
+                index=index,
+                part=part,
+                incoming_receiver_type=receiver_type,
+            )
+
         _, next_receiver_type, hop_basis, hop_candidates, hop_stop = resolve_attribute_hop(
             receiver_type,
             part,
             ctx,
         )
+
+        if debug:
+            debug_print_resolution_state(
+                "after_attribute_hop",
+                index=index,
+                part=part,
+                next_receiver_type=next_receiver_type,
+                hop_basis=hop_basis,
+                hop_candidates=hop_candidates,
+                hop_stop=hop_stop,
+            )
+
         steps.append(
             ChainStep(
                 index=index,
@@ -721,6 +791,18 @@ def resolve_target_chain(ctx: ResolutionContext, target: str) -> ChainResolution
         )
 
         if next_receiver_type is None:
+            if debug:
+                debug_print_resolution_state(
+                    "return_hop_failed",
+                    index=index,
+                    failed_part=part,
+                    last_receiver_type=receiver_type,
+                    resolution_kind="ambiguous" if hop_candidates else "unresolved",
+                    resolution_basis=hop_basis or basis,
+                    hop_candidates=hop_candidates,
+                    hop_stop=hop_stop,
+                )
+
             return ChainResolutionResult(
                 original_target=target,
                 parts=parts,
@@ -739,6 +821,16 @@ def resolve_target_chain(ctx: ResolutionContext, target: str) -> ChainResolution
     final_part = parts[-1]
     resolved_target = f"{receiver_type}.{final_part}"
     kind = "exact" if resolved_target in ctx.callable_inventory else "contract"
+
+    if debug:
+        debug_print_resolution_state(
+            "before_final_return",
+            final_receiver_type=receiver_type,
+            final_part=final_part,
+            resolved_target=resolved_target,
+            resolution_kind=kind,
+            resolution_basis=basis or "receiver_type",
+        )
 
     steps.append(
         ChainStep(
@@ -907,8 +999,8 @@ def main() -> int:
             "source_path": module.source_path,
             "unit_fqn": module.unit_fqn,
             "import_map": module.import_map,
-            "local_return_types": module.local_return_types,
-            "field_types_by_class": module.field_types_by_class,
+            "local_return_types": type_ref_map_to_serializable(module.local_return_types),
+            "field_types_by_class": nested_type_ref_map_to_serializable(module.field_types_by_class),
             "callable_forensics": {
                 fq: asdict(meta) for fq, meta in module.callable_forensics.items()
             },
@@ -950,8 +1042,10 @@ def main() -> int:
     payload = {
         "callable_fqn": args.callable_fqn,
         "owner_class_fqn": ctx.owner_class_fqn,
-        "known_types": ctx.known_types,
-        "field_types_for_owner": module.field_types_by_class.get(ctx.owner_class_fqn or "", {}),
+        "known_types": type_ref_map_to_serializable(ctx.known_types),
+        "field_types_for_owner": type_ref_map_to_serializable(
+            module.field_types_by_class.get(ctx.owner_class_fqn or "", {})
+        ),
         "results": rendered,
     }
 
