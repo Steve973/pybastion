@@ -33,6 +33,7 @@ from pybastion_unit.helpers.constraint_metadata_helper import (
     populate_constraint_relationships,
 )
 from pybastion_unit.helpers.decorator_processing import extract_statement_decorators
+from pybastion_unit.helpers.type_indexing import build_module_index
 from pybastion_unit.semantic_decomposition import decompose_statement
 from pybastion_unit.semantic_decomposition.decomp_types import DecompositionContext, ControlOwner, OwnerKind, \
     DecomposerResult
@@ -593,63 +594,6 @@ def _assign_fallthrough_next_eis(branches: list[Branch], callable_id: str) -> No
 
 
 # ============================================================================
-# AST node locator
-# ============================================================================
-
-
-class IndexedNodeLocator(ast.NodeVisitor):
-    def __init__(self, module_fqn: str):
-        self.module_fqn = module_fqn
-        self.scope_stack: list[str] = [module_fqn] if module_fqn else []
-        self.nodes_by_fqn_and_line: dict[tuple[str, int], ast.AST] = {}
-        self.assignment_nodes_by_fqn_and_line: dict[tuple[str, int], ast.AST] = {}
-
-    def current_fqn_prefix(self) -> str:
-        return ".".join(self.scope_stack)
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        fqn = f"{self.current_fqn_prefix()}.{node.name}" if self.scope_stack else node.name
-        self.nodes_by_fqn_and_line[(fqn, node.lineno)] = node
-        self.scope_stack.append(node.name)
-        self.generic_visit(node)
-        self.scope_stack.pop()
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        fqn = f"{self.current_fqn_prefix()}.{node.name}" if self.scope_stack else node.name
-        self.nodes_by_fqn_and_line[(fqn, node.lineno)] = node
-        self.scope_stack.append(node.name)
-        self.generic_visit(node)
-        self.scope_stack.pop()
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        fqn = f"{self.current_fqn_prefix()}.{node.name}" if self.scope_stack else node.name
-        self.nodes_by_fqn_and_line[(fqn, node.lineno)] = node
-        self.scope_stack.append(node.name)
-        self.generic_visit(node)
-        self.scope_stack.pop()
-
-    def visit_Assign(self, node: ast.Assign) -> None:
-        for target in node.targets:
-            if isinstance(target, ast.Name):
-                fqn = f"{self.module_fqn}.{target.id}" if self.module_fqn else target.id
-                self.assignment_nodes_by_fqn_and_line[(fqn, node.lineno)] = node
-                break
-        self.generic_visit(node)
-
-    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        if isinstance(node.target, ast.Name):
-            fqn = f"{self.module_fqn}.{node.target.id}" if self.module_fqn else node.target.id
-            self.assignment_nodes_by_fqn_and_line[(fqn, node.lineno)] = node
-        self.generic_visit(node)
-
-    def visit_AugAssign(self, node: ast.AugAssign) -> None:
-        if isinstance(node.target, ast.Name):
-            fqn = f"{self.module_fqn}.{node.target.id}" if self.module_fqn else node.target.id
-            self.assignment_nodes_by_fqn_and_line[(fqn, node.lineno)] = node
-        self.generic_visit(node)
-
-
-# ============================================================================
 # Statement enumeration
 # ============================================================================
 
@@ -883,8 +827,7 @@ def enumerate_unit_from_index(
     source_lines = source.split("\n")
     tree = ast.parse(source)
 
-    locator = IndexedNodeLocator(unit_index.fully_qualified_name)
-    locator.visit(tree)
+    ast_index = build_module_index(tree, unit_index.fully_qualified_name)
 
     results: list[FunctionResult] = []
 
@@ -895,7 +838,7 @@ def enumerate_unit_from_index(
             continue
 
         if entry.kind == "module_assignment":
-            node: ast.Assign | ast.AnnAssign | ast.AugAssign | None = locator.assignment_nodes_by_fqn_and_line.get(
+            node: ast.Assign | ast.AnnAssign | ast.AugAssign | None = ast_index.assignment_nodes_by_fqn_and_line.get(
                 (entry.fully_qualified_name, entry.lineno)
             )
             if node is None:
@@ -905,7 +848,7 @@ def enumerate_unit_from_index(
                 results.append(assignment_result)
             continue
 
-        node = locator.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+        node = ast_index.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
         if node is None:
             continue
 

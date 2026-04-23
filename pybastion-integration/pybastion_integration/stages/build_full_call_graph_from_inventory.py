@@ -386,24 +386,21 @@ def resolve_project_callable_target(
     return None, None
 
 
-def resolve_contract_dispatch_target(
+def resolve_contract_dispatch_targets(
         target: str | None,
         inventory_index: InventoryIndex,
         contract_impl_index: dict[str, list[str]],
-) -> tuple[str | None, str | None]:
+) -> list[tuple[str, str]]:
     if not target:
-        return None, None
+        return []
 
-    candidate_ids = contract_impl_index.get(target, [])
-    if len(candidate_ids) != 1:
-        return None, None
-
-    resolved_callable_id = candidate_ids[0]
-    resolved_context = inventory_index.callable_contexts.get(resolved_callable_id)
-    if resolved_context is None:
-        return None, None
-
-    return resolved_callable_id, resolved_context.callable_fqn
+    resolved: list[tuple[str, str]] = []
+    for callable_id in contract_impl_index.get(target, []):
+        context = inventory_index.callable_contexts.get(callable_id)
+        if context is None:
+            continue
+        resolved.append((callable_id, context.callable_fqn))
+    return resolved
 
 
 def resolve_collapsible_decorated_target(
@@ -443,6 +440,59 @@ def resolve_collapsible_decorated_target(
     return candidate_id, candidate_fqn
 
 
+def add_call_to_callable_with_returns(
+        cfg: nx.DiGraph,
+        *,
+        call_site_ei: str,
+        return_targets: list[str],
+        target_callable_id: str,
+        target_context: CallableContext,
+        call_kind: str,
+        resolved_target_repr: str | None,
+        operation_target: str | None,
+        signature: str | None,
+        success_exit_cache: dict[str, list[str]],
+        exception_exit_cache: dict[str, list[str]],
+) -> None:
+    target_entry_ei = entry_ei_for_context(target_context)
+
+    cfg.add_edge(
+        call_site_ei,
+        target_entry_ei,
+        edge_type="call",
+        call_kind=call_kind,
+        target_callable_id=target_callable_id,
+        target_fqn=target_context.callable_fqn,
+        resolved_target=resolved_target_repr,
+        operation_target=operation_target,
+        signature=signature,
+    )
+
+    if target_callable_id not in success_exit_cache:
+        success_exit_cache[target_callable_id] = compute_success_exit_eis(target_context)
+        exception_exit_cache[target_callable_id] = compute_exception_exit_eis(target_context)
+
+    for return_target in return_targets:
+        for exit_ei in success_exit_cache[target_callable_id]:
+            cfg.add_edge(
+                exit_ei,
+                return_target,
+                edge_type="return",
+                return_kind="success",
+                original_call_site=call_site_ei,
+                returns_from=target_callable_id,
+            )
+        for exit_ei in exception_exit_cache[target_callable_id]:
+            cfg.add_edge(
+                exit_ei,
+                return_target,
+                edge_type="return",
+                return_kind="exception",
+                original_call_site=call_site_ei,
+                returns_from=target_callable_id,
+            )
+
+
 def add_call_and_return_edges(
         cfg: nx.DiGraph,
         context: CallableContext,
@@ -480,43 +530,19 @@ def add_call_and_return_edges(
 
             if resolved_callable_id is not None:
                 target_context = inventory_index.callable_contexts[resolved_callable_id]
-                target_entry_ei = entry_ei_for_context(target_context)
-
-                cfg.add_edge(
-                    ei_id,
-                    target_entry_ei,
-                    edge_type="call",
-                    call_kind="local",
+                add_call_to_callable_with_returns(
+                    cfg,
+                    call_site_ei=ei_id,
+                    return_targets=return_targets,
                     target_callable_id=resolved_callable_id,
-                    target_fqn=target_context.callable_fqn,
-                    resolved_target=resolved_target_repr,
+                    target_context=target_context,
+                    call_kind="local",
+                    resolved_target_repr=resolved_target_repr,
                     operation_target=operation_target,
                     signature=None,
+                    success_exit_cache=success_exit_cache,
+                    exception_exit_cache=exception_exit_cache,
                 )
-
-                if resolved_callable_id not in success_exit_cache:
-                    success_exit_cache[resolved_callable_id] = compute_success_exit_eis(target_context)
-                    exception_exit_cache[resolved_callable_id] = compute_exception_exit_eis(target_context)
-
-                for return_target in return_targets:
-                    for exit_ei in success_exit_cache[resolved_callable_id]:
-                        cfg.add_edge(
-                            exit_ei,
-                            return_target,
-                            edge_type="return",
-                            return_kind="success",
-                            original_call_site=ei_id,
-                            returns_from=resolved_callable_id,
-                        )
-                    for exit_ei in exception_exit_cache[resolved_callable_id]:
-                        cfg.add_edge(
-                            exit_ei,
-                            return_target,
-                            edge_type="return",
-                            return_kind="exception",
-                            original_call_site=ei_id,
-                            returns_from=resolved_callable_id,
-                        )
                 continue
 
             external_node_id = f"external::{ei_id}"
@@ -550,26 +576,51 @@ def add_call_and_return_edges(
             target = candidate.get("resolved_target") or candidate.get("target")
             signature = candidate.get("signature")
 
-            resolved_callable_id, resolved_target_repr = resolve_project_callable_target(
+            contract_targets = resolve_contract_dispatch_targets(
                 target=target,
-                operation_target=operation_target,
-                context=context,
-                fqn_to_callable_id=inventory_index.fqn_to_callable_id,
-                local_callables_by_unit=local_callables_by_unit,
+                inventory_index=inventory_index,
+                contract_impl_index=contract_impl_index,
             )
-            if resolved_callable_id is None:
-                resolved_callable_id, resolved_target_repr = resolve_contract_dispatch_target(
+
+            if contract_targets:
+                if len(contract_targets) == 1:
+                    resolved_callable_id, resolved_target_repr = contract_targets[0]
+                else:
+                    resolved_callable_id, resolved_target_repr = None, None
+            else:
+                resolved_callable_id, resolved_target_repr = resolve_project_callable_target(
                     target=target,
-                    inventory_index=inventory_index,
-                    contract_impl_index=contract_impl_index,
+                    operation_target=operation_target,
+                    context=context,
+                    fqn_to_callable_id=inventory_index.fqn_to_callable_id,
+                    local_callables_by_unit=local_callables_by_unit,
                 )
-            if resolved_callable_id is None:
+
+            if resolved_callable_id is None and not contract_targets:
                 resolved_callable_id, resolved_target_repr = resolve_collapsible_decorated_target(
                     operation_target=operation_target,
                     context=context,
                     callable_contexts=inventory_index.callable_contexts,
                     fqn_to_callable_id=inventory_index.fqn_to_callable_id,
                 )
+
+            if resolved_callable_id is None and contract_targets:
+                for contract_callable_id, contract_target_fqn in contract_targets:
+                    target_context = inventory_index.callable_contexts[contract_callable_id]
+                    add_call_to_callable_with_returns(
+                        cfg,
+                        call_site_ei=ei_id,
+                        return_targets=return_targets,
+                        target_callable_id=contract_callable_id,
+                        target_context=target_context,
+                        call_kind=kind,
+                        resolved_target_repr=contract_target_fqn,
+                        operation_target=operation_target,
+                        signature=signature,
+                        success_exit_cache=success_exit_cache,
+                        exception_exit_cache=exception_exit_cache,
+                    )
+                continue
 
             if resolved_callable_id is not None:
                 target_context = inventory_index.callable_contexts[resolved_callable_id]
@@ -616,43 +667,19 @@ def add_call_and_return_edges(
                         )
                     continue
 
-                target_entry_ei = entry_ei_for_context(target_context)
-
-                cfg.add_edge(
-                    ei_id,
-                    target_entry_ei,
-                    edge_type="call",
-                    call_kind=kind,
+                add_call_to_callable_with_returns(
+                    cfg,
+                    call_site_ei=ei_id,
+                    return_targets=return_targets,
                     target_callable_id=resolved_callable_id,
-                    target_fqn=target_context.callable_fqn,
-                    resolved_target=resolved_target_repr,
+                    target_context=target_context,
+                    call_kind=kind,
+                    resolved_target_repr=resolved_target_repr,
                     operation_target=operation_target,
                     signature=signature,
+                    success_exit_cache=success_exit_cache,
+                    exception_exit_cache=exception_exit_cache,
                 )
-
-                if resolved_callable_id not in success_exit_cache:
-                    success_exit_cache[resolved_callable_id] = compute_success_exit_eis(target_context)
-                    exception_exit_cache[resolved_callable_id] = compute_exception_exit_eis(target_context)
-
-                for return_target in return_targets:
-                    for exit_ei in success_exit_cache[resolved_callable_id]:
-                        cfg.add_edge(
-                            exit_ei,
-                            return_target,
-                            edge_type="return",
-                            return_kind="success",
-                            original_call_site=ei_id,
-                            returns_from=resolved_callable_id,
-                        )
-                    for exit_ei in exception_exit_cache[resolved_callable_id]:
-                        cfg.add_edge(
-                            exit_ei,
-                            return_target,
-                            edge_type="return",
-                            return_kind="exception",
-                            original_call_site=ei_id,
-                            returns_from=resolved_callable_id,
-                        )
                 continue
 
             external_node_id = f"external::{ei_id}::{kind}::{target or operation_target or 'unknown'}"

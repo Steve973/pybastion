@@ -44,6 +44,14 @@ from pybastion_unit.helpers.debug_tracing import (
     debug_print_resolution_state,
     debug_should_trace_target,
 )
+from pybastion_unit.helpers.type_indexing import (
+    build_import_map,
+    build_local_return_type_map,
+    build_module_index,
+    serialize_nested_type_map,
+    serialize_type_map,
+    self_attribute_name, build_field_types_by_class,
+)
 
 GENERIC_CONTAINER_TYPES: set[str] = {
     "list",
@@ -134,251 +142,30 @@ def split_target_parts(target: str) -> list[str]:
     return [part.strip() for part in target.split(".") if part.strip()]
 
 
-def annotation_to_string(node: ast.expr | None) -> str | None:
-    if node is None:
+def class_object_target_type(type_ref: TypeRef, ctx: ResolutionContext) -> str | None:
+    if type_ref.name != "type" or not type_ref.args:
         return None
-    try:
-        return ast.unparse(node).strip()
-    except Exception:
-        return None
+
+    target = type_ref.args[0]
+    target_name = target.name
+
+    if target_name in ctx.import_map:
+        target_name = ctx.import_map[target_name]
+
+    matches = candidate_type_fqns(target_name, ctx)
+    if len(matches) == 1:
+        return matches[0]
+
+    if target_name and target_name != "Any":
+        return target_name
+
+    return None
 
 
 def normalize_type_name(type_name: str | TypeRef) -> str:
     if isinstance(type_name, TypeRef):
         return type_name.name
     return TypeRef.from_annotation_string(type_name).name
-
-
-def type_ref_to_serializable(type_ref: TypeRef | None) -> Any:
-    if type_ref is None:
-        return None
-    return type_ref.to_dict()
-
-
-def type_ref_map_to_serializable(type_map: dict[str, TypeRef]) -> dict[str, Any]:
-    return {key: value.to_dict() for key, value in type_map.items()}
-
-
-def nested_type_ref_map_to_serializable(
-    type_map: dict[str, dict[str, TypeRef]],
-) -> dict[str, dict[str, Any]]:
-    return {
-        owner: {field_name: field_type.to_dict() for field_name, field_type in fields.items()}
-        for owner, fields in type_map.items()
-    }
-
-
-def assignment_target_name(node: ast.Assign | ast.AnnAssign | ast.AugAssign) -> str | None:
-    if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
-        return node.targets[0].id
-    if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-        return node.target.id
-    if isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
-        return node.target.id
-    return None
-
-
-def self_attribute_name(expr: ast.AST) -> str | None:
-    if isinstance(expr, ast.Attribute) and isinstance(expr.value, ast.Name) and expr.value.id == "self":
-        return expr.attr
-    return None
-
-
-def build_import_map(tree: ast.Module) -> dict[str, str]:
-    import_map: dict[str, str] = {}
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                local = alias.asname if alias.asname else alias.name
-                import_map[local] = alias.name
-        elif isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            for alias in node.names:
-                local = alias.asname if alias.asname else alias.name
-                import_map[local] = f"{module}.{alias.name}" if module else alias.name
-
-    return import_map
-
-
-def build_local_return_type_map(tree: ast.Module) -> dict[str, TypeRef]:
-    local_return_types: dict[str, TypeRef] = {}
-
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            type_ref = TypeRef.from_annotation_ast(node.returns)
-            if type_ref is not None:
-                local_return_types[node.name] = type_ref
-
-    return local_return_types
-
-
-def build_callable_inventory(tree: ast.Module, unit_fqn: str) -> dict[str, str]:
-    """
-    Fake inventory for forensics only. Value is same as key.
-    """
-    inventory: dict[str, str] = {}
-
-    class Visitor(ast.NodeVisitor):
-        def __init__(self) -> None:
-            self.scope: list[str] = [unit_fqn]
-
-        def fq(self, name: str) -> str:
-            return ".".join([*self.scope, name])
-
-        def visit_ClassDef(self, node: ast.ClassDef) -> None:
-            fq = self.fq(node.name)
-            inventory[fq] = fq
-            self.scope.append(node.name)
-            self.generic_visit(node)
-            self.scope.pop()
-
-        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-            fq = self.fq(node.name)
-            inventory[fq] = fq
-            self.scope.append(node.name)
-            self.generic_visit(node)
-            self.scope.pop()
-
-        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-            fq = self.fq(node.name)
-            inventory[fq] = fq
-            self.scope.append(node.name)
-            self.generic_visit(node)
-            self.scope.pop()
-
-        def visit_Assign(self, node: ast.Assign) -> None:
-            if len(self.scope) == 1:
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        fq = self.fq(target.id)
-                        inventory[fq] = fq
-
-        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-            if len(self.scope) == 1 and isinstance(node.target, ast.Name):
-                fq = self.fq(node.target.id)
-                inventory[fq] = fq
-
-    Visitor().visit(tree)
-    return inventory
-
-
-# ============================================================================
-# AST indexing
-# ============================================================================
-
-
-class ModuleIndex(ast.NodeVisitor):
-    def __init__(self, unit_fqn: str):
-        self.unit_fqn = unit_fqn
-        self.scope_stack: list[str] = [unit_fqn]
-
-        self.class_nodes: dict[str, ast.ClassDef] = {}
-        self.callable_nodes: dict[str, ast.FunctionDef | ast.AsyncFunctionDef] = {}
-
-    def current_prefix(self) -> str:
-        return ".".join(self.scope_stack)
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        fq = f"{self.current_prefix()}.{node.name}"
-        self.class_nodes[fq] = node
-        self.scope_stack.append(node.name)
-        self.generic_visit(node)
-        self.scope_stack.pop()
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        fq = f"{self.current_prefix()}.{node.name}"
-        self.callable_nodes[fq] = node
-        self.scope_stack.append(node.name)
-        self.generic_visit(node)
-        self.scope_stack.pop()
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        fq = f"{self.current_prefix()}.{node.name}"
-        self.callable_nodes[fq] = node
-        self.scope_stack.append(node.name)
-        self.generic_visit(node)
-        self.scope_stack.pop()
-
-
-# ============================================================================
-# Field type extraction
-# ============================================================================
-
-
-def build_field_types_by_class(
-        class_nodes: dict[str, ast.ClassDef],
-        import_map: dict[str, str],
-        local_return_types: dict[str, TypeRef],
-) -> dict[str, dict[str, TypeRef]]:
-    field_types_by_class: dict[str, dict[str, TypeRef]] = {}
-
-    for class_fqn, class_node in class_nodes.items():
-        field_map: dict[str, TypeRef] = {}
-
-        for stmt in class_node.body:
-            if isinstance(stmt, ast.AnnAssign):
-                attr_name = self_attribute_name(stmt.target)
-                type_ref = TypeRef.from_annotation_ast(stmt.annotation)
-
-                if attr_name and type_ref is not None:
-                    field_map[attr_name] = type_ref
-                elif isinstance(stmt.target, ast.Name) and type_ref is not None:
-                    field_map[stmt.target.id] = type_ref
-
-        init_node = None
-        for stmt in class_node.body:
-            if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef)) and stmt.name == "__init__":
-                init_node = stmt
-                break
-
-        if init_node is not None:
-            param_types: dict[str, TypeRef] = {}
-            for arg in init_node.args.args + init_node.args.kwonlyargs:
-                type_ref = TypeRef.from_annotation_ast(arg.annotation)
-                if type_ref is not None:
-                    param_types[arg.arg] = type_ref
-
-            for stmt in ast.walk(init_node):
-                if isinstance(stmt, ast.AnnAssign):
-                    attr_name = self_attribute_name(stmt.target)
-                    type_ref = TypeRef.from_annotation_ast(stmt.annotation)
-                    if attr_name and type_ref is not None:
-                        field_map[attr_name] = type_ref
-
-                if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1:
-                    attr_name = self_attribute_name(stmt.targets[0])
-                    if not attr_name:
-                        continue
-
-                    value = stmt.value
-
-                    if isinstance(value, ast.Name) and value.id in param_types:
-                        field_map[attr_name] = param_types[value.id]
-                        continue
-
-                    if isinstance(value, ast.Call):
-                        func = value.func
-                        if isinstance(func, ast.Name) and func.id in local_return_types:
-                            field_map[attr_name] = local_return_types[func.id]
-                            continue
-                        if isinstance(func, ast.Attribute) and func.attr in local_return_types:
-                            field_map[attr_name] = local_return_types[func.attr]
-                            continue
-
-        normalized: dict[str, TypeRef] = {}
-        for key, value in field_map.items():
-            if value.name in import_map:
-                normalized[key] = TypeRef(
-                    name=import_map[value.name],
-                    args=value.args,
-                )
-            else:
-                normalized[key] = value
-
-        field_types_by_class[class_fqn] = normalized
-
-    return field_types_by_class
 
 
 # ============================================================================
@@ -540,6 +327,11 @@ def resolve_root_symbol(
 
     if root in ctx.known_types:
         type_ref = ctx.known_types[root]
+
+        class_target = class_object_target_type(type_ref, ctx)
+        if class_target is not None:
+            return None, class_target, "known_class_object_type", [], None
+
         receiver_type = type_ref.name
 
         if receiver_type in ctx.import_map:
@@ -565,6 +357,25 @@ def resolve_root_symbol(
     same_unit = f"{ctx.unit_fqn}.{root}"
     if same_unit in ctx.callable_inventory:
         return same_unit, same_unit, "same_unit_local", [], None
+
+    if root == "sort_dict":
+        print("DEBUG root:", root)
+        print("DEBUG unit_fqn:", ctx.unit_fqn)
+        print("DEBUG exact same_unit:", f"{ctx.unit_fqn}.{root}")
+        print(
+            "DEBUG suffix_matches:",
+            [fqn for fqn in ctx.callable_inventory if fqn.endswith(f".{root}")]
+        )
+
+    suffix_matches = [
+        fqn
+        for fqn in ctx.callable_inventory
+        if fqn.endswith(f".{root}")
+    ]
+    if len(suffix_matches) == 1:
+        return suffix_matches[0], suffix_matches[0], "same_unit_suffix", [], None
+    if len(suffix_matches) > 1:
+        return None, None, None, suffix_matches, "ambiguous_same_unit_suffix"
 
     return None, None, None, [], "root_unresolved"
 
@@ -908,21 +719,24 @@ def inspect_module(source_path: Path, unit_fqn: str) -> ModuleForensics:
     source = source_path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(source_path))
 
-    import_map = build_import_map(tree)
+    import_map, _ = build_import_map(tree)
     local_return_types = build_local_return_type_map(tree)
-    callable_inventory = build_callable_inventory(tree, unit_fqn)
 
-    index = ModuleIndex(unit_fqn)
-    index.visit(tree)
+    ast_index = build_module_index(tree, unit_fqn)
+
+    callable_inventory = {
+        fqn: fqn
+        for fqn in sorted(ast_index.module_symbol_fqns)
+    }
 
     field_types_by_class = build_field_types_by_class(
-        class_nodes=index.class_nodes,
+        class_nodes=ast_index.class_nodes,
         import_map=import_map,
         local_return_types=local_return_types,
     )
 
     callable_forensics = build_callable_forensics(
-        callable_nodes=index.callable_nodes,
+        callable_nodes=ast_index.callable_nodes,
         field_types_by_class=field_types_by_class,
         local_return_types=local_return_types,
     )
@@ -999,8 +813,8 @@ def main() -> int:
             "source_path": module.source_path,
             "unit_fqn": module.unit_fqn,
             "import_map": module.import_map,
-            "local_return_types": type_ref_map_to_serializable(module.local_return_types),
-            "field_types_by_class": nested_type_ref_map_to_serializable(module.field_types_by_class),
+            "local_return_types": serialize_type_map(module.local_return_types),
+            "field_types_by_class": serialize_nested_type_map(module.field_types_by_class),
             "callable_forensics": {
                 fq: asdict(meta) for fq, meta in module.callable_forensics.items()
             },
@@ -1042,8 +856,8 @@ def main() -> int:
     payload = {
         "callable_fqn": args.callable_fqn,
         "owner_class_fqn": ctx.owner_class_fqn,
-        "known_types": type_ref_map_to_serializable(ctx.known_types),
-        "field_types_for_owner": type_ref_map_to_serializable(
+        "known_types": serialize_type_map(ctx.known_types),
+        "field_types_for_owner": serialize_type_map(
             module.field_types_by_class.get(ctx.owner_class_fqn or "", {})
         ),
         "results": rendered,

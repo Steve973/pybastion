@@ -4,7 +4,7 @@ import hashlib
 from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
-from pybastion_common.models import Branch
+from pybastion_common.models import Branch, TypeRef
 from pybastion_unit.shared.knowledge_base import (
     BUILTIN_METHODS,
     BUILTIN_RECEIVER_METHODS,
@@ -31,7 +31,7 @@ class IntegrationEntry:
         return asdict(self)
 
 
-ResolverFn = Callable[[str, dict[str, str]], tuple[str | None, str | None]]
+ResolverFn = Callable[[str, dict[str, TypeRef]], tuple[str | None, str | None]]
 SignatureFn = Callable[[Branch], str]
 
 
@@ -47,7 +47,7 @@ def _integration_id(
     return f"{callable_id}_I{digest}"
 
 
-def _default_signature(branch: Branch) -> str:
+def default_signature(branch: Branch) -> str:
     constraint = branch.constraint
     if constraint is not None and constraint.expr:
         return constraint.expr.strip()
@@ -117,9 +117,9 @@ def _is_extlib_target(target: str) -> bool:
 
 
 def _is_internal_self_target(
-    target: str,
-    callable_fqn: str,
-    callable_inventory: dict[str, str],
+        target: str,
+        callable_fqn: str,
+        callable_inventory: dict[str, str],
 ) -> bool:
     if not target.startswith("self."):
         return False
@@ -149,9 +149,9 @@ def _is_internal_self_target(
 
 
 def _is_forbidden_integration_branch(
-    branch: Branch,
-    callable_fqn: str,
-    callable_inventory: dict[str, str],
+        branch: Branch,
+        callable_fqn: str,
+        callable_inventory: dict[str, str],
 ) -> bool:
     owner = branch.owner_info
     if owner is not None and owner.stmt_type == "Try" and owner.region == "except":
@@ -164,13 +164,6 @@ def _is_forbidden_integration_branch(
     target = (constraint.operation_target or "").strip()
     if not target:
         return False
-
-    if _is_internal_self_target(
-        target=target,
-        callable_fqn=callable_fqn,
-        callable_inventory=callable_inventory,
-    ):
-        return True
 
     if _is_builtin_target(target):
         return True
@@ -227,7 +220,7 @@ def _classify_integration_target(
     if candidate in inventory_fqns or candidate in project_fqns:
         if candidate.startswith(f"{unit_fqn}."):
             return {
-                "is_integration": False,
+                "is_integration": True,
                 "kind": "same_unit",
                 "resolved_target": candidate,
             }
@@ -310,11 +303,11 @@ def build_integration_entries(
         unit_fqn: str,
         project_fqns: set[str],
         callable_inventory: dict[str, str],
-        known_types: dict[str, str],
+        known_types: dict[str, TypeRef],
         resolve_target: ResolverFn,
         signature_for_branch: SignatureFn | None = None,
 ) -> list[IntegrationEntry]:
-    signature_fn = signature_for_branch or _default_signature
+    signature_fn = signature_for_branch or default_signature
     entries: list[IntegrationEntry] = []
 
     for branch in branches:

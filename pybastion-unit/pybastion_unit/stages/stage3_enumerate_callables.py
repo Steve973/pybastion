@@ -34,7 +34,6 @@ from pybastion_common.models import (
 )
 from pybastion_common.smt_path_checker import filter_feasible_paths
 from pybastion_unit.helpers.chain_resolution import (
-    build_field_types_by_class,
     ResolutionContext,
     resolve_target_chain,
 )
@@ -43,7 +42,15 @@ from pybastion_unit.helpers.decorator_processing import (
     has_effect,
     validate_feature_co_occurrences,
 )
-from pybastion_unit.helpers.integration_analysis import build_integration_entries
+from pybastion_unit.helpers.integration_analysis import build_integration_entries, default_signature
+from pybastion_unit.helpers.type_indexing import (
+    build_module_index,
+    inspect_unit_types, self_attribute_name,
+)
+from pybastion_unit.helpers.type_inference import (
+    build_param_type_map_with_defaults,
+    infer_literal_type,
+)
 
 ENUM_BASES: set[str] = {"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"}
 CALLABLE_ENTRY_KINDS: set[str] = {
@@ -68,6 +75,19 @@ class TargetResolution:
 # ============================================================================
 # Stage 1 model
 # ============================================================================
+
+
+def load_class_field_registry(filepath: Path) -> dict[str, dict[str, TypeRef]]:
+    payload = json.loads(filepath.read_text(encoding="utf-8"))
+    raw_registry: dict[str, dict[str, dict[str, Any]]] = payload.get("class_field_registry", {}) or {}
+
+    return {
+        class_fqn: {
+            field_name: TypeRef.from_dict(type_payload)
+            for field_name, type_payload in field_map.items()
+        }
+        for class_fqn, field_map in raw_registry.items()
+    }
 
 
 def load_project_index(filepath: Path) -> ProjectIndex:
@@ -108,118 +128,39 @@ def build_stage2_lookup(stage2_payload: dict[str, Any]) -> dict[tuple[str, int, 
 
 
 # ============================================================================
-# AST location and symbol discovery
-# ============================================================================
-
-
-class IndexedNodeLocator(ast.NodeVisitor):
-    def __init__(self, module_fqn: str):
-        self.module_fqn = module_fqn
-        self.scope_stack: list[str] = [module_fqn] if module_fqn else []
-        self.nodes_by_fqn_and_line: dict[tuple[str, int], ast.AST] = {}
-        self.assignment_nodes_by_fqn_and_line: dict[tuple[str, int], ast.AST] = {}
-        self.class_nodes: dict[str, ast.ClassDef] = {}
-
-    def current_fqn_prefix(self) -> str:
-        return ".".join(self.scope_stack)
-
-    def visit_ClassDef(self, node: ast.ClassDef) -> None:
-        fqn = f"{self.current_fqn_prefix()}.{node.name}" if self.scope_stack else node.name
-        self.nodes_by_fqn_and_line[(fqn, node.lineno)] = node
-        self.class_nodes[fqn] = node
-        self.scope_stack.append(node.name)
-        self.generic_visit(node)
-        self.scope_stack.pop()
-
-    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
-        fqn = f"{self.current_fqn_prefix()}.{node.name}" if self.scope_stack else node.name
-        self.nodes_by_fqn_and_line[(fqn, node.lineno)] = node
-        self.scope_stack.append(node.name)
-        self.generic_visit(node)
-        self.scope_stack.pop()
-
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
-        fqn = f"{self.current_fqn_prefix()}.{node.name}" if self.scope_stack else node.name
-        self.nodes_by_fqn_and_line[(fqn, node.lineno)] = node
-        self.scope_stack.append(node.name)
-        self.generic_visit(node)
-        self.scope_stack.pop()
-
-    def visit_Assign(self, node: ast.Assign) -> None:
-        for target in node.targets:
-            if isinstance(target, ast.Name):
-                fqn = f"{self.module_fqn}.{target.id}" if self.module_fqn else target.id
-                self.assignment_nodes_by_fqn_and_line[(fqn, node.lineno)] = node
-                break
-        self.generic_visit(node)
-
-    def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
-        if isinstance(node.target, ast.Name):
-            fqn = f"{self.module_fqn}.{node.target.id}" if self.module_fqn else node.target.id
-            self.assignment_nodes_by_fqn_and_line[(fqn, node.lineno)] = node
-        self.generic_visit(node)
-
-    def visit_AugAssign(self, node: ast.AugAssign) -> None:
-        if isinstance(node.target, ast.Name):
-            fqn = f"{self.module_fqn}.{node.target.id}" if self.module_fqn else node.target.id
-            self.assignment_nodes_by_fqn_and_line[(fqn, node.lineno)] = node
-        self.generic_visit(node)
-
-
-def build_import_map(tree: ast.Module, project_fqns: set[str]) -> tuple[dict[str, str], set[str]]:
-    import_map: dict[str, str] = {}
-    interunit_imports: set[str] = set()
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                name = alias.asname if alias.asname else alias.name
-                import_map[name] = alias.name
-                if alias.name in project_fqns:
-                    interunit_imports.add(name)
-        elif isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            for alias in node.names:
-                name = alias.asname if alias.asname else alias.name
-                fqn = f"{module}.{alias.name}" if module else alias.name
-                import_map[name] = fqn
-                if fqn in project_fqns:
-                    interunit_imports.add(name)
-
-    return import_map, interunit_imports
-
-
-def build_local_symbols(tree: ast.Module) -> set[str]:
-    local_symbols: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            local_symbols.add(node.name)
-        elif isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name):
-                    local_symbols.add(target.id)
-        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
-            local_symbols.add(node.target.id)
-        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
-            local_symbols.add(node.target.id)
-    return local_symbols
-
-
-def build_local_return_type_map(tree: ast.Module) -> dict[str, TypeRef]:
-    local_return_types: dict[str, TypeRef] = {}
-
-    for node in ast.walk(tree):
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.returns is not None:
-            type_ref = TypeRef.from_annotation_ast(node.returns)
-            if type_ref is not None:
-                local_return_types[node.name] = type_ref
-
-    return local_return_types
-
-
-# ============================================================================
 # AST analysis helpers
 # ============================================================================
+
+
+def collect_project_contract_classes(project_index: ProjectIndex) -> set[str]:
+    contract_classes: set[str] = set()
+
+    for unit in project_index.units:
+        source_path = Path(unit.filepath)
+        source = source_path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(source_path))
+        ast_index = build_module_index(tree, unit.fully_qualified_name)
+
+        for entry in unit.entries:
+            if entry.kind not in CLASS_ENTRY_KINDS:
+                continue
+
+            node = ast_index.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+            if not isinstance(node, ast.ClassDef):
+                continue
+
+            class_is_contract = is_abstract_base_class(node)
+
+            if not class_is_contract:
+                for child in node.body:
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and has_abstractmethod_decorator(child):
+                        class_is_contract = True
+                        break
+
+            if class_is_contract:
+                contract_classes.add(entry.fully_qualified_name)
+
+    return contract_classes
 
 
 def is_enum_class(node: ast.ClassDef) -> bool:
@@ -231,17 +172,6 @@ def is_enum_class(node: ast.ClassDef) -> bool:
     return False
 
 
-def _integration_signature_for_branch(branch: Branch) -> str:
-    constraint = branch.constraint
-    if constraint is not None and constraint.expr:
-        return constraint.expr.strip()
-
-    if branch.statement_outcome is not None and branch.statement_outcome.outcome:
-        return branch.statement_outcome.outcome.strip()
-
-    return (branch.description or "").strip()
-
-
 def has_abstractmethod_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     for dec in node.decorator_list:
         if isinstance(dec, ast.Name) and dec.id == "abstractmethod":
@@ -251,6 +181,18 @@ def has_abstractmethod_decorator(node: ast.FunctionDef | ast.AsyncFunctionDef) -
     return False
 
 
+def _base_expr_lookup_name(base_expr: ast.expr) -> str:
+    match base_expr:
+        case ast.Subscript(value=value):
+            return ast.unparse(value).strip()
+        case _:
+            return ast.unparse(base_expr).strip()
+
+
+def _strip_generic_suffix(type_name: str) -> str:
+    return type_name.split("[", 1)[0].strip()
+
+
 def resolve_base_class_fqn(
         base_expr: ast.expr,
         unit_fqn: str,
@@ -258,25 +200,29 @@ def resolve_base_class_fqn(
         callable_inventory: dict[str, str],
 ) -> str:
     raw = ast.unparse(base_expr).strip()
+    lookup = _strip_generic_suffix(_base_expr_lookup_name(base_expr))
 
-    if raw in import_map:
-        return import_map[raw]
+    if lookup in import_map:
+        return _strip_generic_suffix(import_map[lookup])
 
-    if "." not in raw:
-        same_unit = f"{unit_fqn}.{raw}"
+    if "." not in lookup:
+        same_unit = f"{unit_fqn}.{lookup}"
         if same_unit in callable_inventory:
             return same_unit
 
-        for fqn in callable_inventory:
-            if fqn.endswith(f".{raw}"):
-                return fqn
+        matches = [fqn for fqn in callable_inventory if fqn.endswith(f".{lookup}")]
+        if len(matches) == 1:
+            return matches[0]
 
-    return raw
+    return lookup if lookup else raw
 
 
 def is_contract_base_name(base_fqn: str) -> bool:
     short = base_fqn.rsplit(".", 1)[-1]
-    return short in {"ABC", "Protocol", "ArtifactResolver"}
+    return short in {
+        "ABC",
+        "Protocol",
+    }
 
 
 def is_abstract_base_class(node: ast.ClassDef) -> bool:
@@ -424,9 +370,9 @@ class AstAnalyzer:
             callable_inventory: dict[str, str],
             project_fqns: set[str],
             import_map: dict[str, str],
-            local_symbols: set[str],
             local_return_types: dict[str, TypeRef],
             field_types_by_class: dict[str, dict[str, TypeRef]],
+            project_contract_classes: set[str],
     ):
         self.source_lines = source_lines
         self.unit_id = unit_id
@@ -434,33 +380,14 @@ class AstAnalyzer:
         self.callable_inventory = callable_inventory
         self.project_fqns = project_fqns
         self.import_map = import_map
-        self.local_symbols = local_symbols
         self.local_return_types = local_return_types
         self.field_types_by_class = field_types_by_class
+        self.project_contract_classes = project_contract_classes
 
     def _normalize_type_name(self, type_name: str | TypeRef) -> str:
         if isinstance(type_name, TypeRef):
             return type_name.name
         return TypeRef.from_annotation_string(type_name).name
-
-    def _resolve_attribute_owner_type(self, owner_type: str | TypeRef, attr_name: str) -> str:
-        normalized_owner = self._normalize_type_name(owner_type)
-
-        if normalized_owner in self.import_map:
-            normalized_owner = self.import_map[normalized_owner]
-
-        candidate_fqns = []
-        if normalized_owner in self.callable_inventory:
-            candidate_fqns.append(normalized_owner)
-        else:
-            for fqn in self.callable_inventory:
-                if fqn.endswith(f".{normalized_owner}"):
-                    candidate_fqns.append(fqn)
-
-        if normalized_owner:
-            return normalized_owner
-
-        return ""
 
     def analyze_entry(self, entry: UnitIndexEntry, node: ast.AST) -> dict[str, Any]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -490,7 +417,10 @@ class AstAnalyzer:
             )
             for base in node.bases
         ]
-        contract_bases = [base for base in resolved_bases if is_contract_base_name(base)]
+        contract_bases = [
+            base for base in resolved_bases
+            if is_contract_base_name(base) or base in self.project_contract_classes
+        ]
 
         return CallableEntry(
             id=entry.id,
@@ -515,7 +445,7 @@ class AstAnalyzer:
             self.source_lines,
         )
         param_types = self._build_param_type_map(node)
-        local_types = self._build_local_type_map(node)
+        local_types = self.build_local_type_map(node)
         known_types = {**param_types, **local_types}
         kind = "method" if entry.kind == "method" else "function"
 
@@ -555,7 +485,7 @@ class AstAnalyzer:
             entry: UnitIndexEntry,
             node: ast.Assign | ast.AnnAssign | ast.AugAssign,
     ) -> dict[str, Any]:
-        local_types = self._build_local_type_map(node)
+        local_types = self.build_local_type_map(node)
 
         payload = CallableEntry(
             id=entry.id,
@@ -576,8 +506,12 @@ class AstAnalyzer:
         payload["_known_types"] = local_types
         return payload
 
-    def _build_local_type_map(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, TypeRef]:
+    def build_callable_local_type_map(
+            self,
+            node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> dict[str, TypeRef]:
         local_types: dict[str, TypeRef] = {}
+
         owner_class_fqn = (
             self._owner_class_fqn_for_callable(self.current_callable_fqn)
             if hasattr(self, "current_callable_fqn")
@@ -587,22 +521,92 @@ class AstAnalyzer:
 
         def infer_expr_type(expr: ast.AST) -> TypeRef | None:
             if isinstance(expr, ast.Name):
+                if expr.id == "self":
+                    if owner_class_fqn:
+                        return TypeRef(name=owner_class_fqn)
+                    return None
                 return local_types.get(expr.id)
 
+            literal_type = infer_literal_type(expr)
+            if literal_type is not None:
+                return literal_type
+
             if isinstance(expr, ast.Attribute):
-                if isinstance(expr.value, ast.Name) and expr.value.id == "self":
-                    return owner_fields.get(expr.attr)
+                attr_name = self_attribute_name(expr)
+                if attr_name and attr_name in owner_fields:
+                    return owner_fields[attr_name]
 
             if isinstance(expr, ast.Call):
                 func = expr.func
-
-                if isinstance(func, ast.Name):
-                    return self.local_return_types.get(func.id)
-
-                if isinstance(func, ast.Attribute):
-                    return self.local_return_types.get(func.attr)
+                if isinstance(func, ast.Name) and func.id in self.local_return_types:
+                    return self.local_return_types[func.id]
+                if isinstance(func, ast.Attribute) and func.attr in self.local_return_types:
+                    return self.local_return_types[func.attr]
 
             return None
+
+        def unpack_tuple_like_type(type_ref: TypeRef) -> list[TypeRef]:
+            if type_ref.name in {"tuple", "Tuple"}:
+                return list(type_ref.args)
+
+            if type_ref.name in {"list", "List", "set", "Set", "Sequence", "Iterable"} and len(type_ref.args) == 1:
+                inner = type_ref.args[0]
+                if inner.name in {"tuple", "Tuple"}:
+                    return list(inner.args)
+
+            return []
+
+        def infer_iter_value_type(expr: ast.AST) -> TypeRef | None:
+            iter_type = infer_expr_type(expr)
+            if iter_type is None:
+                return None
+
+            if iter_type.name in {"list", "List", "set", "Set", "Iterable", "Iterator", "Sequence"} and iter_type.args:
+                return iter_type.args[0]
+
+            if iter_type.name in {"dict", "Dict", "Mapping"} and len(iter_type.args) >= 2:
+                return iter_type.args[0]
+
+            return None
+
+        def infer_items_pair_type(expr: ast.AST) -> TypeRef | None:
+            if not isinstance(expr, ast.Call):
+                return None
+
+            func = expr.func
+            if not isinstance(func, ast.Attribute):
+                return None
+            if func.attr != "items":
+                return None
+
+            receiver_type = infer_expr_type(func.value)
+            if receiver_type is None:
+                return None
+
+            if receiver_type.name in {"dict", "Dict", "Mapping"} and len(receiver_type.args) >= 2:
+                return TypeRef(
+                    name="tuple",
+                    args=[receiver_type.args[0], receiver_type.args[1]],
+                )
+
+            return None
+
+        def bind_target_types(target: ast.AST, value_type: TypeRef | None) -> None:
+            if value_type is None:
+                return
+
+            if isinstance(target, ast.Name):
+                local_types[target.id] = value_type
+                return
+
+            if isinstance(target, (ast.Tuple, ast.List)):
+                item_types = unpack_tuple_like_type(value_type)
+                if not item_types:
+                    return
+
+                for elt, elt_type in zip(target.elts, item_types):
+                    if isinstance(elt, ast.Name):
+                        local_types[elt.id] = elt_type
 
         for stmt in ast.walk(node):
             if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name):
@@ -611,21 +615,74 @@ class AstAnalyzer:
                     local_types[stmt.target.id] = type_ref
                 continue
 
-            if isinstance(stmt, ast.Assign) and len(stmt.targets) == 1 and isinstance(stmt.targets[0], ast.Name):
+            if (
+                    isinstance(stmt, ast.Assign)
+                    and len(stmt.targets) == 1
+                    and isinstance(stmt.targets[0], ast.Name)
+            ):
                 target_name = stmt.targets[0].id
                 inferred = infer_expr_type(stmt.value)
                 if inferred is not None:
                     local_types[target_name] = inferred
+                continue
+
+            if isinstance(stmt, ast.For):
+                pair_type = infer_items_pair_type(stmt.iter)
+                if pair_type is not None:
+                    bind_target_types(stmt.target, pair_type)
                     continue
 
-            if isinstance(stmt, ast.For) and isinstance(stmt.target, ast.Name):
-                loop_var = stmt.target.id
-                iter_type = infer_expr_type(stmt.iter)
-
-                if iter_type is not None and iter_type.args:
-                    local_types[loop_var] = iter_type.args[0]
+                iter_value_type = infer_iter_value_type(stmt.iter)
+                if iter_value_type is not None:
+                    bind_target_types(stmt.target, iter_value_type)
+                    continue
 
         return local_types
+
+    def build_assignment_local_type_map(
+            self,
+            node: ast.Assign | ast.AnnAssign | ast.AugAssign,
+    ) -> dict[str, TypeRef]:
+        local_types: dict[str, TypeRef] = {}
+
+        match node:
+            case ast.AnnAssign(target=ast.Name() as target, annotation=annotation):
+                type_ref = TypeRef.from_annotation_ast(annotation)
+                if type_ref is not None:
+                    local_types[target.id] = type_ref
+
+            case ast.Assign(targets=[ast.Name() as target], value=value):
+                if isinstance(value, ast.Call):
+                    func = value.func
+
+                    if isinstance(func, ast.Name):
+                        inferred = self.local_return_types.get(func.id)
+                        if inferred is not None:
+                            local_types[target.id] = inferred
+
+                    elif isinstance(func, ast.Attribute):
+                        inferred = self.local_return_types.get(func.attr)
+                        if inferred is not None:
+                            local_types[target.id] = inferred
+
+            case ast.AugAssign(target=ast.Name()):
+                pass
+
+        return {k: v for k, v in local_types.items() if v is not None}
+
+    def build_local_type_map(
+            self,
+            node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Assign | ast.AnnAssign | ast.AugAssign,
+    ) -> dict[str, TypeRef]:
+        match node:
+            case ast.FunctionDef() | ast.AsyncFunctionDef():
+                return self.build_callable_local_type_map(node)
+
+            case ast.Assign() | ast.AnnAssign() | ast.AugAssign():
+                return self.build_assignment_local_type_map(node)
+
+            case _:
+                return {}
 
     def _build_signature(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> str:
         try:
@@ -686,12 +743,7 @@ class AstAnalyzer:
         return params
 
     def _build_param_type_map(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, TypeRef]:
-        type_map: dict[str, TypeRef] = {}
-        for arg in node.args.args + node.args.kwonlyargs:
-            type_ref = TypeRef.from_annotation_ast(arg.annotation)
-            if type_ref is not None:
-                type_map[arg.arg] = type_ref
-        return type_map
+        return build_param_type_map_with_defaults(node)
 
     def _extract_type_ref(self, annotation: ast.expr | None) -> TypeRef | None:
         return TypeRef.from_annotation_ast(annotation)
@@ -717,29 +769,18 @@ class AstAnalyzer:
                 param_types,
                 callable_fqn=callable_fqn,
             ),
-            signature_for_branch=_integration_signature_for_branch,
+            signature_for_branch=default_signature,
         )
 
         enriched: list[dict[str, Any]] = []
         for integration in integrations:
             payload = integration.to_dict()
-            original_target = payload.get("target")
 
-            if original_target:
-                resolution = self._resolve_target_details(
-                    original_target,
-                    known_types,
-                    callable_fqn=callable_fqn,
-                )
-                payload["resolved_target"] = resolution.resolved_target
-                payload["resolution_kind"] = resolution.resolution_kind
-                if resolution.resolution_basis:
-                    payload["resolution_basis"] = resolution.resolution_basis
-                if resolution.candidate_targets:
-                    payload["candidate_targets"] = resolution.candidate_targets
-            else:
-                payload["resolved_target"] = original_target
-                payload["resolution_kind"] = "unresolved"
+            classification = payload.get("classification", {}) or {}
+            resolved_target = classification.get("resolved_target") or payload.get("target")
+
+            payload["resolved_target"] = resolved_target
+            payload["resolution_kind"] = payload.get("kind", "unknown")
 
             enriched.append(payload)
 
@@ -749,7 +790,7 @@ class AstAnalyzer:
         parts = callable_fqn.split(".")
         if len(parts) < 2:
             return None
-        return ".".join(parts[:-1])
+        return ".".join(parts[:-1]) if parts[-2][:1].isupper() else None
 
     def _resolve_target_details(
             self,
@@ -985,6 +1026,7 @@ def find_methods_by_owner(entries: list[dict[str, Any]]) -> dict[str, dict[str, 
 def annotate_method_overrides(
         entries: list[dict[str, Any]],
         class_hierarchy: dict[str, dict[str, Any]],
+        project_method_fqns: set[str],
 ) -> dict[str, list[str]]:
     methods_by_owner = find_methods_by_owner(entries)
     contract_methods: dict[str, list[str]] = {}
@@ -1000,12 +1042,19 @@ def annotate_method_overrides(
                     implements_contract = False
 
                     for base in class_hierarchy.get(owner, {}).get("bases", []):
-                        base_methods = methods_by_owner.get(base, {})
-                        base_method = base_methods.get(name)
-                        if base_method:
-                            base_fqn = f"{base}.{name}"
+                        base_fqn = f"{base}.{name}"
+
+                        base_method = methods_by_owner.get(base, {}).get(name)
+                        if base_method is not None:
                             overrides.append(base_fqn)
                             if hierarchy_info(base_method).get("is_contract_method", False):
+                                implements_contract = True
+                                contract_methods.setdefault(base_fqn, []).append(entry.get("_fqn", ""))
+                            continue
+
+                        if base_fqn in project_method_fqns:
+                            overrides.append(base_fqn)
+                            if base in (class_hierarchy.get(owner, {}).get("contract_bases", []) or []):
                                 implements_contract = True
                                 contract_methods.setdefault(base_fqn, []).append(entry.get("_fqn", ""))
 
@@ -1017,7 +1066,7 @@ def annotate_method_overrides(
             recurse(entry.get("children", []) or [])
 
     recurse(entries)
-    return contract_methods
+    return {k: v for k, v in contract_methods.items()}
 
 
 # ============================================================================
@@ -1025,7 +1074,8 @@ def annotate_method_overrides(
 # ============================================================================
 
 
-def attach_children(entries_by_id: dict[str, dict[str, Any]], unit_entries: list[UnitIndexEntry]) -> list[dict[str, Any]]:
+def attach_children(entries_by_id: dict[str, dict[str, Any]], unit_entries: list[UnitIndexEntry]) -> list[
+    dict[str, Any]]:
     roots: list[dict[str, Any]] = []
     for entry in sorted(unit_entries, key=lambda item: item.ordinal_within_parent):
         payload = entries_by_id[entry.id]
@@ -1091,24 +1141,33 @@ def resolve_stage2_file(unit: UnitIndex, ei_file: Path | None, ei_root: Path | N
 def process_unit(
         unit: UnitIndex,
         project_symbol_fqns: set[str],
+        project_method_fqns: set[str],
+        project_contract_classes: set[str],
+        project_field_types_by_class: dict[str, dict[str, TypeRef]],
         stage2_file: Path | None,
         output_root: Path,
 ) -> dict[str, Any]:
     source_path = Path(unit.filepath)
     source = source_path.read_text(encoding="utf-8")
-    tree = ast.parse(source)
+    tree = ast.parse(source, filename=str(source_path))
     source_lines = source.splitlines()
-    locator = IndexedNodeLocator(unit.fully_qualified_name)
-    locator.visit(tree)
+    ast_index = build_module_index(tree, unit.fully_qualified_name)
     callable_inventory = {entry.fully_qualified_name: entry.id for entry in unit.entries}
-    import_map, _ = build_import_map(tree, project_symbol_fqns)
-    local_symbols = build_local_symbols(tree)
-    local_return_types = build_local_return_type_map(tree)
-    field_types_by_class = build_field_types_by_class(
-        class_nodes=locator.class_nodes,
-        import_map=import_map,
-        local_return_types=local_return_types,
+
+    unit_types = inspect_unit_types(
+        unit_fqn=unit.fully_qualified_name,
+        source_path=source_path,
+        tree=tree,
+        ast_index=ast_index,
+        project_fqns=project_symbol_fqns,
     )
+
+    import_map = unit_types.import_map
+    local_return_types = unit_types.local_return_types
+    field_types_by_class: dict[str, dict[str, TypeRef]] = {
+        **project_field_types_by_class,
+        **unit_types.field_types_by_class,
+    }
     analyzer = AstAnalyzer(
         source_lines=source_lines,
         unit_id=unit.unit_id,
@@ -1116,19 +1175,24 @@ def process_unit(
         callable_inventory=callable_inventory,
         project_fqns=project_symbol_fqns,
         import_map=import_map,
-        local_symbols=local_symbols,
         local_return_types=local_return_types,
         field_types_by_class=field_types_by_class,
+        project_contract_classes=project_contract_classes,
     )
 
     entries_by_id: dict[str, dict[str, Any]] = {}
     for entry in unit.entries:
         if entry.kind in CLASS_ENTRY_KINDS:
-            node = locator.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+            node = ast_index.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
         elif entry.kind == "module_assignment":
-            node = locator.assignment_nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+            node = ast_index.assignment_nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
         else:
-            node = locator.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+            node = ast_index.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+
+        if entry.kind in {"unit_function", "method", "nested_function", "module_assignment"}:
+            analyzer.current_callable_fqn = entry.fully_qualified_name
+        else:
+            analyzer.current_callable_fqn = None
 
         if node is None:
             payload = {
@@ -1155,19 +1219,24 @@ def process_unit(
         known_types: dict[str, TypeRef] = payload.pop("_known_types", {}) or {}
 
         if entry.kind in CLASS_ENTRY_KINDS:
-            node = locator.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+            node = ast_index.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
         elif entry.kind == "module_assignment":
-            node = locator.assignment_nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+            node = ast_index.assignment_nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
         else:
-            node = locator.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+            node = ast_index.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
 
         analyzer.current_callable_fqn = entry.fully_qualified_name
 
         if node is None:
             local_types: dict[str, TypeRef] = {}
         else:
-            local_types = analyzer._build_local_type_map(node)
+            local_types = analyzer.build_local_type_map(node)
         merged_known_types: dict[str, TypeRef] = {**known_types, **local_types}
+
+        if entry.fully_qualified_name == "project_resolution_engine.internal.util.multiformat.MultiformatSerializableMixin.flat_summary":
+            print("KNOWN TYPES FOR", entry.fully_qualified_name)
+            for name, type_ref in sorted(merged_known_types.items()):
+                print(" ", name, "->", type_ref.to_dict())
 
         ainfo["integration_candidates"] = analyzer.find_integration_candidates(
             branches=branches,
@@ -1185,7 +1254,11 @@ def process_unit(
     mark_contract_methods(roots)
 
     class_hierarchy = build_class_hierarchy(roots)
-    contract_methods = annotate_method_overrides(roots, class_hierarchy)
+    contract_methods = annotate_method_overrides(
+        roots,
+        class_hierarchy,
+        project_method_fqns,
+    )
 
     add_execution_paths(roots)
 
@@ -1270,6 +1343,8 @@ def main() -> int:
         return 1
 
     project_index = load_project_index(args.unit_index)
+    project_contract_classes = collect_project_contract_classes(project_index)
+    project_field_types_by_class = load_class_field_registry(args.unit_index)
     unit = select_unit(project_index, args.file, args.fqn)
     if unit is None:
         print("Error: could not resolve unit from --file/--fqn", file=sys.stderr)
@@ -1284,12 +1359,23 @@ def main() -> int:
         print("  → Stage 2: none (inventory will be built without EI merge)")
 
     project_symbol_fqns: set[str] = set()
+    project_method_fqns: set[str] = set()
     for indexed_unit in project_index.units:
         project_symbol_fqns.add(indexed_unit.fully_qualified_name)
         for entry in indexed_unit.entries:
             project_symbol_fqns.add(entry.fully_qualified_name)
+            if entry.kind == "method":
+                project_method_fqns.add(entry.fully_qualified_name)
 
-    process_unit(unit, project_symbol_fqns, stage2_file, args.output_root)
+    process_unit(
+        unit,
+        project_symbol_fqns,
+        project_method_fqns,
+        project_contract_classes,
+        project_field_types_by_class,
+        stage2_file,
+        args.output_root,
+    )
     return 0
 
 

@@ -541,7 +541,55 @@ def diagnose_callable_detail(cfg: nx.DiGraph, callable_id: str) -> dict[str, Any
     }
 
 
-def print_diagnostic_summary(results: list[dict[str, Any]], path_check: dict[str, Any]) -> None:
+def build_callable_call_predecessors(cfg: nx.DiGraph) -> dict[str, set[str]]:
+    predecessors: dict[str, set[str]] = {}
+
+    for node_id, node_data in cfg.nodes(data=True):
+        callable_id = node_data.get("callable_id")
+        if callable_id:
+            predecessors.setdefault(callable_id, set())
+
+    for src, dst, edge_data in cfg.edges(data=True):
+        if edge_data.get("edge_type") != "call":
+            continue
+
+        src_callable_id = cfg.nodes[src].get("callable_id")
+        dst_callable_id = cfg.nodes[dst].get("callable_id")
+
+        if not src_callable_id or not dst_callable_id:
+            continue
+        if src_callable_id == dst_callable_id:
+            continue
+
+        predecessors.setdefault(dst_callable_id, set()).add(src_callable_id)
+
+    return predecessors
+
+
+def collapse_uncalled_to_roots(
+        cfg: nx.DiGraph,
+        uncalled_results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    predecessors = build_callable_call_predecessors(cfg)
+    uncalled_ids = {r["callable_id"] for r in uncalled_results}
+
+    collapsed: list[dict[str, Any]] = []
+    for result in uncalled_results:
+        callable_id = result["callable_id"]
+        pred_ids = predecessors.get(callable_id, set())
+
+        has_uncalled_predecessor = any(pred_id in uncalled_ids for pred_id in pred_ids)
+        if not has_uncalled_predecessor:
+            collapsed.append(result)
+
+    return collapsed
+
+
+def print_diagnostic_summary(
+        cfg: nx.DiGraph,
+        results: list[dict[str, Any]],
+        path_check: dict[str, Any],
+) -> None:
     executable_results = [r for r in results if r.get("is_executable", True)]
     reportable_results = [r for r in executable_results if not r.get("is_contract_method", False)]
 
@@ -554,18 +602,21 @@ def print_diagnostic_summary(results: list[dict[str, Any]], path_check: dict[str
            and r["coverage"].get("is_called")
            and not r["low_signal"]
     ]
-    never_called = [
+    never_called_all = [
         r for r in reportable_results
         if r["coverage"]["entry_exists"]
            and not r.get("has_incoming_callable_calls", False)
            and not r["low_signal"]
     ]
-    never_called_low_signal = [
+    never_called_low_signal_all = [
         r for r in reportable_results
         if r["coverage"]["entry_exists"]
            and not r.get("has_incoming_callable_calls", False)
            and r["low_signal"]
     ]
+
+    never_called = collapse_uncalled_to_roots(cfg, never_called_all)
+    never_called_low_signal = collapse_uncalled_to_roots(cfg, never_called_low_signal_all)
 
     print("\n=== Diagnostic Summary ===")
     print(f"Total callables: {len(results)}")
@@ -623,7 +674,7 @@ def main(argv: list[str] | None = None) -> int:
     print("Running diagnostics...")
     results = diagnose_all_callables(cfg, inventory_index)
     path_check = check_execution_paths(cfg, inventory_index)
-    print_diagnostic_summary(results, path_check)
+    print_diagnostic_summary(cfg, results, path_check)
 
     if args.callable_id:
         detail = diagnose_callable_detail(cfg, args.callable_id)
