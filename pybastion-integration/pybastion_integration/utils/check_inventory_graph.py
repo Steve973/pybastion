@@ -22,9 +22,19 @@ import yaml
 from pybastion_integration.stages.build_full_call_graph_from_inventory import analysis_info, signature_info, \
     hierarchy_info
 
-SUCCESS_EXIT_TERMINATORS: set[str] = {"return", "implicit-return"}
-EXCEPTION_EXIT_TERMINATORS: set[str] = {"raise", "exception"}
-CALLABLE_KINDS: set[str] = {"function", "method", "assignment"}
+SUCCESS_EXIT_TERMINATORS: set[str] = {
+    "return",
+    "implicit-return"
+}
+EXCEPTION_EXIT_TERMINATORS: set[str] = {
+    "raise",
+    "exception"
+}
+CALLABLE_KINDS: set[str] = {
+    "function",
+    "method",
+    "assignment"
+}
 LOW_SIGNAL_DUNDER_NAMES: set[str] = {
     "__lt__", "__le__", "__gt__", "__ge__", "__eq__", "__ne__",
     "__hash__", "__repr__", "__str__", "__bool__", "__len__",
@@ -32,9 +42,15 @@ LOW_SIGNAL_DUNDER_NAMES: set[str] = {
     "__post_init__",
 }
 LOW_SIGNAL_DECORATORS: set[str] = {
-    "property", "FrameworkInvokedMethod", "PermitUnused"
+    "property",
+    "FrameworkInvokedMethod",
+    "PermitUnused",
+    "CalledThroughAbstraction"
 }
-EXTERNAL_ROOT_MARKERS = {"ExternalApiMethod", "FrameworkCallback"}
+EXTERNAL_ROOT_MARKERS = {
+    "ExternalApiMethod",
+    "FrameworkCallback"
+}
 
 
 def callable_marker_names(cfg: nx.DiGraph, callable_id: str) -> set[str]:
@@ -1051,9 +1067,9 @@ def print_missing_return_edges(results: list[dict[str, Any]]) -> None:
     items = [
         r for r in results
         if not r.get("low_signal", True)
-        and (r.get("coverage") or {}).get("is_called", False)
-        and (r.get("returns") or {}).get("has_exits", False)
-        and not (r.get("returns") or {}).get("all_exits_have_returns", False)
+           and (r.get("coverage") or {}).get("is_called", False)
+           and (r.get("returns") or {}).get("has_exits", False)
+           and not (r.get("returns") or {}).get("all_exits_have_returns", False)
     ]
 
     print("\n=== Missing Return Edges ===")

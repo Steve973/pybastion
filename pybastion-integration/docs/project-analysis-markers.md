@@ -6,7 +6,7 @@ Need to add these:
 
 - [ ] ExternalApiMethod
 - [ ] FrameworkCallback
-
+- [ ] CalledThroughAbstraction
 
 ## Overview
 
