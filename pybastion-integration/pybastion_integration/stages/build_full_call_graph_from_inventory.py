@@ -545,32 +545,6 @@ def add_call_and_return_edges(
                 )
                 continue
 
-            external_node_id = f"external::{ei_id}"
-            cfg.add_node(
-                external_node_id,
-                category="external_call",
-                external_kind="unresolved",
-                operation_target=operation_target,
-                called_from=ei_id,
-                callable_id=context.callable_id,
-                callable_fqn=context.callable_fqn,
-            )
-            cfg.add_edge(
-                ei_id,
-                external_node_id,
-                edge_type="call",
-                call_kind="unresolved",
-                operation_target=operation_target,
-            )
-            for return_target in return_targets:
-                cfg.add_edge(
-                    external_node_id,
-                    return_target,
-                    edge_type="return",
-                    return_kind="external",
-                )
-            continue
-
         for candidate in integration_candidates:
             kind = classify_integration_target_kind(candidate)
             target = candidate.get("resolved_target") or candidate.get("target")
@@ -681,39 +655,6 @@ def add_call_and_return_edges(
                     exception_exit_cache=exception_exit_cache,
                 )
                 continue
-
-            external_node_id = f"external::{ei_id}::{kind}::{target or operation_target or 'unknown'}"
-            if not cfg.has_node(external_node_id):
-                cfg.add_node(
-                    external_node_id,
-                    category="external_call",
-                    external_kind=kind,
-                    target=target,
-                    operation_target=operation_target,
-                    signature=signature,
-                    called_from=ei_id,
-                    callable_id=context.callable_id,
-                    callable_fqn=context.callable_fqn,
-                    execution_paths=candidate.get("execution_paths", []),
-                    path_analysis=candidate.get("path_analysis"),
-                )
-            cfg.add_edge(
-                ei_id,
-                external_node_id,
-                edge_type="call",
-                call_kind=kind,
-                target=target,
-                operation_target=operation_target,
-                signature=signature,
-            )
-            for return_target in return_targets:
-                cfg.add_edge(
-                    external_node_id,
-                    return_target,
-                    edge_type="return",
-                    return_kind="external",
-                    original_call_site=ei_id,
-                )
 
 
 def path_exists_exactly(cfg: nx.DiGraph, path: list[str]) -> bool:

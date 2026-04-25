@@ -74,6 +74,10 @@ def _build_if_conditional_targets(
 
 class IfDecomposer(ControlOwnerDecomposer):
     @classmethod
+    def statement_parts(cls, stmt: ast.If, context: DecompositionContext) -> list[StatementPart]:
+        return [StatementPart(stmt.test)]
+
+    @classmethod
     def semantic_eis(
             cls,
             stmt: ast.If,
@@ -236,6 +240,10 @@ class MatchDecomposer(ControlOwnerDecomposer):
 
 class ForDecomposer(ControlOwnerDecomposer):
     @classmethod
+    def statement_parts(cls, stmt: ast.For, context: DecompositionContext) -> list[StatementPart]:
+        return [StatementPart(stmt.iter)]
+
+    @classmethod
     def semantic_eis(
             cls,
             stmt: ast.For,
@@ -316,6 +324,10 @@ class AsyncForDecomposer(ForDecomposer):
 
 
 class WhileDecomposer(ControlOwnerDecomposer):
+    @classmethod
+    def statement_parts(cls, stmt: ast.While, context: DecompositionContext) -> list[StatementPart]:
+        return [StatementPart(stmt.test)]
+
     @classmethod
     def semantic_eis(cls, stmt: ast.While, source_lines: list[str], context: DecompositionContext) -> list[
         DecomposerResult]:

@@ -358,15 +358,6 @@ def resolve_root_symbol(
     if same_unit in ctx.callable_inventory:
         return same_unit, same_unit, "same_unit_local", [], None
 
-    if root == "sort_dict":
-        print("DEBUG root:", root)
-        print("DEBUG unit_fqn:", ctx.unit_fqn)
-        print("DEBUG exact same_unit:", f"{ctx.unit_fqn}.{root}")
-        print(
-            "DEBUG suffix_matches:",
-            [fqn for fqn in ctx.callable_inventory if fqn.endswith(f".{root}")]
-        )
-
     suffix_matches = [
         fqn
         for fqn in ctx.callable_inventory
@@ -511,7 +502,13 @@ def resolve_target_chain(ctx: ResolutionContext, target: str) -> ChainResolution
 
     if resolved_symbol_fqn and len(parts) == 2:
         candidate = f"{resolved_symbol_fqn}.{parts[1]}"
-        kind = "exact" if candidate in ctx.callable_inventory else "normalized"
+
+        if basis == "known_class_object_type":
+            kind = "contract" if candidate in ctx.callable_inventory else "normalized"
+            final_basis = "known_class_object_type"
+        else:
+            kind = "exact" if candidate in ctx.callable_inventory else "normalized"
+            final_basis = basis
 
         if debug:
             debug_print_resolution_state(
@@ -519,7 +516,7 @@ def resolve_target_chain(ctx: ResolutionContext, target: str) -> ChainResolution
                 candidate=candidate,
                 resolved_receiver_type=resolved_symbol_fqn,
                 resolution_kind=kind,
-                resolution_basis=basis,
+                resolution_basis=final_basis,
             )
 
         steps.append(
@@ -537,7 +534,7 @@ def resolve_target_chain(ctx: ResolutionContext, target: str) -> ChainResolution
             resolved_target=candidate,
             resolved_receiver_type=resolved_symbol_fqn,
             resolution_kind=kind,
-            resolution_basis=basis,
+            resolution_basis=final_basis,
             chain_steps=steps,
         )
 

@@ -814,6 +814,7 @@ class AstAnalyzer:
         )
 
         result = resolve_target_chain(ctx, target)
+
         return TargetResolution(
             original_target=result.original_target,
             resolved_target=result.resolved_target,

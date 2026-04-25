@@ -1,5 +1,13 @@
 # Project Analysis Markers Specification
 
+## TODO: Stuff to add
+
+Need to add these:
+
+- [ ] ExternalApiMethod
+- [ ] FrameworkCallback
+
+
 ## Overview
 
 This specification defines comment-based markers for marking functions and
