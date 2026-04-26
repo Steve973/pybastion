@@ -14,7 +14,7 @@ import ast
 import json
 import re
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +31,7 @@ from pybastion_common.models import (
     TypeRef,
     UnitIndex,
     UnitIndexEntry,
+    UnitBindingEntry,
 )
 from pybastion_common.smt_path_checker import filter_feasible_paths
 from pybastion_unit.helpers.chain_resolution import (
@@ -42,10 +43,14 @@ from pybastion_unit.helpers.decorator_processing import (
     has_effect,
     validate_feature_co_occurrences,
 )
-from pybastion_unit.helpers.integration_analysis import build_integration_entries, default_signature
+from pybastion_unit.helpers.integration_analysis import (
+    build_integration_entries,
+    default_signature
+)
 from pybastion_unit.helpers.type_indexing import (
     build_module_index,
-    inspect_unit_types, self_attribute_name,
+    inspect_unit_types,
+    self_attribute_name,
 )
 from pybastion_unit.helpers.type_inference import (
     build_param_type_map_with_defaults,
@@ -53,12 +58,6 @@ from pybastion_unit.helpers.type_inference import (
 )
 
 ENUM_BASES: set[str] = {"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"}
-CALLABLE_ENTRY_KINDS: set[str] = {
-    "unit_function",
-    "method",
-    "nested_function",
-    "module_assignment",
-}
 CLASS_ENTRY_KINDS: set[str] = {"class", "nested_class"}
 
 
@@ -102,6 +101,7 @@ def load_project_index(filepath: Path) -> ProjectIndex:
                 language=unit_payload["language"],
                 source_hash=unit_payload["source_hash"],
                 entries=[UnitIndexEntry(**entry) for entry in unit_payload.get("entries", [])],
+                bindings=[UnitBindingEntry(**entry) for entry in unit_payload.get("bindings", [])],
             )
         )
     return ProjectIndex(source_root=payload["source_root"], units=units)
@@ -352,7 +352,7 @@ def annotate_entry_fqns(
         entry["_fqn"] = ".".join([unit_fqn, *ancestors, name])
 
         child_ancestors = [*ancestors]
-        if kind in {"class", "enum", "method", "function", "assignment"}:
+        if kind in {"class", "enum", "method", "function"}:
             child_ancestors.append(name)
 
         children = entry.get("children", []) or []
@@ -392,8 +392,6 @@ class AstAnalyzer:
     def analyze_entry(self, entry: UnitIndexEntry, node: ast.AST) -> dict[str, Any]:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             return self._analyze_callable(entry, node)
-        if isinstance(node, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-            return self._analyze_assignment(entry, node)
         if isinstance(node, ast.ClassDef):
             return self._analyze_class(entry, node)
         return {
@@ -478,32 +476,6 @@ class AstAnalyzer:
             hierarchy_info(payload)["is_contract_method"] = True
 
         payload["_known_types"] = known_types
-        return payload
-
-    def _analyze_assignment(
-            self,
-            entry: UnitIndexEntry,
-            node: ast.Assign | ast.AnnAssign | ast.AugAssign,
-    ) -> dict[str, Any]:
-        local_types = self.build_local_type_map(node)
-
-        payload = CallableEntry(
-            id=entry.id,
-            kind="assignment",
-            name=entry.name,
-            line_start=entry.lineno,
-            line_end=entry.end_lineno,
-            signature_info=CallableSignatureInfo(
-                visibility=self._extract_visibility(entry.name),
-            ),
-            hierarchy_info=CallableHierarchyInfo(),
-            analysis_info=CallableAnalysisInfo(
-                integration_candidates=[],
-                needs_callable_analysis=True,
-            ),
-        ).to_dict()
-
-        payload["_known_types"] = local_types
         return payload
 
     def build_callable_local_type_map(
@@ -639,47 +611,25 @@ class AstAnalyzer:
 
         return local_types
 
-    def build_assignment_local_type_map(
-            self,
-            node: ast.Assign | ast.AnnAssign | ast.AugAssign,
-    ) -> dict[str, TypeRef]:
-        local_types: dict[str, TypeRef] = {}
+    def build_unit_binding_type_map(self, unit: UnitIndex) -> dict[str, TypeRef]:
+        result: dict[str, TypeRef] = {}
 
-        match node:
-            case ast.AnnAssign(target=ast.Name() as target, annotation=annotation):
-                type_ref = TypeRef.from_annotation_ast(annotation)
-                if type_ref is not None:
-                    local_types[target.id] = type_ref
+        for binding in unit.bindings:
+            if binding.annotation:
+                try:
+                    result[binding.name] = TypeRef.from_annotation_string(binding.annotation)
+                except Exception:
+                    pass
 
-            case ast.Assign(targets=[ast.Name() as target], value=value):
-                if isinstance(value, ast.Call):
-                    func = value.func
-
-                    if isinstance(func, ast.Name):
-                        inferred = self.local_return_types.get(func.id)
-                        if inferred is not None:
-                            local_types[target.id] = inferred
-
-                    elif isinstance(func, ast.Attribute):
-                        inferred = self.local_return_types.get(func.attr)
-                        if inferred is not None:
-                            local_types[target.id] = inferred
-
-            case ast.AugAssign(target=ast.Name()):
-                pass
-
-        return {k: v for k, v in local_types.items() if v is not None}
+        return result
 
     def build_local_type_map(
             self,
-            node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Assign | ast.AnnAssign | ast.AugAssign,
+            node: ast.FunctionDef | ast.AsyncFunctionDef,
     ) -> dict[str, TypeRef]:
         match node:
             case ast.FunctionDef() | ast.AsyncFunctionDef():
                 return self.build_callable_local_type_map(node)
-
-            case ast.Assign() | ast.AnnAssign() | ast.AugAssign():
-                return self.build_assignment_local_type_map(node)
 
             case _:
                 return {}
@@ -1181,16 +1131,13 @@ def process_unit(
         project_contract_classes=project_contract_classes,
     )
 
+    unit_binding_types = analyzer.build_unit_binding_type_map(unit)
+
     entries_by_id: dict[str, dict[str, Any]] = {}
     for entry in unit.entries:
-        if entry.kind in CLASS_ENTRY_KINDS:
-            node = ast_index.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
-        elif entry.kind == "module_assignment":
-            node = ast_index.assignment_nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
-        else:
-            node = ast_index.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+        node = ast_index.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
 
-        if entry.kind in {"unit_function", "method", "nested_function", "module_assignment"}:
+        if entry.kind in {"unit_function", "method", "nested_function"}:
             analyzer.current_callable_fqn = entry.fully_qualified_name
         else:
             analyzer.current_callable_fqn = None
@@ -1219,12 +1166,7 @@ def process_unit(
         branches = [Branch.from_dict(item) for item in branches_payload]
         known_types: dict[str, TypeRef] = payload.pop("_known_types", {}) or {}
 
-        if entry.kind in CLASS_ENTRY_KINDS:
-            node = ast_index.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
-        elif entry.kind == "module_assignment":
-            node = ast_index.assignment_nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
-        else:
-            node = ast_index.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+        node = ast_index.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
 
         analyzer.current_callable_fqn = entry.fully_qualified_name
 
@@ -1232,7 +1174,11 @@ def process_unit(
             local_types: dict[str, TypeRef] = {}
         else:
             local_types = analyzer.build_local_type_map(node)
-        merged_known_types: dict[str, TypeRef] = {**known_types, **local_types}
+        merged_known_types: dict[str, TypeRef] = {
+            **unit_binding_types,
+            **known_types,
+            **local_types
+        }
 
         if entry.fully_qualified_name == "project_resolution_engine.internal.util.multiformat.MultiformatSerializableMixin.flat_summary":
             print("KNOWN TYPES FOR", entry.fully_qualified_name)
@@ -1279,6 +1225,7 @@ def process_unit(
         "language": unit.language,
         "type_hierarchy": class_hierarchy,
         "contract_methods": contract_methods,
+        "bindings": [asdict(binding) for binding in unit.bindings],
         "entries": roots,
         "summary": {
             "total_entries": count_all_entries(roots),
@@ -1286,7 +1233,7 @@ def process_unit(
             "enums": kind_counts.get("enum", 0),
             "methods": kind_counts.get("method", 0),
             "functions": kind_counts.get("function", 0),
-            "assignments": kind_counts.get("assignment", 0),
+            "bindings": len(unit.bindings),
         },
     }
 

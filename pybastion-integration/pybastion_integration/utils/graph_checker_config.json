@@ -1,0 +1,132 @@
+{
+  "version": 1,
+  "marker_sets": {
+    "external_method_decorators": [
+      "ExternalApiMethod",
+      "FrameworkCallback"
+    ],
+    "low_signal_decorators": [
+      "property",
+      "FrameworkInvokedMethod",
+      "PermitUnused",
+      "CalledThroughAbstraction"
+    ],
+    "abstraction_dispatch_decorators": [
+    ],
+    "collapsible_operation_decorators": [
+      "MechanicalOperation",
+      "UtilityOperation"
+    ]
+  },
+  "name_sets": {
+    "low_signal_dunder_names": [
+      "__lt__",
+      "__le__",
+      "__gt__",
+      "__ge__",
+      "__eq__",
+      "__ne__",
+      "__hash__",
+      "__repr__",
+      "__str__",
+      "__bool__",
+      "__len__",
+      "__iter__",
+      "__next__",
+      "__contains__",
+      "__init__",
+      "__setattr__",
+      "__post_init__"
+    ]
+  },
+  "sections": [
+    {
+      "id": "missing_return_edges",
+      "report_key": "missing_return_edges",
+      "section_header": "=== Missing Return Edges ===",
+      "description": "Called callables whose exit or collapsed return path does not return to the caller continuation.",
+      "group_by": "module",
+      "summary_code": "r",
+      "include_when": {
+        "is_called": true,
+        "has_missing_return_edges": true,
+        "low_signal": false
+      }
+    },
+    {
+      "id": "private_helper_suspects",
+      "report_key": "private_helper_suspects",
+      "section_header": "=== Private Helper Suspects ===",
+      "description": "Underscored same-unit helpers that appear referenced locally but still have no graph call edge.",
+      "group_by": "module",
+      "summary_code": "p",
+      "include_when": {
+        "private_helper_suspect": true
+      }
+    },
+    {
+      "id": "same_unit_reference_suspects",
+      "report_key": "same_unit_reference_suspects",
+      "section_header": "=== Same Unit Reference Suspects ===",
+      "description": "Callables with same-unit textual/control-flow references but no graph call edge.",
+      "group_by": "module",
+      "summary_code": "s",
+      "include_when": {
+        "same_unit_reference_suspect": true
+      }
+    },
+    {
+      "id": "called_through_abstraction",
+      "report_key": "called_through_abstraction",
+      "section_header": "=== Called Through Abstraction ===",
+      "description": "Callables marked as dispatchable through abstraction, without direct concrete call proof.",
+      "group_by": "module",
+      "summary_code": "a",
+      "include_when": {
+        "called_through_abstraction": true,
+        "is_called": false,
+        "externally_reachable": false
+      }
+    },
+    {
+      "id": "general_never_called",
+      "report_key": "general_never_called",
+      "section_header": "=== General Never-Called ===",
+      "description": "Remaining non-low-signal never-called callables after more specific suspect buckets are removed.",
+      "group_by": "module",
+      "summary_code": "g",
+      "include_when": {
+        "is_called": false,
+        "externally_reachable": false,
+        "low_signal": false,
+        "same_unit_reference_suspect": false,
+        "private_helper_suspect": false,
+        "called_through_abstraction": false
+      }
+    },
+    {
+      "id": "low_signal",
+      "report_key": "low_signal",
+      "section_header": "=== Low-Signal Bins ===",
+      "description": "Low-signal callables grouped by low-signal reason.",
+      "group_by": "low_signal_category",
+      "secondary_group_by": "module",
+      "summary_code": "l",
+      "include_when": {
+        "low_signal": true
+      }
+    },
+    {
+      "id": "structural_health",
+      "report_key": "structural_health",
+      "summary_code": "h",
+      "section_header": "=== Structural Health ===",
+      "description": "Structural validation and callable-level cycle checks for the graph.",
+      "include_in_console_summary": true,
+      "source": {
+        "kind": "analysis",
+        "analysis_id": "structural_health"
+      }
+    }
+  ]
+}

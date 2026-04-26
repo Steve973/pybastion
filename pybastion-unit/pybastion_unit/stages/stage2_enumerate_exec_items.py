@@ -27,7 +27,7 @@ from typing import Any
 import yaml
 
 from pybastion_common.models import Branch, StatementOutcome, ConditionalTarget, DisruptiveOutcome, OwnerInfo, \
-    ProjectIndex, UnitIndex, UnitIndexEntry
+    ProjectIndex, UnitIndex, UnitIndexEntry, UnitBindingEntry
 from pybastion_unit.helpers.constraint_metadata_helper import (
     enrich_outcome_with_constraint,
     populate_constraint_relationships,
@@ -50,7 +50,6 @@ ANALYZABLE_ENTRY_KINDS: set[str] = {
     "nested_function",
     "class",
     "nested_class",
-    "module_assignment",
 }
 IMPLICIT_RETURN_EI_NUM = 9999
 
@@ -65,6 +64,7 @@ def load_project_index(filepath: Path) -> ProjectIndex:
     units: list[UnitIndex] = []
     for unit_payload in payload.get("units", []):
         entries = [UnitIndexEntry(**entry) for entry in unit_payload.get("entries", [])]
+        bindings = [UnitBindingEntry(**binding) for binding in unit_payload.get("bindings", [])]
         units.append(
             UnitIndex(
                 unit_id=unit_payload["unit_id"],
@@ -73,6 +73,7 @@ def load_project_index(filepath: Path) -> ProjectIndex:
                 language=unit_payload["language"],
                 source_hash=unit_payload["source_hash"],
                 entries=entries,
+                bindings=bindings,
             )
         )
     return ProjectIndex(source_root=payload["source_root"], units=units)
@@ -736,75 +737,6 @@ def enumerate_function_eis(
     )
 
 
-def enumerate_assignment_eis(
-        node: ast.Assign | ast.AnnAssign | ast.AugAssign,
-        source_lines: list[str],
-        callable_id: str,
-        target_name: str,
-) -> FunctionResult | None:
-    value = getattr(node, "value", None)
-    if not isinstance(value, ast.Call):
-        return None
-
-    branches: list[Branch] = []
-    ei_counter = 0
-
-    outcomes: list[DecomposerResult] = decompose_statement(
-        node,
-        source_lines,
-        DecompositionContext(
-            next_stmt_lines=None,
-        ),
-    )
-
-    for decomposed in outcomes or []:
-        ei_counter += 1
-        ei_id = generate_ei_id(callable_id, ei_counter)
-        skips_lines: list[int] = []
-        if decomposed.statement_outcome is not None:
-            skips_lines = decomposed.statement_outcome.skips_lines
-
-        condition, result, constraint = enrich_outcome_with_constraint(
-            decomposed.description,
-            decomposed.call_node,
-            node,
-            ei_id,
-            node.lineno,
-            skips_lines,
-        )
-        branches.append(
-            Branch(
-                id=ei_id,
-                line=node.lineno,
-                condition=condition,
-                description=decomposed.description,
-                constraint=constraint,
-                stmt_type=type(node).__name__,
-                statement_outcome=decomposed.statement_outcome,
-                conditional_targets=decomposed.conditional_targets,
-                disruptive_outcomes=decomposed.disruptive_outcomes,
-            )
-        )
-
-    _resolve_skip_eis(branches)
-    for branch in branches:
-        _resolve_branch_target_line(branches, branch)
-    _resolve_conditional_targets(branches)
-
-    _redirect_explicit_implicit_returns(branches, callable_id)
-    _assign_fallthrough_next_eis(branches, callable_id)
-    _append_implicit_return_sink_if_referenced(branches, callable_id, node.end_lineno)
-
-    function_result = FunctionResult(
-        name=target_name,
-        line_start=node.lineno,
-        line_end=node.end_lineno,
-        branches=branches,
-    )
-    populate_constraint_relationships(branches)
-    return function_result
-
-
 def _is_enum_class(node: ast.ClassDef) -> bool:
     for base in node.bases:
         if isinstance(base, ast.Name) and base.id in ENUM_BASES:
@@ -835,17 +767,6 @@ def enumerate_unit_from_index(
         if entry.kind not in ANALYZABLE_ENTRY_KINDS:
             continue
         if not _matches_target(entry, function_name):
-            continue
-
-        if entry.kind == "module_assignment":
-            node: ast.Assign | ast.AnnAssign | ast.AugAssign | None = ast_index.assignment_nodes_by_fqn_and_line.get(
-                (entry.fully_qualified_name, entry.lineno)
-            )
-            if node is None:
-                continue
-            assignment_result = enumerate_assignment_eis(node, source_lines, entry.id, entry.name)
-            if assignment_result is not None:
-                results.append(assignment_result)
             continue
 
         node = ast_index.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))

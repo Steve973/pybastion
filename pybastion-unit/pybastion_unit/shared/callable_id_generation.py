@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import re
 
-EI_ASSIGN_CHAR: str = "A"
+EI_BINDING_CHAR: str = "B"
 EI_CLASS_CHAR: str = "C"
 EI_EX_ITEM_CHAR: str = "E"
 EI_FUNC_CHAR: str = "F"
@@ -31,9 +31,9 @@ def generate_unit_id(fully_qualified_name: str) -> str:
     return f"{EI_UNIT_CHAR}{hash_obj.hexdigest()[:10].upper()}"
 
 
-def generate_assignment_id(unit_id: str, assign_num: int) -> str:
-    """Generate an assignment ID."""
-    return f"{unit_id}{EI_ID_DELIM}{EI_ASSIGN_CHAR}{assign_num:03d}"
+def generate_binding_id(unit_id: str, binding_num: int) -> str:
+    """Generate a binding ID."""
+    return f"{unit_id}{EI_ID_DELIM}{EI_BINDING_CHAR}{binding_num:03d}"
 
 
 def generate_class_id(unit_id: str, class_num: int) -> str:

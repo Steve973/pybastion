@@ -26,7 +26,7 @@ from typing import Any
 import networkx as nx
 import yaml
 
-CALLABLE_KINDS: set[str] = {"function", "method", "assignment"}
+CALLABLE_KINDS: set[str] = {"function", "method"}
 SUCCESS_EXIT_TERMINATORS: set[str] = {"return", "implicit-return", "yield"}
 EXCEPTION_EXIT_TERMINATORS: set[str] = {"raise", "exception"}
 
@@ -98,7 +98,7 @@ def discover_inventory_files(inventories_root: Path) -> list[Path]:
 
 
 def normalize_kind_for_callable(kind: str) -> str:
-    if kind in {"function", "method", "assignment"}:
+    if kind in {"function", "method"}:
         return kind
     return kind
 

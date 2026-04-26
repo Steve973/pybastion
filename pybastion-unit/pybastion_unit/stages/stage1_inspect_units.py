@@ -28,10 +28,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
-from pybastion_common.models import ProjectIndex, TypeRef, UnitIndex, UnitIndexEntry
+from pybastion_common.models import ProjectIndex, TypeRef, UnitIndex, UnitIndexEntry, UnitBindingEntry
 from pybastion_unit.helpers.type_indexing import inspect_unit_types
 from pybastion_unit.shared.callable_id_generation import (
-    generate_assignment_id,
+    generate_binding_id,
     generate_class_id,
     generate_function_id,
     generate_method_id,
@@ -50,7 +50,6 @@ ScopeKind = Literal[
 ]
 
 EntryKind = Literal[
-    "module_assignment",
     "class",
     "nested_class",
     "unit_function",
@@ -81,7 +80,7 @@ def hash_source(source: str) -> str:
 
 
 def serialize_field_registry(
-    registry: dict[str, dict[str, TypeRef]],
+        registry: dict[str, dict[str, TypeRef]],
 ) -> dict[str, dict[str, dict[str, object]]]:
     return {
         class_fqn: {
@@ -104,16 +103,13 @@ class UnitIndexVisitor(ast.NodeVisitor):
         self.unit_id = unit_id
         self.module_fqn = module_fqn
         self.entries: list[UnitIndexEntry] = []
+        self.bindings: list[UnitBindingEntry] = []
         self.entry_by_id: dict[str, UnitIndexEntry] = {}
-
-        # Legacy flat mapping is kept because it is cheap to derive and useful
-        # during migration.
-        self.mappings: dict[str, str] = {}
 
         # Global top-level counters.
         self.function_counter = 0
         self.class_counter = 0
-        self.assignment_counter = 0
+        self.binding_counter = 0
 
         # Per-parent counters.
         self.method_counters: dict[str, int] = {}
@@ -134,18 +130,18 @@ class UnitIndexVisitor(ast.NodeVisitor):
         return current
 
     def add_entry(
-        self,
-        *,
-        entry_id: str,
-        kind: EntryKind,
-        name: str,
-        fqn: str,
-        parent_id: str | None,
-        owner_id: str,
-        lineno: int,
-        end_lineno: int,
-        ordinal_within_parent: int,
-        is_async: bool = False,
+            self,
+            *,
+            entry_id: str,
+            kind: EntryKind,
+            name: str,
+            fqn: str,
+            parent_id: str | None,
+            owner_id: str,
+            lineno: int,
+            end_lineno: int,
+            ordinal_within_parent: int,
+            is_async: bool = False,
     ) -> None:
         entry = UnitIndexEntry(
             id=entry_id,
@@ -161,77 +157,105 @@ class UnitIndexVisitor(ast.NodeVisitor):
         )
         self.entries.append(entry)
         self.entry_by_id[entry_id] = entry
-        self.mappings[fqn] = entry_id
 
         if parent_id and parent_id in self.entry_by_id:
             self.entry_by_id[parent_id].child_ids.append(entry_id)
+
+    def next_binding_id(self) -> str:
+        self.binding_counter += 1
+        return generate_binding_id(self.unit_id, self.binding_counter)
+
+    def classify_unit_binding_value(self, value: ast.AST | None) -> str | None:
+        if value is None:
+            return None
+
+        match value:
+            case ast.Call(func=ast.Name(id="TypeVar")):
+                return "typevar"
+            case ast.Call():
+                return "call"
+            case ast.Lambda():
+                return "lambda"
+            case ast.Dict():
+                return "dict_literal"
+            case ast.List() | ast.Tuple() | ast.Set():
+                return "collection_literal"
+            case ast.Constant():
+                return "literal"
+            case ast.Name() | ast.Attribute() | ast.Subscript():
+                return "alias_or_reference"
+            case _:
+                return type(value).__name__
+
+    def add_unit_binding(
+            self,
+            *,
+            name: str,
+            binding_kind: str,
+            node: ast.Assign | ast.AnnAssign | ast.AugAssign,
+            annotation: str | None,
+            value: ast.AST | None,
+    ) -> None:
+        binding_id = self.next_binding_id()
+        fqn = f"{self.module_fqn}.{name}"
+
+        binding = UnitBindingEntry(
+            id=binding_id,
+            kind="unit_binding",
+            binding_kind=binding_kind,
+            name=name,
+            fully_qualified_name=fqn,
+            parent_id=self.unit_id,
+            owner_id=self.unit_id,
+            lineno=node.lineno,
+            end_lineno=getattr(node, "end_lineno", node.lineno),
+            ordinal_within_unit=self.next_ordinal(self.unit_id),
+            annotation=annotation,
+            value_kind=self.classify_unit_binding_value(value),
+            value_expr=ast.unparse(value).strip() if value is not None else None,
+        )
+
+        self.bindings.append(binding)
 
     def visit_Assign(self, node: ast.Assign) -> None:
         scope = self.current_scope()
         if scope.kind == "unit":
             for target in node.targets:
                 if isinstance(target, ast.Name):
-                    self.assignment_counter += 1
-                    assignment_id = generate_assignment_id(
-                        self.unit_id,
-                        self.assignment_counter,
-                    )
-                    fqn = f"{self.module_fqn}.{target.id}"
-                    self.add_entry(
-                        entry_id=assignment_id,
-                        kind="module_assignment",
+                    self.add_unit_binding(
                         name=target.id,
-                        fqn=fqn,
-                        parent_id=self.unit_id,
-                        owner_id=self.unit_id,
-                        lineno=node.lineno,
-                        end_lineno=getattr(node, "end_lineno", node.lineno),
-                        ordinal_within_parent=self.next_ordinal(self.unit_id),
+                        binding_kind="assignment",
+                        node=node,
+                        annotation=None,
+                        value=node.value,
                     )
+
         self.generic_visit(node)
 
     def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
         scope = self.current_scope()
         if scope.kind == "unit" and isinstance(node.target, ast.Name):
-            self.assignment_counter += 1
-            assignment_id = generate_assignment_id(
-                self.unit_id,
-                self.assignment_counter,
-            )
-            fqn = f"{self.module_fqn}.{node.target.id}"
-            self.add_entry(
-                entry_id=assignment_id,
-                kind="module_assignment",
+            self.add_unit_binding(
                 name=node.target.id,
-                fqn=fqn,
-                parent_id=self.unit_id,
-                owner_id=self.unit_id,
-                lineno=node.lineno,
-                end_lineno=getattr(node, "end_lineno", node.lineno),
-                ordinal_within_parent=self.next_ordinal(self.unit_id),
+                binding_kind="annotated_assignment",
+                node=node,
+                annotation=ast.unparse(node.annotation).strip(),
+                value=node.value,
             )
+
         self.generic_visit(node)
 
     def visit_AugAssign(self, node: ast.AugAssign) -> None:
         scope = self.current_scope()
         if scope.kind == "unit" and isinstance(node.target, ast.Name):
-            self.assignment_counter += 1
-            assignment_id = generate_assignment_id(
-                self.unit_id,
-                self.assignment_counter,
-            )
-            fqn = f"{self.module_fqn}.{node.target.id}"
-            self.add_entry(
-                entry_id=assignment_id,
-                kind="module_assignment",
+            self.add_unit_binding(
                 name=node.target.id,
-                fqn=fqn,
-                parent_id=self.unit_id,
-                owner_id=self.unit_id,
-                lineno=node.lineno,
-                end_lineno=getattr(node, "end_lineno", node.lineno),
-                ordinal_within_parent=self.next_ordinal(self.unit_id),
+                binding_kind="augmented_assignment",
+                node=node,
+                annotation=None,
+                value=node.value,
             )
+
         self.generic_visit(node)
 
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
@@ -245,7 +269,7 @@ class UnitIndexVisitor(ast.NodeVisitor):
             kind: EntryKind = "class"
         else:
             self.nested_class_counters[parent_id] = (
-                self.nested_class_counters.get(parent_id, 0) + 1
+                    self.nested_class_counters.get(parent_id, 0) + 1
             )
             class_id = generate_nested_class_id(
                 parent_id,
@@ -286,10 +310,10 @@ class UnitIndexVisitor(ast.NodeVisitor):
         self._visit_function_like(node, is_async=True)
 
     def _visit_function_like(
-        self,
-        node: ast.FunctionDef | ast.AsyncFunctionDef,
-        *,
-        is_async: bool,
+            self,
+            node: ast.FunctionDef | ast.AsyncFunctionDef,
+            *,
+            is_async: bool,
     ) -> None:
         parent_scope = self.current_scope()
         parent_id = parent_scope.id
@@ -311,7 +335,7 @@ class UnitIndexVisitor(ast.NodeVisitor):
             kind = "method"
         else:
             self.nested_function_counters[parent_id] = (
-                self.nested_function_counters.get(parent_id, 0) + 1
+                    self.nested_function_counters.get(parent_id, 0) + 1
             )
             callable_id = generate_nested_function_id(
                 parent_id,
@@ -358,10 +382,10 @@ class UnitIndexVisitor(ast.NodeVisitor):
 
 
 def process_file(
-    filepath: Path,
-    source_root: Path,
-    project_symbol_fqns: set[str] | None = None,
-) -> tuple[UnitIndex, dict[str, str], dict[str, dict[str, dict[str, object]]]] | None:
+        filepath: Path,
+        source_root: Path,
+        project_symbol_fqns: set[str] | None = None,
+) -> tuple[UnitIndex, dict[str, dict[str, dict[str, object]]]] | None:
     """Parse one Python file and build a structured unit index plus class field metadata."""
     try:
         source = filepath.read_text(encoding="utf-8")
@@ -386,6 +410,7 @@ def process_file(
         language="python",
         source_hash=hash_source(source),
         entries=visitor.entries,
+        bindings=visitor.bindings,
     )
 
     unit_types = inspect_unit_types(
@@ -396,12 +421,12 @@ def process_file(
     )
 
     field_registry = serialize_field_registry(unit_types.field_types_by_class)
-    return unit_index, visitor.mappings, field_registry
+    return unit_index, field_registry
 
 
 def build_project_index(
-    source_root: Path,
-) -> tuple[ProjectIndex, dict[str, str], dict[str, dict[str, dict[str, object]]]]:
+        source_root: Path,
+) -> tuple[ProjectIndex, dict[str, dict[str, dict[str, object]]]]:
     """Build a project-wide index for all Python units under the source root."""
     py_files = sorted(source_root.rglob("*.py"))
     py_files = [path for path in py_files if path.name != "__init__.py"]
@@ -415,7 +440,6 @@ def build_project_index(
         project_symbol_fqns.add(module_fqn)
 
     units: list[UnitIndex] = []
-    all_mappings: dict[str, str] = {}
     class_field_registry: dict[str, dict[str, dict[str, object]]] = {}
 
     for py_file in py_files:
@@ -427,22 +451,21 @@ def build_project_index(
         if result is None:
             continue
 
-        unit_index, mappings, unit_field_registry = result
+        unit_index, unit_field_registry = result
         units.append(unit_index)
-        all_mappings.update(mappings)
         class_field_registry.update(unit_field_registry)
 
         for entry in unit_index.entries:
             project_symbol_fqns.add(entry.fully_qualified_name)
 
     project_index = ProjectIndex(source_root=str(source_root), units=units)
-    return project_index, all_mappings, class_field_registry
+    return project_index, class_field_registry
 
 
 def write_project_index(
-    output_path: Path,
-    project_index: ProjectIndex,
-    class_field_registry: dict[str, dict[str, dict[str, object]]],
+        output_path: Path,
+        project_index: ProjectIndex,
+        class_field_registry: dict[str, dict[str, dict[str, object]]],
 ) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -467,9 +490,8 @@ def parse_args() -> argparse.Namespace:
         description="Build a deterministic Python unit index",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
+Example:
   %(prog)s src --output dist/inspect/unit-index.json
-  %(prog)s src --output dist/inspect/unit-index.json --legacy-output dist/inspect/callable-inventory.txt
         """,
     )
     parser.add_argument(
@@ -483,11 +505,6 @@ Examples:
         type=Path,
         required=True,
         help="Output JSON file for the structured unit index",
-    )
-    parser.add_argument(
-        "--legacy-output",
-        type=Path,
-        help="Optional legacy flat inventory output in <fqn>:<id> format",
     )
     return parser.parse_args()
 
@@ -504,22 +521,18 @@ def main() -> int:
         return 1
 
     try:
-        project_index, mappings, class_field_registry = build_project_index(source_root)
+        project_index, class_field_registry = build_project_index(source_root)
     except ValueError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
     write_project_index(args.output, project_index, class_field_registry)
-    if args.legacy_output:
-        write_legacy_inventory(args.legacy_output, mappings)
 
     total_entries = sum(len(unit.entries) for unit in project_index.units)
     print(f"Indexed {len(project_index.units)} Python units")
     print(f"Discovered {total_entries} indexed entries")
     print(f"Discovered {len(class_field_registry)} classes with field metadata")
     print(f"Wrote structured unit index to {args.output}")
-    if args.legacy_output:
-        print(f"Wrote legacy flat inventory to {args.legacy_output}")
     return 0
 
 

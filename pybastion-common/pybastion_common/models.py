@@ -22,6 +22,22 @@ from pybastion_unit.shared.callable_id_generation import ei_id_to_integration_id
 
 
 @dataclass(slots=True)
+class UnitBindingEntry:
+    id: str
+    kind: str
+    binding_kind: str
+    name: str
+    fully_qualified_name: str
+    parent_id: str
+    owner_id: str
+    lineno: int
+    end_lineno: int
+    ordinal_within_unit: int
+    annotation: str | None = None
+    value_kind: str | None = None
+    value_expr: str | None = None
+
+@dataclass(slots=True)
 class UnitIndexEntry:
     id: str
     kind: str
@@ -44,6 +60,7 @@ class UnitIndex:
     language: str
     source_hash: str
     entries: list[UnitIndexEntry]
+    bindings: list[UnitBindingEntry] = field(default_factory=list)
 
 
 @dataclass(slots=True)
