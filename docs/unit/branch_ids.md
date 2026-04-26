@@ -27,6 +27,7 @@ Use the following abbreviations:
 * `Fxxx` = unit level function ID (def at file scope)
 * `Mxxx` = method ID (def inside a class)
 * `Exxxx` = execution item ID
+* `Bxxx` = unit scoped binding ID
 
 ### Fully qualified IDs only
 
@@ -38,12 +39,24 @@ ID format is always fully qualified (scoped). Do not use unscoped IDs like
 * Use `UABCDEF1234_C001_M001_E0001, UABCDEF1234_C001_M001_E0002, ..., UABCDEF1234_C002_M003_E0001, ...`
   for class methods.
 
+### Notable Exception: Binding Enumeration
+
+A binding ID identifies a name bound at unit scope that is useful for name,
+type, value, receiver, alias, or integration resolution. A binding is not an
+execution item and does not own execution item IDs. Therefore, this is not a
+branch ID.
+
+Binding enumeration is covered here because bindings are deterministically
+numbered during the unit indexing phase alongside classes, callables, and other
+unit-scoped artifacts. Later analysis phases may reference those binding IDs for
+resolution, traceability, and inventory consistency.
+
 ### Numbering scheme per ledger
 
 #### Units (File, Module, etc.)
 
 * The unit is always `Uxxxxxxxxxx` where `xxxxxxxxxx` is the first 10 characters
-  SHA-256 of the fully qualified name of the file.
+  SHA-256 of the fully qualified file name.
 * The unit ID prefixes are used as the prefix for all IDs within the unit.
 * This ensures all unit level function branch IDs are fully namespaced and
   unique.
@@ -71,6 +84,23 @@ ID format is always fully qualified (scoped). Do not use unscoped IDs like
 * Execution items are numbered starting at `E0001` within each function or
   method.
 * Assigned in order of appearance in the code.
+
+#### Unit Scoped Bindings
+
+* Unit-scoped bindings are numbered starting at `B001` within the unit
+  (`Uxxxxxxxxxx`).
+* Assigned in file order, top to bottom.
+* Unit-scoped bindings represent names bound at compilation-unit scope that are
+  not themselves callable control-flow owners.
+* Examples include Python module-level assignments, annotated assignments,
+  TypeVars, aliases, constants, compiled regexes, and maps of callable values.
+* Unit-scoped bindings are represented under the unit's `bindings` collection,
+  not under `entries`.
+* Unit-scoped bindings do not receive `E####` execution item IDs.
+* Unit-scoped bindings do not participate in uncalled callable analysis.
+* Uses of a binding may appear in callable-owned execution items. For example,
+  `_SHA256_RE` is a binding, while `_SHA256_RE.match(value)` inside a function
+  is an operation represented by an EI in that function.
 
 #### Nesting
 
@@ -115,7 +145,20 @@ When to use nested IDs:
 * Leading zeros are used to maintain a consistent length.
 * Leading zeros are mandatory.
 
-#### Composition order and grammar
+#### Composition order and grammar for unit-scoped bindings
+
+Binding IDs are composed separately from callable/EI IDs:
+
+* Unit binding: `<unit_id>_<binding_id>`
+
+Examples:
+
+* First unit scoped binding: `U1234567890_B001`.
+* Second unit scoped binding: `U1234567890_B002`.
+
+Binding IDs must never be used as callable IDs or EI IDs.
+
+#### Composition order and grammar for callables/EIs
 
 IDs must be composed in this order:
 
@@ -129,23 +172,29 @@ IDs must be composed in this order:
 
 Grammar, where a preceding question mark indicates optional:
 
-* Unit level: `<unit_id>_<function_id><.<?nested_function_id>>_<execution_item_id>`
-* Class level: `<unit_id>_<class_id><.<?nested_class_id>>_<method_id><.<?nested_function_id>>_<execution_item_id>`
+* Unit level callable EI:
+  `<unit_id>_<function_id><.<?nested_function_id>>_<execution_item_id>`
+* Class level method EI:
+  `<unit_id>_<class_id><.<?nested_class_id>>_<method_id><.<?nested_function_id>>_<execution_item_id>`
 
-Full examples:
+Examples:
 
-* First execution item of first unit function: `U1234567890_F001_E0001`.
+* First execution item of first unit function:
+  `U1234567890_F001_E0001`
 * First execution item of first nested def inside first unit function:
-  `U1234567890_F001.F002_E0001`.
-* First execution item of first method in first class: `U1234567890_C001_M001_E0001`.
+  `U1234567890_F001.F002_E0001`
+* First execution item of first method in first class:
+  `U1234567890_C001_M001_E0001`
 * First execution item of first nested def inside first method of first nested class:
-  `U1234567890_C001.C002_M001.F001_E0001`.
+  `U1234567890_C001.C002_M001.F001_E0001`
 
-This ensures that:
+### Takeaways
 
-* all branch IDs will be unique.
-* IDs deterministically indicate the exact location in the code.
+This detailed process ensures that:
+
+* all branch and binding IDs are unique.
+* IDs deterministically indicate the relevant location or binding in the code.
 * edits to one function or method do not force renumbering across the entire
-  ledger.
+  artifact.
 
-Apply this scheme consistently across the entire unit ledger.
+Apply this scheme consistently across the entire process.

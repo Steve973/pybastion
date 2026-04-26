@@ -1,26 +1,26 @@
 # Project Analysis Markers Specification
 
-## TODO: Stuff to add
-
-Need to add these:
-
-- [ ] ExternalApiMethod
-- [ ] FrameworkCallback
-- [ ] CalledThroughAbstraction
-
 ## Overview
 
 This specification defines comment-based markers for marking functions and
-methods with metadata that controls integration flow tracing and feature flow
-identification. These markers serve two primary purposes:
+methods with metadata that controls integration flow tracing, feature flow
+identification, and call graph interpretation. These markers serve three primary
+purposes:
 
 1. **Operation Markers** – Denote mechanical and utility operations to be
-   excluded from flow tracing (replaced with mocks/fixtures)
+   excluded from flow tracing or represented with mocks/fixtures
 2. **Feature Flow Markers** – Define boundaries, waypoints, branching, and
    convergence points for end-to-end feature testing
+3. **Reachability Markers** – Identify callables that are invoked externally,
+   by frameworks, or through abstraction/dispatch mechanisms that may not appear
+   as ordinary direct calls in the project call graph
 
 All markers use a pipe-delimited syntax embedded in comments immediately
 preceding the function or method definition.
+
+Note that project analysis markers are captured during the unit analysis phase,
+along with any other decorator. Their usage, however, pertains to the
+integration analysis phase.
 
 ## Marker Syntax
 
@@ -195,6 +195,95 @@ def process_payment(amount: float, method: str) -> PaymentResult:
     log_transaction(payment.id)  # Flow stops at this call (marked)
     result = validate_payment(amount, method)  # Flow continues
     return finalize_transaction(result)  # Flow continues
+```
+
+## Reachability Markers
+
+Reachability markers describe callables that may be executed even when they do
+not appear to have a normal direct caller in the project call graph. These
+markers are used by diagnostics and test planning to avoid misclassifying
+framework entry points, externally invoked API methods, and abstraction-based
+dispatch targets as unused or suspicious.
+
+Reachability markers do not exclude a callable from flow tracing by default.
+They explain how the callable is reached.
+
+### ExternalApiMethod
+
+Marks a callable as externally reachable through an API boundary. This is useful
+for public entry points that are invoked by clients, CLIs, services, plugins, or
+other systems outside the analyzed project graph.
+
+**Format:**
+
+```text
+:: ExternalApiMethod | comment = Human readable description
+```
+
+**Fields:**
+
+| Field    | Required | Description                |
+|----------|----------|----------------------------|
+| comment  | No       | Human-readable description |
+
+**Example:**
+
+```python
+# :: ExternalApiMethod | comment = CLI entry point for dependency resolution
+def resolve_command(args: argparse.Namespace) -> int:
+    return run_resolution(args)
+```
+
+### FrameworkCallback
+
+Marks a callable as invoked by a framework lifecycle, hook, event system, or
+registration mechanism. This is useful when the project does not directly call
+the method, but a framework will call it at runtime.
+
+**Format:**
+
+```text
+:: FrameworkCallback | comment = Human readable description
+```
+
+**Fields:**
+
+| Field     | Required | Description                                                     |
+|-----------|----------|-----------------------------------------------------------------|
+| hook      | No       | Lifecycle hook, event name, route, callback, or extension point |
+
+**Example:**
+
+```python
+# :: FrameworkCallback | comment = Called by the resolution provider
+def temp_project_dir(tmp_path: Path) -> Path:
+    return tmp_path / "project"
+```
+
+### CalledThroughAbstraction
+
+Marks a callable as expected to be reached through an abstraction, interface,
+contract, registry, strategy, plugin mechanism, or dynamic dispatch path rather
+than through a direct source-level call.
+
+**Format:**
+
+```text
+:: CalledThroughAbstraction | comment = Human readable description
+```
+
+**Fields:**
+
+| Field       | Required | Description                |
+|-------------|----------|----------------------------|
+| comment     | No       | Human-readable description |
+
+**Example:**
+
+```python
+# :: CalledThroughAbstraction | comment = Called by the repository manager
+def resolve_from_index(request: ResolutionRequest) -> ResolutionResult:
+    return index_resolver.resolve(request)
 ```
 
 ## Feature Flow Markers
@@ -601,6 +690,19 @@ def _finalize_processing(result: TransformResult) -> ProcessedData:
 MechanicalOperation and UtilityOperation have no co-occurrence constraints.
 They apply only to the function they decorate.
 
+### Reachability Markers
+
+Reachability markers have no strict co-occurrence constraints.
+
+A callable may have more than one reachability marker if it is legitimately
+reachable through multiple mechanisms. For example, a method may be both an
+external API method and a framework callback.
+
+Reachability markers may co-occur with feature flow markers. They may also
+co-occur with operation markers, although that should be used carefully because
+operation markers may affect flow tracing while reachability markers affect
+diagnostic interpretation.
+
 ### Feature Flow Markers
 
 Feature flow markers have codebase-wide co-occurrence rules based on the
@@ -675,9 +777,22 @@ Markers appear in the ledger as an array under the `markers` field:
     branches: [...]
 ```
 
+**Reachability marker:**
+```yaml
+- id: U1234567890_F001
+  kind: function
+  name: resolve_command
+  signature_info:
+    decorators:
+      - name: ExternalApiMethod
+        kwargs:
+          boundary: cli
+          comment: CLI entry point for dependency resolution
+```
+
 **Feature flow markers:**
 ```yaml
-- id: C001M001
+- id: C001_M001
   kind: callable
   name: resolve
   signature: 'resolve(params: ResolutionParams) -> ResolutionResult'
@@ -714,7 +829,7 @@ Markers appear in the ledger as an array under the `markers` field:
 
 **Branching markers:**
 ```yaml
-- id: C002M005
+- id: C002_M005
   kind: callable
   name: get_artifact
   signature: 'get_artifact(key: str) -> Artifact'
@@ -730,7 +845,7 @@ Markers appear in the ledger as an array under the `markers` field:
 
 **Convergence markers:**
 ```yaml
-- id: C003M008
+- id: C003_M008
   kind: callable
   name: _process_result
   signature: '_process_result(result: ValidationResult) -> ProcessedResult'
