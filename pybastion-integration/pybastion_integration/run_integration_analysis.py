@@ -76,7 +76,7 @@ def build_stage_cmd(stage_num: int, target_root: Path, paths: dict, verbose: boo
     elif stage_num == 2:
         cmd += [
             '--target-root', str(target_root),
-            '--ledgers-root', str(paths['ledgers_root']),
+            '--inventories-root', str(paths['ledgers_root']),
             '--input', str(paths['stage1_output']),
             '--output', str(paths['stage2_output']),
         ]

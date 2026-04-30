@@ -8,7 +8,6 @@ older graph builder:
 - real project callables are linked whenever they can be resolved
 - local same-unit callables are resolved by name when needed
 - interunit/project callables are resolved by fully qualified target when needed
-- external boundary nodes are fallback only when resolution truly fails
 - return edges are wired from callee exit EIs back to caller continuations
 - recorded execution_paths are verified against the assembled graph
 """
@@ -19,188 +18,22 @@ import argparse
 import pickle
 import sys
 from collections import defaultdict
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import networkx as nx
 import yaml
 
-CALLABLE_KINDS: set[str] = {"function", "method"}
+from pybastion_integration.utils.inventory_index import (
+    CallableContext,
+    InventoryIndex,
+    discover_inventory_files,
+    load_all_inventories,
+    signature_info,
+)
+
 SUCCESS_EXIT_TERMINATORS: set[str] = {"return", "implicit-return", "yield"}
 EXCEPTION_EXIT_TERMINATORS: set[str] = {"raise", "exception"}
-
-
-def signature_info(entry: dict[str, Any]) -> dict[str, Any]:
-    return entry.get("signature_info", {}) or {}
-
-
-def hierarchy_info(entry: dict[str, Any]) -> dict[str, Any]:
-    return entry.get("hierarchy_info", {}) or {}
-
-
-def analysis_info(entry: dict[str, Any]) -> dict[str, Any]:
-    return entry.get("analysis_info", {}) or {}
-
-
-@dataclass(slots=True)
-class CallableContext:
-    callable_id: str
-    callable_name: str
-    callable_kind: str
-    callable_fqn: str
-    unit_name: str
-    unit_fqn: str
-    entry: dict[str, Any]
-    branches: list[dict[str, Any]]
-    integration_by_ei: dict[str, list[dict[str, Any]]]
-
-
-@dataclass(slots=True)
-class InventoryIndex:
-    callable_contexts: dict[str, CallableContext]
-    fqn_to_callable_id: dict[str, str]
-    ei_to_callable_id: dict[str, str]
-    type_hierarchy: dict[str, dict[str, Any]]
-    contract_methods: dict[str, list[str]]
-
-    def build_local_callables_by_unit(self) -> dict[str, dict[str, str]]:
-        result: dict[str, dict[str, str]] = defaultdict(dict)
-        for callable_id, context in self.callable_contexts.items():
-            result[context.unit_fqn][context.callable_name] = callable_id
-        return {unit_fqn: dict(name_map) for unit_fqn, name_map in result.items()}
-
-    def build_contract_impl_index(self) -> dict[str, list[str]]:
-        result: dict[str, list[str]] = defaultdict(list)
-
-        for contract_method_fqn, impl_fqns in self.contract_methods.items():
-            for impl_fqn in impl_fqns:
-                impl_id = self.fqn_to_callable_id.get(impl_fqn)
-                if impl_id is not None and impl_id not in result[contract_method_fqn]:
-                    result[contract_method_fqn].append(impl_id)
-
-        for callable_id, context in self.callable_contexts.items():
-            hinfo = hierarchy_info(context.entry)
-            if not hinfo.get("implements_contract_method", False):
-                continue
-
-            for overridden_fqn in hinfo.get("overrides", []) or []:
-                if callable_id not in result[overridden_fqn]:
-                    result[overridden_fqn].append(callable_id)
-
-        return {k: v for k, v in result.items()}
-
-
-def discover_inventory_files(inventories_root: Path) -> list[Path]:
-    inventory_files = list(inventories_root.rglob("*.inventory.yaml"))
-    inventory_files.extend(inventories_root.rglob("*_inventory.yaml"))
-    return sorted(set(inventory_files))
-
-
-def normalize_kind_for_callable(kind: str) -> str:
-    if kind in {"function", "method"}:
-        return kind
-    return kind
-
-
-def build_callable_fqn(unit_fqn: str, ancestor_names: list[str], entry_name: str) -> str:
-    parts = [unit_fqn, *ancestor_names, entry_name]
-    return ".".join(part for part in parts if part)
-
-
-def index_inventory(inventory: dict[str, Any]) -> InventoryIndex:
-    unit_name = inventory["unit"]
-    unit_fqn = inventory.get("fully_qualified_name", unit_name)
-
-    callable_contexts: dict[str, CallableContext] = {}
-    fqn_to_callable_id: dict[str, str] = {}
-    ei_to_callable_id: dict[str, str] = {}
-
-    type_hierarchy = inventory.get("type_hierarchy", {}) or {}
-    contract_methods = inventory.get("contract_methods", {}) or {}
-
-    def recurse(entries: list[dict[str, Any]], ancestors: list[str]) -> None:
-        for entry in entries:
-            kind = entry.get("kind", "unknown")
-            name = entry.get("name", "unknown")
-            entry_id = entry["id"]
-            children = entry.get("children", []) or []
-
-            ainfo = analysis_info(entry)
-            branches = ainfo.get("branches", []) or []
-            integration_candidates = ainfo.get("integration_candidates", []) or []
-
-            callable_fqn = build_callable_fqn(unit_fqn, ancestors, name)
-
-            if kind in CALLABLE_KINDS:
-                if entry.get("is_executable") is False:
-                    recurse(children, [*ancestors, name])
-                    continue
-
-                integration_by_ei: dict[str, list[dict[str, Any]]] = defaultdict(list)
-                for candidate in integration_candidates:
-                    ei_id = candidate.get("ei_id")
-                    if ei_id:
-                        integration_by_ei[ei_id].append(candidate)
-
-                context = CallableContext(
-                    callable_id=entry_id,
-                    callable_name=name,
-                    callable_kind=normalize_kind_for_callable(kind),
-                    callable_fqn=callable_fqn,
-                    unit_name=unit_name,
-                    unit_fqn=unit_fqn,
-                    entry=entry,
-                    branches=branches,
-                    integration_by_ei=dict(integration_by_ei),
-                )
-                callable_contexts[entry_id] = context
-                fqn_to_callable_id[callable_fqn] = entry_id
-                for branch in branches:
-                    ei_to_callable_id[branch["id"]] = entry_id
-
-            recurse(children, [*ancestors, name])
-
-    recurse(inventory.get("entries", []) or [], [])
-
-    return InventoryIndex(
-        callable_contexts=callable_contexts,
-        fqn_to_callable_id=fqn_to_callable_id,
-        ei_to_callable_id=ei_to_callable_id,
-        type_hierarchy=type_hierarchy,
-        contract_methods=contract_methods,
-    )
-
-
-def load_all_inventories(inventory_paths: list[Path]) -> InventoryIndex:
-    merged = InventoryIndex(
-        callable_contexts={},
-        fqn_to_callable_id={},
-        ei_to_callable_id={},
-        type_hierarchy={},
-        contract_methods={},
-    )
-
-    for path in inventory_paths:
-        with open(path, "r", encoding="utf-8") as f:
-            inventory = yaml.safe_load(f)
-        if not inventory:
-            continue
-
-        indexed = index_inventory(inventory)
-
-        merged.callable_contexts.update(indexed.callable_contexts)
-        merged.fqn_to_callable_id.update(indexed.fqn_to_callable_id)
-        merged.ei_to_callable_id.update(indexed.ei_to_callable_id)
-        merged.type_hierarchy.update(indexed.type_hierarchy)
-
-        for contract_method_fqn, impl_fqns in indexed.contract_methods.items():
-            bucket = merged.contract_methods.setdefault(contract_method_fqn, [])
-            for impl_fqn in impl_fqns:
-                if impl_fqn not in bucket:
-                    bucket.append(impl_fqn)
-
-    return merged
 
 
 def parse_ei_num(ei_id: str) -> int:
@@ -237,6 +70,96 @@ def is_collapsible_operation_entry(entry: dict[str, Any]) -> tuple[bool, str | N
     return False, None, None
 
 
+def safe_node_id_part(value: str | None) -> str:
+    if not value:
+        return "unknown"
+    return (
+        value
+        .replace(" ", "_")
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace(":", "_")
+        .replace("|", "_")
+    )
+
+
+def add_external_placeholder_node(
+        cfg: nx.DiGraph,
+        *,
+        call_site_ei: str,
+        candidate: dict[str, Any],
+        operation_target: str | None,
+        context: CallableContext,
+) -> str:
+    """
+    Adds an external placeholder node to the given directed graph. The node represents
+    a call target outside the analyzed code unit, allowing for the modeling of call
+    and return edges within the graph. Without this node, there could be no outgoing
+    and return edges to represent external calls. That would mean that the call graph
+    would be incomplete and unable to accurately model the flow of control and data
+    between different parts of the system when external operations are involved.
+
+    Parameters:
+    cfg: nx.DiGraph
+        The directed graph to which the node will be added.
+    call_site_ei: str
+        The unique identifier of the calling site from which the external target is
+        invoked.
+    candidate: dict[str, Any]
+        A dictionary containing information about the external call target, such
+        as the resolved target, classification, and other integration details.
+    operation_target: str | None
+        An optional operation target associated with the external call.
+    callable_context: CallableContext
+        The callable execution context containing metadata such as the current
+        callable's ID and fully qualified name.
+
+    Returns:
+    str
+        The unique identifier of the newly added or already existing external placeholder
+        node.
+    """
+    kind = classify_integration_target_kind(candidate)
+    target = (
+            candidate.get("resolved_target")
+            or candidate.get("target")
+            or operation_target
+            or "unknown"
+    )
+    node_id = (
+        f"placeholder::{call_site_ei}"
+        f"::{safe_node_id_part(kind)}"
+        f"::{safe_node_id_part(target)}"
+    )
+
+    if not cfg.has_node(node_id):
+        cfg.add_node(
+            node_id,
+            category="external_placeholder",
+            placeholder=True,
+            reason=(
+                "Represents an outbound integration target that is not modeled "
+                "as an analyzed project callable."
+            ),
+            external_kind=kind,
+            target=target,
+            operation_target=operation_target,
+            signature=candidate.get("signature"),
+            called_from=call_site_ei,
+            source_callable_id=context.callable_id,
+            source_callable_fqn=context.callable_fqn,
+            integration_kind=kind,
+            integration_target=candidate.get("target"),
+            integration_resolved_target=candidate.get("resolved_target"),
+            integration_signature=candidate.get("signature"),
+            integration_classification=candidate.get("classification"),
+            integration_resolution_kind=candidate.get("resolution_kind"),
+            integration_suppressed_by=candidate.get("suppressed_by"),
+        )
+
+    return node_id
+
+
 def add_callable_nodes(cfg: nx.DiGraph, context: CallableContext) -> None:
     callable_decorators = signature_info(context.entry).get("decorators", []) or []
 
@@ -245,6 +168,23 @@ def add_callable_nodes(cfg: nx.DiGraph, context: CallableContext) -> None:
         statement_outcome = branch.get("statement_outcome") or {}
         branch_decorators = branch.get("decorators", []) or []
         merged_decorators = [*callable_decorators, *branch_decorators]
+        integration_candidates = context.integration_by_ei.get(ei_id, [])
+        integration_candidate = integration_candidates[0] if integration_candidates else {}
+
+        integration_info: dict[str, Any] = {}
+        if integration_candidate:
+            integration_info = {
+                "is_integration_point": True,
+                "integration_kind": integration_candidate.get("kind"),
+                "integration_target": integration_candidate.get("target"),
+                "integration_resolved_target": integration_candidate.get("resolved_target"),
+                "integration_signature": integration_candidate.get("signature"),
+                "integration_classification": integration_candidate.get("classification"),
+                "integration_resolution_kind": integration_candidate.get("resolution_kind"),
+                "integration_suppressed_by": integration_candidate.get("suppressed_by"),
+                "execution_paths": integration_candidate.get("execution_paths", []) or [],
+                "path_analysis": integration_candidate.get("path_analysis"),
+            }
 
         cfg.add_node(
             ei_id,
@@ -267,6 +207,7 @@ def add_callable_nodes(cfg: nx.DiGraph, context: CallableContext) -> None:
             branch_decorators=branch_decorators,
             is_terminal=bool(statement_outcome.get("is_terminal", False)),
             terminates_via=statement_outcome.get("terminates_via"),
+            **integration_info,
         )
 
 
@@ -440,6 +381,39 @@ def resolve_collapsible_decorated_target(
     return candidate_id, candidate_fqn
 
 
+def add_call_to_placeholder_with_return(
+        cfg: nx.DiGraph,
+        *,
+        call_site_ei: str,
+        return_targets: list[str],
+        placeholder_node_id: str,
+        candidate: dict[str, Any],
+        operation_target: str | None,
+) -> None:
+    kind = classify_integration_target_kind(candidate)
+    target = candidate.get("resolved_target") or candidate.get("target")
+
+    cfg.add_edge(
+        call_site_ei,
+        placeholder_node_id,
+        edge_type="call",
+        call_kind=kind,
+        target=target,
+        operation_target=operation_target,
+        signature=candidate.get("signature"),
+        placeholder_target=True,
+    )
+
+    for return_target in return_targets:
+        cfg.add_edge(
+            placeholder_node_id,
+            return_target,
+            edge_type="return",
+            return_kind="external_placeholder",
+            original_call_site=call_site_ei,
+        )
+
+
 def add_call_to_callable_with_returns(
         cfg: nx.DiGraph,
         *,
@@ -505,12 +479,12 @@ def add_call_and_return_edges(
 
     for branch in context.branches:
         ei_id = branch["id"]
-        if not classify_call_site(branch):
-            continue
-
         integration_candidates = context.integration_by_ei.get(ei_id, [])
         operation_target = operation_target_for_branch(branch)
         return_targets = resolve_return_destinations(cfg, context, ei_id)
+
+        if not integration_candidates and not operation_target:
+            continue
 
         if not integration_candidates:
             resolved_callable_id, resolved_target_repr = resolve_project_callable_target(
@@ -520,6 +494,7 @@ def add_call_and_return_edges(
                 fqn_to_callable_id=inventory_index.fqn_to_callable_id,
                 local_callables_by_unit=local_callables_by_unit,
             )
+
             if resolved_callable_id is None:
                 resolved_callable_id, resolved_target_repr = resolve_collapsible_decorated_target(
                     operation_target=operation_target,
@@ -528,22 +503,68 @@ def add_call_and_return_edges(
                     fqn_to_callable_id=inventory_index.fqn_to_callable_id,
                 )
 
-            if resolved_callable_id is not None:
-                target_context = inventory_index.callable_contexts[resolved_callable_id]
-                add_call_to_callable_with_returns(
-                    cfg,
-                    call_site_ei=ei_id,
-                    return_targets=return_targets,
-                    target_callable_id=resolved_callable_id,
-                    target_context=target_context,
-                    call_kind="local",
-                    resolved_target_repr=resolved_target_repr,
-                    operation_target=operation_target,
-                    signature=None,
-                    success_exit_cache=success_exit_cache,
-                    exception_exit_cache=exception_exit_cache,
-                )
+            if resolved_callable_id is None:
                 continue
+
+            target_context = inventory_index.callable_contexts[resolved_callable_id]
+            collapse_target, marker_name, marker_type = is_collapsible_operation_entry(target_context.entry)
+
+            if collapse_target:
+                collapsed_node_id = f"collapsed::{ei_id}::{resolved_callable_id}"
+                if not cfg.has_node(collapsed_node_id):
+                    target_sig = signature_info(target_context.entry)
+                    cfg.add_node(
+                        collapsed_node_id,
+                        category="collapsed_internal_operation",
+                        callable_id=resolved_callable_id,
+                        callable_fqn=target_context.callable_fqn,
+                        callable_name=target_context.callable_name,
+                        marker_name=marker_name,
+                        marker_type=marker_type,
+                        decorators=target_sig.get("decorators", []) or [],
+                        callable_decorators=target_sig.get("decorators", []) or [],
+                        called_from=ei_id,
+                    )
+
+                cfg.add_edge(
+                    ei_id,
+                    collapsed_node_id,
+                    edge_type="call",
+                    call_kind="local",
+                    target_callable_id=resolved_callable_id,
+                    target_fqn=target_context.callable_fqn,
+                    resolved_target=resolved_target_repr,
+                    operation_target=operation_target,
+                    marker_name=marker_name,
+                    marker_type=marker_type,
+                    signature=None,
+                )
+
+                for return_target in return_targets:
+                    cfg.add_edge(
+                        collapsed_node_id,
+                        return_target,
+                        edge_type="return",
+                        return_kind="collapsed_internal_operation",
+                        original_call_site=ei_id,
+                        returns_from=resolved_callable_id,
+                    )
+                continue
+
+            add_call_to_callable_with_returns(
+                cfg,
+                call_site_ei=ei_id,
+                return_targets=return_targets,
+                target_callable_id=resolved_callable_id,
+                target_context=target_context,
+                call_kind="local",
+                resolved_target_repr=resolved_target_repr,
+                operation_target=operation_target,
+                signature=None,
+                success_exit_cache=success_exit_cache,
+                exception_exit_cache=exception_exit_cache,
+            )
+            continue
 
         for candidate in integration_candidates:
             kind = classify_integration_target_kind(candidate)
@@ -625,6 +646,7 @@ def add_call_and_return_edges(
                         target_callable_id=resolved_callable_id,
                         target_fqn=target_context.callable_fqn,
                         resolved_target=resolved_target_repr,
+                        operation_target=operation_target,
                         marker_name=marker_name,
                         marker_type=marker_type,
                         signature=signature,
@@ -655,6 +677,23 @@ def add_call_and_return_edges(
                     exception_exit_cache=exception_exit_cache,
                 )
                 continue
+
+            placeholder_node_id = add_external_placeholder_node(
+                cfg,
+                call_site_ei=ei_id,
+                candidate=candidate,
+                operation_target=operation_target,
+                context=context,
+            )
+
+            add_call_to_placeholder_with_return(
+                cfg,
+                call_site_ei=ei_id,
+                return_targets=return_targets,
+                placeholder_node_id=placeholder_node_id,
+                candidate=candidate,
+                operation_target=operation_target,
+            )
 
 
 def path_exists_exactly(cfg: nx.DiGraph, path: list[str]) -> bool:

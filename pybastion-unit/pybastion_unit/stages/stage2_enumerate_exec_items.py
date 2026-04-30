@@ -35,8 +35,7 @@ from pybastion_unit.helpers.constraint_metadata_helper import (
 from pybastion_unit.helpers.decorator_processing import extract_statement_decorators
 from pybastion_unit.helpers.type_indexing import build_module_index
 from pybastion_unit.semantic_decomposition import decompose_statement
-from pybastion_unit.semantic_decomposition.decomp_types import DecompositionContext, ControlOwner, OwnerKind, \
-    DecomposerResult
+from pybastion_unit.semantic_decomposition.decomp_types import DecompositionContext, ControlOwner, OwnerKind
 from pybastion_unit.shared.callable_id_generation import (
     FUNC_ID_EXPR,
     generate_ei_id,
@@ -750,6 +749,29 @@ def _matches_target(entry: UnitIndexEntry, target_name: str | None) -> bool:
     return target_name is None or entry.name == target_name
 
 
+def enumerate_implicit_constructor_eis(entry: UnitIndexEntry) -> FunctionResult:
+    branch = Branch(
+        id=generate_function_entry_ei_id(entry.id),
+        line=entry.lineno,
+        condition="implicit constructor entry",
+        description="implicit default constructor completes",
+        stmt_type="ImplicitConstructor",
+        statement_outcome=StatementOutcome(
+            outcome="implicit constructor returns",
+            is_terminal=True,
+            terminates_via="implicit-return",
+            synthetic=True,
+        ),
+    )
+
+    return FunctionResult(
+        name=entry.name,
+        line_start=entry.lineno,
+        line_end=entry.end_lineno,
+        branches=[branch],
+    )
+
+
 def enumerate_unit_from_index(
         filepath: Path,
         unit_index: UnitIndex,
@@ -767,6 +789,17 @@ def enumerate_unit_from_index(
         if entry.kind not in ANALYZABLE_ENTRY_KINDS:
             continue
         if not _matches_target(entry, function_name):
+            continue
+
+        if (
+                entry.kind == "method"
+                and entry.synthetic
+                and entry.implicit
+                and entry.implicit_kind == "default_constructor"
+        ):
+            result = enumerate_implicit_constructor_eis(entry)
+            populate_constraint_relationships(result.branches)
+            results.append(result)
             continue
 
         node = ast_index.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))

@@ -153,7 +153,8 @@ def collect_project_contract_classes(project_index: ProjectIndex) -> set[str]:
 
             if not class_is_contract:
                 for child in node.body:
-                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and has_abstractmethod_decorator(child):
+                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and has_abstractmethod_decorator(
+                            child):
                         class_is_contract = True
                         break
 
@@ -246,6 +247,20 @@ def analysis_info(entry: dict[str, Any]) -> dict[str, Any]:
     return entry.setdefault("analysis_info", {})
 
 
+def is_constructor_entry(entry: dict[str, Any]) -> bool:
+    return entry.get("kind") == "method" and entry.get("name") == "__init__"
+
+
+def is_implicit_default_constructor_entry(entry: dict[str, Any]) -> bool:
+    return (
+            entry.get("kind") == "method"
+            and entry.get("name") == "__init__"
+            and entry.get("synthetic", False)
+            and entry.get("implicit", False)
+            and entry.get("implicit_kind") == "default_constructor"
+    )
+
+
 def mark_contract_methods(entries: list[dict[str, Any]], in_contract_class: bool = False) -> None:
     for entry in entries:
         hinfo = hierarchy_info(entry)
@@ -256,7 +271,11 @@ def mark_contract_methods(entries: list[dict[str, Any]], in_contract_class: bool
                 or bool(hinfo.get("contract_base_classes", []))
         )
 
-        if entry.get("kind") == "method" and entry_is_contract_class:
+        if (
+                entry.get("kind") == "method"
+                and entry_is_contract_class
+                and not is_constructor_entry(entry)
+        ):
             hinfo["is_contract_method"] = True
 
         children = entry.get("children", []) or []
@@ -360,6 +379,42 @@ def annotate_entry_fqns(
             annotate_entry_fqns(children, unit_fqn, child_ancestors)
 
 
+def collect_project_collapsible_operation_fqns(
+        project_index: ProjectIndex,
+) -> set[str]:
+    result: set[str] = set()
+
+    for unit in project_index.units:
+        source_path = Path(unit.filepath)
+        source = source_path.read_text(encoding="utf-8")
+        source_lines = source.splitlines()
+        tree = ast.parse(source, filename=str(source_path))
+        ast_index = build_module_index(tree, unit.fully_qualified_name)
+
+        for entry in unit.entries:
+            if entry.kind not in {"unit_function", "method", "nested_function"}:
+                continue
+
+            node = ast_index.nodes_by_fqn_and_line.get(
+                (entry.fully_qualified_name, entry.lineno)
+            )
+
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+
+            decorators = extract_callable_decorators(node, source_lines)
+            decorator_names = {
+                str(decorator.get("name", "")).strip()
+                for decorator in decorators
+                if decorator.get("name")
+            }
+
+            if decorator_names & {"MechanicalOperation", "UtilityOperation"}:
+                result.add(entry.fully_qualified_name)
+
+    return result
+
+
 class AstAnalyzer:
     def __init__(
             self,
@@ -373,6 +428,7 @@ class AstAnalyzer:
             local_return_types: dict[str, TypeRef],
             field_types_by_class: dict[str, dict[str, TypeRef]],
             project_contract_classes: set[str],
+            collapsible_operation_fqns: set[str],
     ):
         self.source_lines = source_lines
         self.unit_id = unit_id
@@ -383,6 +439,7 @@ class AstAnalyzer:
         self.local_return_types = local_return_types
         self.field_types_by_class = field_types_by_class
         self.project_contract_classes = project_contract_classes
+        self.collapsible_operation_fqns = collapsible_operation_fqns
 
     def _normalize_type_name(self, type_name: str | TypeRef) -> str:
         if isinstance(type_name, TypeRef):
@@ -713,6 +770,7 @@ class AstAnalyzer:
             unit_fqn=self.unit_fqn,
             project_fqns=self.project_fqns,
             callable_inventory=self.callable_inventory,
+            collapsible_operation_fqns=self.collapsible_operation_fqns,
             known_types=known_types,
             resolve_target=lambda target, param_types: self._resolve_target(
                 target,
@@ -735,6 +793,14 @@ class AstAnalyzer:
             enriched.append(payload)
 
         return enriched
+
+    def _constructor_target_for_resolved_target(self, resolved_target: str) -> str:
+        constructor_target = f"{resolved_target}.__init__"
+
+        if constructor_target in self.callable_inventory:
+            return constructor_target
+
+        return resolved_target
 
     def _owner_class_fqn_for_callable(self, callable_fqn: str) -> str | None:
         parts = callable_fqn.split(".")
@@ -765,13 +831,24 @@ class AstAnalyzer:
 
         result = resolve_target_chain(ctx, target)
 
+        resolved_target = self._constructor_target_for_resolved_target(
+            result.resolved_target
+        )
+
+        candidate_targets = result.candidate_targets
+        if candidate_targets:
+            candidate_targets = [
+                self._constructor_target_for_resolved_target(candidate)
+                for candidate in candidate_targets
+            ]
+
         return TargetResolution(
             original_target=result.original_target,
-            resolved_target=result.resolved_target,
+            resolved_target=resolved_target,
             resolution_kind=result.resolution_kind,
             resolved_receiver_type=result.resolved_receiver_type,
             resolution_basis=result.resolution_basis,
-            candidate_targets=result.candidate_targets,
+            candidate_targets=candidate_targets,
         )
 
     def _resolve_target(
@@ -985,6 +1062,10 @@ def annotate_method_overrides(
     def recurse(items: list[dict[str, Any]]) -> None:
         for entry in items:
             if entry.get("kind") == "method":
+                if is_implicit_default_constructor_entry(entry):
+                    recurse(entry.get("children", []) or [])
+                    continue
+
                 hinfo = hierarchy_info(entry)
                 owner = hinfo.get("owner_class_fqn")
                 name = entry.get("name")
@@ -1095,6 +1176,8 @@ def process_unit(
         project_method_fqns: set[str],
         project_contract_classes: set[str],
         project_field_types_by_class: dict[str, dict[str, TypeRef]],
+        project_callable_inventory: dict[str, str],
+        project_collapsible_operation_fqns: set[str],
         stage2_file: Path | None,
         output_root: Path,
 ) -> dict[str, Any]:
@@ -1103,7 +1186,6 @@ def process_unit(
     tree = ast.parse(source, filename=str(source_path))
     source_lines = source.splitlines()
     ast_index = build_module_index(tree, unit.fully_qualified_name)
-    callable_inventory = {entry.fully_qualified_name: entry.id for entry in unit.entries}
 
     unit_types = inspect_unit_types(
         unit_fqn=unit.fully_qualified_name,
@@ -1123,12 +1205,13 @@ def process_unit(
         source_lines=source_lines,
         unit_id=unit.unit_id,
         unit_fqn=unit.fully_qualified_name,
-        callable_inventory=callable_inventory,
+        callable_inventory=project_callable_inventory,
         project_fqns=project_symbol_fqns,
         import_map=import_map,
         local_return_types=local_return_types,
         field_types_by_class=field_types_by_class,
         project_contract_classes=project_contract_classes,
+        collapsible_operation_fqns=project_collapsible_operation_fqns,
     )
 
     unit_binding_types = analyzer.build_unit_binding_type_map(unit)
@@ -1152,6 +1235,14 @@ def process_unit(
             }
         else:
             payload = analyzer.analyze_entry(entry, node)
+
+        if entry.synthetic:
+            payload["synthetic"] = True
+        if entry.implicit:
+            payload["implicit"] = True
+        if entry.implicit_kind is not None:
+            payload["implicit_kind"] = entry.implicit_kind
+
         entries_by_id[entry.id] = payload
 
     merge_stage2(entries_by_id, unit.entries, build_stage2_lookup(load_stage2_yaml(stage2_file)))
@@ -1293,10 +1384,23 @@ def main() -> int:
     project_index = load_project_index(args.unit_index)
     project_contract_classes = collect_project_contract_classes(project_index)
     project_field_types_by_class = load_class_field_registry(args.unit_index)
+    project_collapsible_operation_fqns = collect_project_collapsible_operation_fqns(project_index)
     unit = select_unit(project_index, args.file, args.fqn)
     if unit is None:
         print("Error: could not resolve unit from --file/--fqn", file=sys.stderr)
         return 1
+
+    project_callable_inventory: dict[str, str] = {}
+    project_symbol_fqns: set[str] = set()
+    project_method_fqns: set[str] = set()
+
+    for indexed_unit in project_index.units:
+        project_symbol_fqns.add(indexed_unit.fully_qualified_name)
+        for entry in indexed_unit.entries:
+            project_symbol_fqns.add(entry.fully_qualified_name)
+            project_callable_inventory[entry.fully_qualified_name] = entry.id
+            if entry.kind == "method":
+                project_method_fqns.add(entry.fully_qualified_name)
 
     stage2_file = resolve_stage2_file(unit, args.ei_file, args.ei_root)
     print(f"Processing: {unit.filepath}")
@@ -1306,21 +1410,14 @@ def main() -> int:
     else:
         print("  → Stage 2: none (inventory will be built without EI merge)")
 
-    project_symbol_fqns: set[str] = set()
-    project_method_fqns: set[str] = set()
-    for indexed_unit in project_index.units:
-        project_symbol_fqns.add(indexed_unit.fully_qualified_name)
-        for entry in indexed_unit.entries:
-            project_symbol_fqns.add(entry.fully_qualified_name)
-            if entry.kind == "method":
-                project_method_fqns.add(entry.fully_qualified_name)
-
     process_unit(
         unit,
         project_symbol_fqns,
         project_method_fqns,
         project_contract_classes,
         project_field_types_by_class,
+        project_callable_inventory,
+        project_collapsible_operation_fqns,
         stage2_file,
         args.output_root,
     )

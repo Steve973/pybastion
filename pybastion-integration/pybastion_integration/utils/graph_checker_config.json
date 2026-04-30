@@ -127,6 +127,30 @@
         "kind": "analysis",
         "analysis_id": "structural_health"
       }
+    },
+    {
+      "id": "integration_point_graph_coverage",
+      "report_key": "integration_point_graph_coverage",
+      "section_header": "=== Integration Point Graph Coverage ===",
+      "description": "Integration-point EI nodes that are not properly represented by outgoing call edges, have invalid paths, or are incorrectly classified.",
+      "summary_code": "i",
+      "include_in_console_summary": true,
+      "source": {
+        "kind": "analysis",
+        "analysis_id": "integration_point_graph_coverage"
+      }
+    },
+    {
+      "id": "interunit_placeholder_targets",
+      "report_key": "interunit_placeholder_targets",
+      "section_header": "=== Interunit Placeholder Targets ===",
+      "description": "Interunit integration points whose outgoing call edge resolves to an external placeholder instead of a real project graph node.",
+      "summary_code": "t",
+      "include_in_console_summary": true,
+      "source": {
+        "kind": "analysis",
+        "analysis_id": "interunit_placeholder_targets"
+      }
     }
   ]
 }

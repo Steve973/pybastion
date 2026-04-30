@@ -1,417 +1,757 @@
 #!/usr/bin/env python3
 """
-Stage 2: Generate Integration Test Specifications
+Stage 2: Generate Integration Seam Test Specifications
 
-Input:  Stage 1 call graph (stage1-call-graph.yaml)
-        Unit ledger files (for EI branch details used in path categorization)
-Output: Integration test specifications for AI test generation
+Input:
+  - Stage 1 inventory-based call graph
+    - pickle output from build_full_call_graph_from_inventory.py, or
+    - YAML node-link output from build_full_call_graph_from_inventory.py
+  - Unit inventory files
 
-For each integration seam edge in the call graph:
-  - Reads execution paths from the edge (carried forward from ledger by stage 1)
+Output:
+  - Integration seam test specifications for downstream AI test generation
+
+For each integration seam:
+  - Reads execution paths from the unit inventory integration candidate
   - Categorizes paths into: happy_path, error_handling, edge_cases, alternative_flows
-  - Reduces to representative paths to avoid redundant test scenarios
-  - Identifies fixture requirements (mechanical nodes + intermediate seam nodes)
-  - Produces one spec per seam edge with representative test scenarios
+  - Reduces paths to representative paths to avoid redundant test scenarios
+  - Identifies fixture requirements from prior integration candidates or collapsed
+    mechanical/utility operation nodes along the selected path
+  - Produces one spec per seam
 
-Path categorization uses EI branch details from ledgers:
-  - Branch outcomes, constraint types, and conditions drive classification
-  - Target callable outcome analysis determines error_handling categorization
-  - Representative selection: 1 happy path, 1 per error subcategory, all edge cases, up to 3 alternatives
-
-DEFAULT BEHAVIOR (no args):
-  - Reads call graph from config.get_stage_output(1)
-  - Reads ledgers from config.get_ledgers_root()
-  - Outputs to config.get_stage_output(2)
+This stage is intentionally seam-oriented. It does not trace full feature flows.
+Feature flow tracing belongs to a later stage driven by feature flow markers.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import pickle
 import sys
+from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import networkx as nx
 import yaml
 
 from pybastion_integration import config
+from pybastion_integration.utils.inventory_index import (
+    CallableContext,
+    InventoryIndex,
+    branch_constraint,
+    branch_description,
+    branch_statement_outcome,
+    build_ei_details_index,
+    discover_inventory_files,
+    load_all_inventories,
+    signature_info,
+)
+
+DEFAULT_SEAM_TYPES: tuple[str, ...] = ("interunit", "boundary")
 
 
 # =============================================================================
-# Load and index call graph
+# Graph loading and indexing
 # =============================================================================
 
-def load_yaml(path: Path) -> dict[str, Any]:
-    with open(path, 'r', encoding='utf-8') as f:
-        return yaml.safe_load(f)
+def infer_graph_format(path: Path, explicit_format: str | None) -> str:
+    if explicit_format:
+        return explicit_format
+
+    suffix = path.suffix.lower()
+    if suffix in {".pkl", ".pickle"}:
+        return "pickle"
+    if suffix in {".yaml", ".yml"}:
+        return "yaml"
+
+    raise ValueError(
+        f"Cannot infer graph format from extension for {path}. "
+        "Pass --graph-format explicitly."
+    )
 
 
-def index_graph(graph: dict[str, Any]) -> tuple[dict[str, dict], dict[str, list[dict]]]:
-    """
-    Returns:
-        nodes_by_id:      node_id -> node dict
-        edges_by_source:  from_node_id -> list of edge dicts
-    """
-    nodes_by_id: dict[str, dict] = {n['id']: n for n in graph.get('nodes', [])}
-    edges_by_source: dict[str, list[dict]] = {}
-    for edge in graph.get('edges', []):
-        edges_by_source.setdefault(edge['from'], []).append(edge)
-    return nodes_by_id, edges_by_source
+def load_graph(path: Path, graph_format: str) -> nx.DiGraph:
+    if graph_format == "pickle":
+        with open(path, "rb") as f:
+            graph = pickle.load(f)
+        if not isinstance(graph, nx.DiGraph):
+            raise TypeError(f"Expected NetworkX DiGraph in {path}, got {type(graph)!r}")
+        return graph
+
+    if graph_format == "yaml":
+        with open(path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        return nx.node_link_graph(data)
+
+    raise ValueError(f"Unsupported graph format: {graph_format}")
+
+
+def graph_nodes_by_id(cfg: nx.DiGraph) -> dict[str, dict[str, Any]]:
+    return {
+        str(node_id): {"id": str(node_id), **dict(data)}
+        for node_id, data in cfg.nodes(data=True)
+    }
+
+
+def graph_edges_by_source(cfg: nx.DiGraph) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    for source, target, data in cfg.edges(data=True):
+        edge = {
+            "from": str(source),
+            "to": str(target),
+            **dict(data),
+        }
+        edge.setdefault("id", make_edge_id(str(source), str(target), edge))
+        result[str(source)].append(edge)
+
+    return dict(result)
+
+
+def graph_edges(cfg: nx.DiGraph) -> list[dict[str, Any]]:
+    edges: list[dict[str, Any]] = []
+
+    for source, target, data in cfg.edges(data=True):
+        edge = {
+            "from": str(source),
+            "to": str(target),
+            **dict(data),
+        }
+        edge.setdefault("id", make_edge_id(str(source), str(target), edge))
+        edges.append(edge)
+
+    return edges
+
+
+def make_edge_id(source: str, target: str, edge: dict[str, Any]) -> str:
+    basis = "|".join(
+        [
+            source,
+            target,
+            str(edge.get("edge_type", "")),
+            str(edge.get("call_kind", "")),
+            str(edge.get("target_callable_id", "")),
+            str(edge.get("target_fqn", "")),
+            str(edge.get("resolved_target", "")),
+            str(edge.get("operation_target", "")),
+        ]
+    )
+    digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:12].upper()
+    return f"EDGE_{digest}"
 
 
 # =============================================================================
-# Ledger loading — EI details and target outcome analysis
+# Classification helpers
 # =============================================================================
 
-def discover_ledgers(root: Path) -> list[Path]:
-    return sorted(root.glob('**/*.ledger.yaml'))
+def classification_kind(candidate: dict[str, Any] | None) -> str:
+    if not candidate:
+        return "unknown"
+
+    classification = candidate.get("classification")
+    if isinstance(classification, dict):
+        return (
+                classification.get("kind")
+                or classification.get("type")
+                or candidate.get("kind")
+                or "unknown"
+        )
+
+    if isinstance(classification, str):
+        return classification
+
+    return candidate.get("kind") or "unknown"
 
 
-def load_ledger_doc(path: Path) -> dict | None:
-    with open(path, 'r', encoding='utf-8') as f:
-        for doc in yaml.safe_load_all(f):
-            if doc and doc.get('docKind') == 'ledger':
-                return doc
+def normalized_seam_kind(kind: str | None) -> str:
+    value = (kind or "unknown").strip().lower()
+
+    match value:
+        case "project" | "project_callable" | "inter_unit" | "inter-unit":
+            return "interunit"
+        case "external" | "external_library" | "third_party" | "third-party":
+            return "extlib"
+        case "builtin" | "builtins":
+            return "stdlib"
+        case _:
+            return value
+
+
+def candidate_target(candidate: dict[str, Any] | None) -> str | None:
+    if not candidate:
+        return None
+    return candidate.get("resolved_target") or candidate.get("target")
+
+
+def candidate_signature(candidate: dict[str, Any] | None) -> str | None:
+    if not candidate:
+        return None
+    return candidate.get("signature")
+
+
+def candidate_execution_paths(candidate: dict[str, Any] | None, source_ei: str) -> list[list[str]]:
+    if not candidate:
+        return [[source_ei]]
+
+    paths = candidate.get("execution_paths") or candidate.get("executionPaths") or []
+    normalized: list[list[str]] = []
+
+    for path in paths:
+        if isinstance(path, list) and path:
+            normalized.append([str(ei_id) for ei_id in path])
+
+    return normalized or [[source_ei]]
+
+
+def outgoing_call_edges_by_source_ei(cfg: nx.DiGraph) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    for edge in graph_edges(cfg):
+        if edge.get("edge_type") == "call":
+            result[edge["from"]].append(edge)
+
+    return dict(result)
+
+
+def choose_matching_graph_edge(
+        *,
+        source_ei: str,
+        candidate: dict[str, Any],
+        outgoing_edges_by_source_ei: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    edges = outgoing_edges_by_source_ei.get(source_ei, [])
+    if not edges:
+        return None
+
+    candidate_targets = {
+        candidate.get("resolved_target"),
+        candidate.get("target"),
+        candidate.get("operation_target"),
+    }
+    candidate_targets = {str(target) for target in candidate_targets if target}
+
+    for edge in edges:
+        edge_targets = {
+            edge.get("resolved_target"),
+            edge.get("target_fqn"),
+            edge.get("operation_target"),
+        }
+        edge_targets = {str(target) for target in edge_targets if target}
+
+        if candidate_targets and edge_targets and candidate_targets & edge_targets:
+            return edge
+
+    if len(edges) == 1:
+        return edges[0]
+
     return None
 
 
-def build_ei_details_index(ledger_paths: list[Path]) -> dict[str, dict]:
-    """
-    Build index of EI ID -> branch detail dict from all ledger branch specs.
+def target_context_for_edge(
+        *,
+        edge: dict[str, Any] | None,
+        inventory_index: InventoryIndex,
+        nodes_by_id: dict[str, dict[str, Any]],
+) -> tuple[CallableContext | None, dict[str, Any]]:
+    if edge is None:
+        return None, {}
 
-    Branch detail includes: outcome, condition, constraint_type, is_terminal, terminates_via
-    """
-    ei_index: dict[str, dict] = {}
+    target_node = nodes_by_id.get(edge["to"], {})
+    target_callable_id = (
+        edge.get("target_callable_id")
+        or target_node.get("callable_id")
+    )
 
-    for path in ledger_paths:
-        doc = load_ledger_doc(path)
-        if not doc:
-            continue
-        unit = doc.get('unit')
-        if not unit:
-            continue
+    if not target_callable_id:
+        return None, target_node
 
-        queue = [unit]
-        while queue:
-            entry = queue.pop(0)
-            callable_data = entry.get('callable', {})
-            for branch in (callable_data.get('branches') or []):
-                if isinstance(branch, dict) and branch.get('id'):
-                    ei_index[branch['id']] = branch
-            queue.extend(c for c in (entry.get('children') or []) if isinstance(c, dict))
-
-    return ei_index
+    return inventory_index.callable_contexts.get(target_callable_id), target_node
 
 
-def build_callable_index(ledger_paths: list[Path]) -> dict[str, dict]:
-    """
-    Build index of callable_id -> callable entry dict from all ledgers.
-    Used for target outcome analysis.
-    """
-    callable_index: dict[str, dict] = {}
+def should_include_inventory_candidate(
+        *,
+        candidate: dict[str, Any],
+        seam_types: set[str],
+) -> tuple[bool, str]:
+    seam_kind = normalized_seam_kind(classification_kind(candidate))
+    return seam_kind in seam_types, seam_kind
 
-    for path in ledger_paths:
-        doc = load_ledger_doc(path)
-        if not doc:
-            continue
-        unit = doc.get('unit')
-        if not unit:
-            continue
 
-        queue = [unit]
-        while queue:
-            entry = queue.pop(0)
-            entry_id = entry.get('id')
-            if entry_id:
-                callable_index[entry_id] = entry
-            queue.extend(c for c in (entry.get('children') or []) if isinstance(c, dict))
+def discover_inventory_seams(
+        *,
+        cfg: nx.DiGraph,
+        inventory_index: InventoryIndex,
+        nodes_by_id: dict[str, dict[str, Any]],
+        seam_types: set[str],
+        include_same_unit: bool,
+        include_collapsed: bool,
+) -> list[SeamSource]:
+    outgoing_edges_by_source_ei = outgoing_call_edges_by_source_ei(cfg)
+    seams: list[SeamSource] = []
 
-    return callable_index
+    for source_context in inventory_index.callable_contexts.values():
+        for source_ei, candidates in source_context.integration_by_ei.items():
+            for candidate in candidates:
+                include, seam_kind = should_include_inventory_candidate(
+                    candidate=candidate,
+                    seam_types=seam_types,
+                )
+
+                if not include:
+                    continue
+
+                edge = choose_matching_graph_edge(
+                    source_ei=source_ei,
+                    candidate=candidate,
+                    outgoing_edges_by_source_ei=outgoing_edges_by_source_ei,
+                )
+
+                target_context, target_node = target_context_for_edge(
+                    edge=edge,
+                    inventory_index=inventory_index,
+                    nodes_by_id=nodes_by_id,
+                )
+
+                if (
+                    edge is not None
+                    and target_node.get("category") == "collapsed_internal_operation"
+                    and not include_collapsed
+                ):
+                    continue
+
+                if (
+                    not include_same_unit
+                    and target_context is not None
+                    and target_context.unit_fqn == source_context.unit_fqn
+                    and target_context.callable_id != source_context.callable_id
+                ):
+                    continue
+
+                seams.append(
+                    SeamSource(
+                        source_ei=source_ei,
+                        target_node_id=edge["to"] if edge else None,
+                        edge=edge,
+                        candidate=candidate,
+                        seam_kind=seam_kind,
+                        source_context=source_context,
+                        target_context=target_context,
+                        target_node=target_node,
+                    )
+                )
+
+    return seams
 
 
 # =============================================================================
-# Path categorization (ported from old stage 3)
+# Path categorization
 # =============================================================================
 
-def analyze_target_outcomes(target_callable: dict | None) -> dict[str, Any]:
-    if not target_callable:
+def analyze_target_outcomes(target_context: CallableContext | None) -> dict[str, Any]:
+    if target_context is None:
         return {
-            'has_exceptions': False,
-            'exception_branches': [],
-            'success_branches': [],
-            'total_branches': 0,
+            "has_exceptions": False,
+            "exception_branches": [],
+            "success_branches": [],
+            "total_branches": 0,
         }
 
-    branches = (target_callable.get('callable') or {}).get('branches') or []
-    exception_branches = []
-    success_branches = []
+    exception_branches: list[dict[str, Any]] = []
+    success_branches: list[dict[str, Any]] = []
 
-    for branch in branches:
-        outcome = branch.get('outcome', '').lower()
-        terminates_via = branch.get('terminates_via', '')
-        is_terminal = branch.get('is_terminal', False)
+    for branch in target_context.branches:
+        description = branch_description(branch).lower()
+        statement_outcome = branch_statement_outcome(branch)
+        terminates_via = statement_outcome.get("terminates_via") or branch.get("terminates_via")
+        is_terminal = bool(statement_outcome.get("is_terminal", branch.get("is_terminal", False)))
 
         is_exception = (
-            'exception propagates' in outcome or
-            'raises' in outcome or
-            terminates_via in ('raise', 'exception')
+                "exception propagates" in description
+                or "raises" in description
+                or terminates_via in {"raise", "exception"}
         )
 
         if is_exception:
             exception_branches.append(branch)
-        elif 'returns' in outcome or not is_terminal:
+        elif "returns" in description or not is_terminal:
             success_branches.append(branch)
 
     return {
-        'has_exceptions': len(exception_branches) > 0,
-        'exception_branches': exception_branches,
-        'success_branches': success_branches,
-        'total_branches': len(branches),
+        "has_exceptions": len(exception_branches) > 0,
+        "exception_branches": exception_branches,
+        "success_branches": success_branches,
+        "total_branches": len(target_context.branches),
     }
 
 
 def categorize_path(
         path_eis: list[str],
-        ei_details: dict[str, dict],
+        ei_details: dict[str, dict[str, Any]],
         target_outcomes: dict[str, Any],
 ) -> dict[str, Any]:
     has_validation_failure = False
     has_empty_iteration = False
     has_boundary_condition = False
     has_alternative_branch = False
+    has_exception_path = False
 
     for ei_id in path_eis:
         ei = ei_details.get(ei_id, {})
-        outcome = ei.get('outcome', '').lower()
-        condition = (ei.get('condition') or '').lower()
-        constraint_type = (ei.get('constraint') or {}).get('constraint_type')
+        description = branch_description(ei).lower()
+        condition = str(ei.get("condition") or "").lower()
+        constraint = branch_constraint(ei)
+        constraint_type = constraint.get("constraint_type")
+        statement_outcome = branch_statement_outcome(ei)
+        terminates_via = statement_outcome.get("terminates_via") or ei.get("terminates_via")
 
-        if 'validation' in outcome or 'invalid' in outcome:
+        if "validation" in description or "invalid" in description:
             has_validation_failure = True
 
-        if constraint_type == 'iteration' and '0 iterations' in outcome:
+        if constraint_type == "iteration" and "0 iterations" in description:
             has_empty_iteration = True
             has_boundary_condition = True
 
-        if 'is none' in condition or 'is not none' in condition:
+        if " is none" in condition or " is not none" in condition:
             has_boundary_condition = True
 
-        if constraint_type == 'condition':
+        if constraint_type == "condition":
             has_alternative_branch = True
 
-    if has_empty_iteration or has_boundary_condition:
-        category = 'edge_cases'
-        subcategory = 'empty_collection' if has_empty_iteration else 'boundary_condition'
+        if terminates_via in {"raise", "exception"} or "raises" in description:
+            has_exception_path = True
+
+    if has_exception_path or has_validation_failure:
+        category = "error_handling"
+        subcategory = "validation_failure" if has_validation_failure else "exception_path"
+    elif has_empty_iteration or has_boundary_condition:
+        category = "edge_cases"
+        subcategory = "empty_collection" if has_empty_iteration else "boundary_condition"
     elif has_alternative_branch:
-        category = 'alternative_flows'
-        subcategory = 'conditional_branch'
+        category = "alternative_flows"
+        subcategory = "conditional_branch"
     else:
-        category = 'happy_path'
-        subcategory = 'success'
+        category = "happy_path"
+        subcategory = "success"
 
     return {
-        'category': category,
-        'subcategory': subcategory,
-        'has_validation_failure': has_validation_failure,
-        'has_boundary_condition': has_boundary_condition,
-        'target_can_raise': target_outcomes.get('has_exceptions', False),  # metadata only
-        'path_length': len(path_eis),
+        "category": category,
+        "subcategory": subcategory,
+        "has_validation_failure": has_validation_failure,
+        "has_boundary_condition": has_boundary_condition,
+        "target_can_raise": target_outcomes.get("has_exceptions", False),
+        "path_length": len(path_eis),
     }
 
 
-def find_representative_paths(paths: list[dict]) -> list[dict]:
-    groups: dict[tuple[str, str], list[dict]] = {}
+def find_representative_paths(paths: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+
     for path in paths:
-        key = (path['category'], path['subcategory'])
+        key = (path["category"], path["subcategory"])
         groups.setdefault(key, []).append(path)
 
-    representatives = []
+    representatives: list[dict[str, Any]] = []
 
     for (category, subcategory), group_paths in groups.items():
-        if category == 'happy_path':
-            shortest = min(group_paths, key=lambda p: p['path_length'])
-            representatives.append({
-                **shortest,
-                'represents_count': len(group_paths),
-                'representative_of': f'{category}/{subcategory}',
-            })
+        if category == "happy_path":
+            shortest = min(group_paths, key=lambda p: p["path_length"])
+            representatives.append(
+                {
+                    **shortest,
+                    "represents_count": len(group_paths),
+                    "representative_of": f"{category}/{subcategory}",
+                }
+            )
 
-        elif category == 'error_handling':
-            representatives.append({
-                **group_paths[0],
-                'represents_count': len(group_paths),
-                'representative_of': f'{category}/{subcategory}',
-            })
+        elif category == "error_handling":
+            representatives.append(
+                {
+                    **group_paths[0],
+                    "represents_count": len(group_paths),
+                    "representative_of": f"{category}/{subcategory}",
+                }
+            )
 
-        elif category == 'edge_cases':
+        elif category == "edge_cases":
             for path in group_paths:
-                representatives.append({
-                    **path,
-                    'represents_count': 1,
-                    'representative_of': f'{category}/{subcategory}',
-                })
+                representatives.append(
+                    {
+                        **path,
+                        "represents_count": 1,
+                        "representative_of": f"{category}/{subcategory}",
+                    }
+                )
 
-        else:  # alternative_flows
+        else:
             for path in group_paths[:3]:
-                representatives.append({
-                    **path,
-                    'represents_count': len(group_paths) // 3 if len(group_paths) > 3 else 1,
-                    'representative_of': f'{category}/{subcategory}',
-                })
+                representatives.append(
+                    {
+                        **path,
+                        "represents_count": len(group_paths) // 3 if len(group_paths) > 3 else 1,
+                        "representative_of": f"{category}/{subcategory}",
+                    }
+                )
 
     return representatives
+
+
+def build_synthetic_error_representative(target_outcomes: dict[str, Any]) -> dict[str, Any] | None:
+    exception_branches = target_outcomes.get("exception_branches", [])
+    if not exception_branches:
+        return None
+
+    primary = next(
+        (
+            branch
+            for branch in exception_branches
+            if (
+                (branch_statement_outcome(branch).get("terminates_via") or branch.get("terminates_via"))
+                == "raise"
+                and branch.get("condition")
+        )
+        ),
+        exception_branches[0],
+    )
+
+    constraint = branch_constraint(primary)
+
+    return {
+        "path_id": "PATH_SYNTHETIC_ERROR",
+        "eis": [],
+        "eis_original": [],
+        "category": "error_handling",
+        "subcategory": "triggers_target_exception",
+        "synthetic": True,
+        "has_validation_failure": False,
+        "has_boundary_condition": False,
+        "target_can_raise": True,
+        "path_length": 0,
+        "represents_count": 1,
+        "representative_of": "error_handling/triggers_target_exception",
+        "precondition": {
+            "description": (
+                "Arrange target object state to satisfy the exception condition "
+                "before invoking the source callable"
+            ),
+            "condition": primary.get("condition"),
+            "outcome": primary.get("description") or primary.get("outcome"),
+            "constraint_expr": constraint.get("expr"),
+            "constraint_type": constraint.get("constraint_type"),
+            "variables_read": constraint.get("variables_read", []),
+        },
+    }
 
 
 # =============================================================================
 # Fixture identification
 # =============================================================================
 
-def identify_fixtures(
-        source_node_id: str,
-        seam_edge: dict,
-        nodes_by_id: dict[str, dict],
-        edges_by_source: dict[str, list[dict]],
+def outgoing_call_edges_by_source(cfg: nx.DiGraph) -> dict[str, list[dict[str, Any]]]:
+    result: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    for edge in graph_edges(cfg):
+        if edge.get("edge_type") == "call":
+            result[edge["from"]].append(edge)
+
+    return dict(result)
+
+
+def fixture_from_candidate(
+        candidate: dict[str, Any],
+        ei_id: str,
+        reason: str,
+) -> dict[str, Any]:
+    kind = normalized_seam_kind(classification_kind(candidate))
+    target = candidate_target(candidate) or candidate.get("target") or candidate.get("operation_target")
+
+    return {
+        "type": kind,
+        "ei_id": ei_id,
+        "integration_id": candidate.get("id"),
+        "mock_target": candidate.get("operation_target") or target,
+        "mock_target_fqn": candidate.get("resolved_target") or target,
+        "signature": candidate_signature(candidate),
+        "reason": reason,
+    }
+
+
+def identify_fixtures_for_path(
+        *,
+        path_eis: list[str],
+        seam_ei_id: str,
+        seam_candidate_id: str | None,
+        source_context: CallableContext,
+        outgoing_call_edges: dict[str, list[dict[str, Any]]],
+        nodes_by_id: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """
-    Find fixture requirements for a given seam edge.
+    fixtures: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, str | None, str | None]] = set()
 
-    Fixtures are needed for other edges from the same source node that:
-      1. Point to a mechanical node, or
-      2. Are themselves integration seams (intermediate interunit/boundary calls)
-    """
-    fixtures = []
-    seen_targets: set[str] = {seam_edge['to']}
-
-    for edge in edges_by_source.get(source_node_id, []):
-        target_id = edge['to']
-        if target_id in seen_targets:
+    for ei_id in path_eis:
+        if ei_id == seam_ei_id:
             continue
 
-        target_node = nodes_by_id.get(target_id, {})
+        for candidate in source_context.integration_by_ei.get(ei_id, []) or []:
+            candidate_id = candidate.get("id")
+            if candidate_id and candidate_id == seam_candidate_id:
+                continue
 
-        if target_node.get('is_mechanical'):
-            fixtures.append({
-                'type': 'mechanical_operation',
-                'mock_target': target_node.get('qualified_name') or target_node.get('name'),
-                'mock_target_fqn': target_node.get('fully_qualified'),
-                'callable_id': target_node.get('callable_id'),
-                'integration_id': edge.get('integration_id'),
-                'signature': edge.get('signature'),
-                'reason': 'Mechanical operation — mock to avoid test pollution',
-            })
-            seen_targets.add(target_id)
+            kind = normalized_seam_kind(classification_kind(candidate))
+            if kind not in {"interunit", "boundary", "extlib", "stdlib"}:
+                continue
 
-        elif edge.get('is_integration_seam') and edge['id'] != seam_edge['id']:
-            fixtures.append({
-                'type': 'interunit_call',
-                'mock_target': target_node.get('qualified_name') or edge.get('to_callable'),
-                'mock_target_fqn': target_node.get('fully_qualified') or edge.get('to_callable'),
-                'callable_id': target_node.get('callable_id'),
-                'integration_id': edge.get('integration_id'),
-                'signature': edge.get('signature'),
-                'reason': 'Intermediate integration seam — mock to isolate the seam under test',
-            })
-            seen_targets.add(target_id)
+            target = candidate_target(candidate)
+            key = (candidate_id, ei_id, target)
+            if key in seen:
+                continue
+
+            fixtures.append(
+                fixture_from_candidate(
+                    candidate,
+                    ei_id,
+                    reason="Earlier integration candidate on the selected path; mock to isolate the seam under test",
+                )
+            )
+            seen.add(key)
+
+        for edge in outgoing_call_edges.get(ei_id, []) or []:
+            target_node = nodes_by_id.get(edge["to"], {})
+            if target_node.get("category") != "collapsed_internal_operation":
+                continue
+
+            key = (edge.get("target_callable_id"), ei_id, target_node.get("callable_fqn"))
+            if key in seen:
+                continue
+
+            fixtures.append(
+                {
+                    "type": "mechanical_operation",
+                    "ei_id": ei_id,
+                    "integration_id": None,
+                    "mock_target": edge.get("operation_target") or target_node.get("callable_name"),
+                    "mock_target_fqn": target_node.get("callable_fqn"),
+                    "callable_id": target_node.get("callable_id"),
+                    "signature": edge.get("signature"),
+                    "reason": "Collapsed mechanical or utility operation; fixture to avoid expanding unrelated internal behavior",
+                }
+            )
+            seen.add(key)
 
     return fixtures
+
+
+def merge_fixture_lists(fixtures_by_path: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, str | None, str | None]] = set()
+
+    for fixtures in fixtures_by_path:
+        for fixture in fixtures:
+            key = (
+                fixture.get("type"),
+                fixture.get("integration_id") or fixture.get("callable_id"),
+                fixture.get("mock_target_fqn") or fixture.get("mock_target"),
+            )
+            if key in seen:
+                continue
+            merged.append(fixture)
+            seen.add(key)
+
+    return merged
+
+
+def mark_fixture_eis(path_eis: list[str], fixtures: list[dict[str, Any]], seam_ei_id: str) -> list[str]:
+    fixture_eis = {fixture.get("ei_id") for fixture in fixtures if fixture.get("ei_id")}
+
+    marked: list[str] = []
+    for ei_id in path_eis:
+        if ei_id == seam_ei_id:
+            marked.append(ei_id)
+        elif ei_id in fixture_eis:
+            marked.append(f"{ei_id}_FIXTURE")
+        else:
+            marked.append(ei_id)
+
+    return marked
+
+
+# =============================================================================
+# Seam discovery
+# =============================================================================
+
+@dataclass(slots=True)
+class SeamSource:
+    source_ei: str
+    target_node_id: str | None
+    edge: dict[str, Any] | None
+    candidate: dict[str, Any] | None
+    seam_kind: str
+    source_context: CallableContext
+    target_context: CallableContext | None
+    target_node: dict[str, Any]
+
+
+def seam_identity(seam: SeamSource) -> str:
+    candidate_id = seam.candidate.get("id") if seam.candidate else None
+    if candidate_id:
+        return str(candidate_id)
+
+    basis = "|".join(
+        [
+            seam.source_ei,
+            seam.target_node_id or "",
+            seam.seam_kind,
+            str(seam.edge.get("id") if seam.edge else ""),
+            str(seam.edge.get("target_fqn") if seam.edge else ""),
+            str(seam.edge.get("resolved_target") if seam.edge else ""),
+        ]
+    )
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:16].upper()
 
 
 # =============================================================================
 # Spec generation
 # =============================================================================
 
-def make_spec_id(integration_id: str, counter: int) -> str:
-    h = hashlib.sha256(integration_id.encode()).hexdigest()[:8].upper()
+def make_spec_id(seam_id: str, counter: int) -> str:
+    h = hashlib.sha256(seam_id.encode("utf-8")).hexdigest()[:8].upper()
     return f"ITEST_{counter:04d}_{h}"
 
 
-def build_synthetic_error_representative(target_outcomes: dict[str, Any]) -> dict[str, Any] | None:
-    """
-    Build a synthetic error_handling representative when the target can raise
-    but no existing path exercises the exception condition.
-
-    Pulls the precondition directly from the target's exception branches so
-    the agent has explicit setup instructions rather than having to infer.
-    """
-    exception_branches = target_outcomes.get('exception_branches', [])
-    if not exception_branches:
-        return None
-
-    # Prefer branches with a real condition (terminates_via: raise, non-trivial condition)
-    primary = next(
-        (b for b in exception_branches if b.get('terminates_via') == 'raise' and b.get('condition')),
-        exception_branches[0],
-    )
-
-    constraint = primary.get('constraint') or {}
-
-    return {
-        'path_id': 'PATH_SYNTHETIC_ERROR',
-        'eis': [],
-        'eis_original': [],
-        'category': 'error_handling',
-        'subcategory': 'triggers_target_exception',
-        'synthetic': True,
-        'has_validation_failure': False,
-        'has_boundary_condition': False,
-        'target_can_raise': True,
-        'path_length': 0,
-        'represents_count': 1,
-        'representative_of': 'error_handling/triggers_target_exception',
-        'precondition': {
-            'description': (
-                'Arrange target object state to satisfy the exception condition '
-                'before invoking the source callable'
-            ),
-            'condition': primary.get('condition'),
-            'outcome': primary.get('outcome'),
-            'constraint_expr': constraint.get('expr'),
-            'constraint_type': constraint.get('constraint_type'),
-            'variables_read': constraint.get('variables_read', []),
-        },
-    }
-
-
 def build_spec(
-        edge: dict,
-        nodes_by_id: dict[str, dict],
-        edges_by_source: dict[str, list[dict]],
-        ei_details: dict[str, dict],
-        callable_index: dict[str, dict],
+        *,
+        seam: SeamSource,
+        nodes_by_id: dict[str, dict[str, Any]],
+        outgoing_call_edges: dict[str, list[dict[str, Any]]],
+        ei_details: dict[str, dict[str, Any]],
         counter: int,
 ) -> dict[str, Any]:
-    source_node = nodes_by_id.get(edge['from'], {})
-    target_node = nodes_by_id.get(edge['to'], {})
+    seam_id = seam_identity(seam)
+    spec_id = make_spec_id(seam_id, counter)
+    source_context = seam.source_context
+    target_context = seam.target_context
+    target_outcomes = analyze_target_outcomes(target_context)
+    raw_paths = candidate_execution_paths(seam.candidate, seam.source_ei)
 
-    integration_id = edge.get('integration_id', '')
-    spec_id = make_spec_id(integration_id, counter)
-
-    # Analyze target outcomes for path categorization
-    target_callable_id = target_node.get('callable_id')
-    target_callable = callable_index.get(target_callable_id) if target_callable_id else None
-    target_outcomes = analyze_target_outcomes(target_callable)
-
-    # Categorize and reduce execution paths
-    raw_paths = edge.get('execution_paths') or []
-    categorized = []
-    for i, path_eis in enumerate(raw_paths):
-        if not isinstance(path_eis, list):
-            continue
+    categorized: list[dict[str, Any]] = []
+    for index, path_eis in enumerate(raw_paths):
         cat_info = categorize_path(path_eis, ei_details, target_outcomes)
-        categorized.append({
-            'path_id': f'PATH_{i + 1:03d}',
-            'eis': path_eis,
-            **cat_info,
-        })
+        categorized.append(
+            {
+                "path_id": f"PATH_{index + 1:03d}",
+                "eis": path_eis,
+                **cat_info,
+            }
+        )
 
     representative_paths = find_representative_paths(categorized) if categorized else []
 
-    # If the target can raise but no path exercised the exception condition,
-    # synthesize an explicit error_handling representative so the agent has
-    # clear instructions rather than missing coverage entirely.
-    if target_outcomes.get('has_exceptions'):
+    if target_outcomes.get("has_exceptions"):
         has_error_representative = any(
-            p['category'] == 'error_handling' for p in representative_paths
+            path["category"] == "error_handling"
+            for path in representative_paths
         )
         if not has_error_representative:
             synthetic = build_synthetic_error_representative(target_outcomes)
@@ -419,81 +759,131 @@ def build_spec(
                 representative_paths.append(synthetic)
 
     path_summary = {
-        'happy_path': sum(1 for p in categorized if p['category'] == 'happy_path'),
-        'error_handling': sum(1 for p in categorized if p['category'] == 'error_handling'),
-        'edge_cases': sum(1 for p in categorized if p['category'] == 'edge_cases'),
-        'alternative_flows': sum(1 for p in categorized if p['category'] == 'alternative_flows'),
+        "happy_path": sum(1 for p in categorized if p["category"] == "happy_path"),
+        "error_handling": sum(1 for p in categorized if p["category"] == "error_handling"),
+        "edge_cases": sum(1 for p in categorized if p["category"] == "edge_cases"),
+        "alternative_flows": sum(1 for p in categorized if p["category"] == "alternative_flows"),
     }
 
-    fixtures = identify_fixtures(edge['from'], edge, nodes_by_id, edges_by_source)
+    fixtures_by_path: list[list[dict[str, Any]]] = []
+    marked_paths: list[dict[str, Any]] = []
+    seam_candidate_id = seam.candidate.get("id") if seam.candidate else None
 
-    # Mark fixture EIs in representative paths
-    fixture_integration_ids = {f['integration_id'] for f in fixtures if f.get('integration_id')}
-
-    def mark_fixtures(path_eis: list[str]) -> list[str]:
-        marked = []
-        for i, ei_id in enumerate(path_eis):
-            # Last EI in path is the integration point under test — never a fixture
-            if i == len(path_eis) - 1:
-                marked.append(ei_id)
-                continue
-            # Integration ID for this EI is "I" + ei_id
-            is_fixture = f"I{ei_id}" in fixture_integration_ids
-            marked.append(f"{ei_id}_FIXTURE" if is_fixture else ei_id)
-        return marked
-
-    marked_paths = []
     for path in representative_paths:
-        marked_paths.append({
-            **path,
-            'eis': mark_fixtures(path.get('eis', [])),
-            'eis_original': path.get('eis', []),
-        })
+        original_eis = path.get("eis", []) or []
+
+        fixtures = identify_fixtures_for_path(
+            path_eis=original_eis,
+            seam_ei_id=seam.source_ei,
+            seam_candidate_id=seam_candidate_id,
+            source_context=source_context,
+            outgoing_call_edges=outgoing_call_edges,
+            nodes_by_id=nodes_by_id,
+        )
+
+        fixtures_by_path.append(fixtures)
+
+        marked_paths.append(
+            {
+                **path,
+                "eis": mark_fixture_eis(original_eis, fixtures, seam.source_ei),
+                "eis_original": original_eis,
+            }
+        )
+
+    fixture_requirements = merge_fixture_lists(fixtures_by_path)
+    edge = seam.edge or {}
+    candidate = seam.candidate or {}
+    source_node = nodes_by_id.get(seam.source_ei, {})
+    target_node = seam.target_node or {}
+
+    target_unit = (
+        target_context.unit_name
+        if target_context is not None
+        else target_node.get("unit")
+    )
+
+    target_fqn = (
+        target_context.callable_fqn
+        if target_context is not None
+        else (
+                target_node.get("fully_qualified")
+                or target_node.get("qualified_name")
+                or candidate.get("resolved_target")
+                or candidate.get("target")
+                or candidate.get("operation_target")
+        )
+    )
+
+    target_callable_id = (
+        target_context.callable_id
+        if target_context is not None
+        else target_node.get("callable_id")
+    )
+
+    target_name = (
+        target_context.callable_name
+        if target_context is not None
+        else (
+                target_node.get("name")
+                or candidate.get("target")
+                or candidate.get("operation_target")
+                or candidate.get("resolved_target")
+        )
+    )
 
     return {
-        'spec_id': spec_id,
-        'description': f"Test integration: {edge.get('from_callable')} → {edge.get('to_callable')}",
-        'test_type': 'integration',
-        'integration_point': {
-            'id': integration_id,
-            'edge_id': edge['id'],
-            'type': edge.get('integration_type'),
-            'kind': edge.get('integration_kind'),
-            'is_integration_seam': edge.get('is_integration_seam'),
-            'target_raw': edge.get('target_raw'),
+        "spec_id": spec_id,
+        "description": f"Test integration seam: {source_context.callable_fqn} → {target_fqn}",
+        "test_type": "integration",
+        "spec_kind": "seam",
+        "integration_point": {
+            "id": seam_candidate_id,
+            "source_kind": "graph_backed" if seam.edge is not None else "inventory_only",
+            "edge_id": edge.get("id"),
+            "seam_kind": seam.seam_kind,
+            "classification": candidate.get("classification"),
+            "target_raw": candidate.get("target") or edge.get("operation_target"),
+            "resolved_target": candidate.get("resolved_target") or edge.get("resolved_target"),
+            "operation_target": candidate.get("operation_target") or edge.get("operation_target"),
+            "ei_id": candidate.get("ei_id") or seam.source_ei,
+            "call_signature": candidate.get("signature") or edge.get("signature"),
         },
-        'feasibility': {
-            'feasible_paths': edge.get('feasible_path_count', 0),
-            'total_paths': edge.get('total_path_count', 0),
-            'representative_paths': len(representative_paths),
-            'original_paths': len(raw_paths),
+        "feasibility": {
+            "representative_paths": len(representative_paths),
+            "original_paths": len(raw_paths),
+            "path_summary": path_summary,
         },
-        'source': {
-            'unit': source_node.get('unit'),
-            'unit_id': source_node.get('unit_id'),
-            'callable_id': source_node.get('callable_id'),
-            'name': source_node.get('name'),
-            'qualified_name': source_node.get('qualified_name'),
-            'fully_qualified': source_node.get('fully_qualified'),
-            'kind': source_node.get('kind'),
-            'signature': source_node.get('signature'),
-            'representative_paths': marked_paths,
-            'path_summary': path_summary,
+        "source": {
+            "unit": source_context.unit_name,
+            "unit_fqn": source_context.unit_fqn,
+            "callable_id": source_context.callable_id,
+            "name": source_context.callable_name,
+            "fully_qualified": source_context.callable_fqn,
+            "kind": source_context.callable_kind,
+            "signature": signature_info(source_context.entry).get("signature"),
+            "seam_ei": seam.source_ei,
+            "source_line": source_node.get("line"),
+            "source_condition": source_node.get("condition"),
+            "source_description": source_node.get("description"),
+            "representative_paths": marked_paths,
         },
-        'target': {
-            'unit': target_node.get('unit'),
-            'unit_id': target_node.get('unit_id'),
-            'callable_id': target_node.get('callable_id'),
-            'name': target_node.get('name'),
-            'qualified_name': target_node.get('qualified_name'),
-            'fully_qualified': target_node.get('fully_qualified'),
-            'kind': target_node.get('kind'),
-            'signature': target_node.get('signature'),
-            'unknown': target_node.get('unknown', False),
-            'call_signature': edge.get('signature'),
-            'outcome_analysis': target_outcomes,
+        "target": {
+            "unit": target_unit,
+            "unit_fqn": target_fqn,
+            "callable_id": target_callable_id,
+            "name": target_name,
+            "fully_qualified": target_fqn,
+            "kind": target_context.callable_kind if target_context is not None else target_node.get("category"),
+            "signature": (
+                signature_info(target_context.entry).get("signature")
+                if target_context is not None
+                else edge.get("signature")
+            ),
+            "unknown": target_context is None,
+            "outcome_analysis": target_outcomes,
         },
-        'fixture_requirements': fixtures,
+        "fixture_requirements": fixture_requirements,
     }
 
 
@@ -501,182 +891,272 @@ def build_spec(
 # Main
 # =============================================================================
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(
+def config_stage_output(stage: int) -> Path | None:
+    getter = getattr(config, "get_stage_output", None)
+    if getter is None:
+        return None
+    return getter(stage)
+
+
+def config_inventories_root() -> Path | None:
+    getter = getattr(config, "get_inventories_root", None)
+    if getter is None:
+        return None
+    return getter()
+
+
+def yaml_dump_options() -> dict[str, Any]:
+    if config is None:
+        return {
+            "default_flow_style": False,
+            "sort_keys": False,
+            "width": 120,
+            "indent": 2,
+        }
+
+    return {
+        "default_flow_style": False,
+        "sort_keys": config.get_yaml_sort_keys(),
+        "width": config.get_yaml_width(),
+        "indent": config.get_yaml_indent(),
+    }
+
+
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument(
-        '--input',
+
+    parser.add_argument(
+        "--input",
         type=Path,
         default=None,
-        help='Stage 1 call graph (default: from config)',
+        help="Stage 1 graph output. Defaults to config.get_stage_output(1) when available.",
     )
-    ap.add_argument(
-        '--ledgers-root',
+    parser.add_argument(
+        "--graph-format",
+        choices=["pickle", "yaml"],
+        default=None,
+        help="Graph format. Inferred from file extension when omitted.",
+    )
+    parser.add_argument(
+        "--inventories-root",
         type=Path,
         default=None,
-        help='Root directory for ledger discovery (default: from config)',
+        help="Root directory for unit inventory discovery.",
     )
-    ap.add_argument(
-        '--output',
+    parser.add_argument(
+        "--output",
         type=Path,
         default=None,
-        help='Output file (default: from config)',
+        help="Output file. Defaults to config.get_stage_output(2) when available.",
     )
-    ap.add_argument(
-        '--target-root',
+    parser.add_argument(
+        "--target-root",
         type=Path,
-        help='Target project root (sets config defaults)',
+        default=None,
+        help="Target project root. Passed to config.set_target_root when config is available.",
     )
-    ap.add_argument(
-        '--seam-types',
-        nargs='+',
-        default=['interunit', 'boundary'],
-        metavar='TYPE',
-        help='Integration types to generate specs for (default: interunit boundary)',
+    parser.add_argument(
+        "--seam-types",
+        nargs="+",
+        default=list(DEFAULT_SEAM_TYPES),
+        metavar="TYPE",
+        help="Seam types to generate specs for. Default: interunit boundary",
     )
-    ap.add_argument(
-        '-v', '--verbose',
-        action='store_true',
-        help='Verbose output',
+    parser.add_argument(
+        "--include-same-unit",
+        action="store_true",
+        help="Include same-unit call edges as seams. Default: false.",
+    )
+    parser.add_argument(
+        "--include-collapsed",
+        action="store_true",
+        help="Include collapsed mechanical/utility operation nodes as primary seams. Default: false.",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Verbose output.",
     )
 
-    args = ap.parse_args(argv)
+    return parser.parse_args(argv)
 
-    if args.target_root:
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+
+    if args.target_root and config is not None:
         config.set_target_root(args.target_root)
         if args.verbose:
             print(f"Target root: {args.target_root}")
 
-    input_path = args.input or config.get_stage_output(1)
-    ledgers_root = args.ledgers_root or config.get_ledgers_root()
-    output_path = args.output or config.get_stage_output(2)
+    input_path = args.input or config_stage_output(1)
+    inventories_root = args.inventories_root or config_inventories_root()
+    output_path = args.output or config_stage_output(2)
+
+    if input_path is None:
+        print("ERROR: --input is required when config.get_stage_output(1) is unavailable", file=sys.stderr)
+        return 1
+
+    if output_path is None:
+        print("ERROR: --output is required when config.get_stage_output(2) is unavailable", file=sys.stderr)
+        return 1
+
+    if inventories_root is None:
+        print("ERROR: --inventories-root is required when config.get_inventories_root() is unavailable",
+              file=sys.stderr)
+        return 1
+
+    input_path = Path(input_path)
+    output_path = Path(output_path)
+    inventories_root = Path(inventories_root)
 
     if not input_path.exists():
-        print(f"ERROR: Call graph not found: {input_path}", file=sys.stderr)
+        print(f"ERROR: Stage 1 graph not found: {input_path}", file=sys.stderr)
         return 1
 
-    if not ledgers_root.exists():
-        print(f"ERROR: Ledgers root not found: {ledgers_root}", file=sys.stderr)
+    if not inventories_root.exists():
+        print(f"ERROR: Inventories root not found: {inventories_root}", file=sys.stderr)
         return 1
 
-    # Load call graph
+    graph_format = infer_graph_format(input_path, args.graph_format)
+
     if args.verbose:
-        print(f"Loading call graph: {input_path}")
-    graph = load_yaml(input_path)
+        print(f"Loading graph: {input_path} ({graph_format})")
 
-    stats = graph.get('stats', {})
-    if args.verbose:
-        print(f"  Nodes: {stats.get('total_nodes')} ({stats.get('unknown_nodes')} unknown)")
-        print(f"  Edges: {stats.get('total_edges')}")
-        print(f"  Seam edges: {stats.get('integration_seam_edges')}")
+    cfg = load_graph(input_path, graph_format)
 
-    nodes_by_id, edges_by_source = index_graph(graph)
-
-    # Load ledgers for EI details and target outcome analysis
-    ledger_paths = discover_ledgers(ledgers_root)
-    if not ledger_paths:
-        print(f"ERROR: No ledgers found in {ledgers_root}", file=sys.stderr)
+    inventory_paths = discover_inventory_files(inventories_root)
+    if not inventory_paths:
+        print(f"ERROR: No inventory files found under {inventories_root}", file=sys.stderr)
         return 1
 
     if args.verbose:
-        print(f"\nLoading {len(ledger_paths)} ledger(s) for EI details...")
+        print(f"Loading {len(inventory_paths)} inventory file(s)")
 
-    ei_details = build_ei_details_index(ledger_paths)
-    callable_index = build_callable_index(ledger_paths)
+    inventory_index = load_all_inventories(inventory_paths)
+    ei_details = build_ei_details_index(inventory_index)
+    nodes_by_id = graph_nodes_by_id(cfg)
+    outgoing_call_edges = outgoing_call_edges_by_source(cfg)
+
+    seam_types = {normalized_seam_kind(kind) for kind in args.seam_types}
+
+    seams = discover_inventory_seams(
+        cfg=cfg,
+        inventory_index=inventory_index,
+        nodes_by_id=nodes_by_id,
+        seam_types=seam_types,
+        include_same_unit=args.include_same_unit,
+        include_collapsed=args.include_collapsed,
+    )
+
+    graph_backed_seams = sum(1 for seam in seams if seam.edge is not None)
+    inventory_only_seams = len(seams) - graph_backed_seams
 
     if args.verbose:
-        print(f"  EI branches indexed: {len(ei_details)}")
-        print(f"  Callables indexed: {len(callable_index)}")
+        print(f"Callables indexed: {len(inventory_index.callable_contexts)}")
+        print(f"EI branches indexed: {len(ei_details)}")
+        print(f"Graph nodes: {cfg.number_of_nodes()}")
+        print(f"Graph edges: {cfg.number_of_edges()}")
+        print(f"Inventory seam sources: {len(seams)}")
+        print(f"Graph-backed seams: {graph_backed_seams}")
+        print(f"Inventory-only seams: {inventory_only_seams}")
 
-    # Filter to seam edges of requested types
-    seam_types = set(args.seam_types)
-    seam_edges = [
-        e for e in graph.get('edges', [])
-        if e.get('is_integration_seam') and e.get('integration_type') in seam_types
-    ]
-
-    if args.verbose:
-        print(f"\nGenerating specs for {len(seam_edges)} seam edges "
-              f"(types: {', '.join(sorted(seam_types))})")
-
-    # Generate specs
-    specs = []
+    specs: list[dict[str, Any]] = []
     total_original_paths = 0
     total_representative_paths = 0
 
-    for i, edge in enumerate(seam_edges, start=1):
-        spec = build_spec(edge, nodes_by_id, edges_by_source, ei_details, callable_index, i)
+    for index, seam in enumerate(seams, start=1):
+        spec = build_spec(
+            seam=seam,
+            nodes_by_id=nodes_by_id,
+            outgoing_call_edges=outgoing_call_edges,
+            ei_details=ei_details,
+            counter=index,
+        )
         specs.append(spec)
-        total_original_paths += spec['feasibility']['original_paths']
-        total_representative_paths += spec['feasibility']['representative_paths']
+        total_original_paths += spec["feasibility"]["original_paths"]
+        total_representative_paths += spec["feasibility"]["representative_paths"]
 
     reduction_pct = (
         100 * (1 - total_representative_paths / total_original_paths)
-        if total_original_paths else 0
+        if total_original_paths
+        else 0
     )
 
-    # Fixture summary
-    total_fixtures = sum(len(s.get('fixture_requirements', [])) for s in specs)
-    mechanical_fixtures = sum(
-        sum(1 for f in s.get('fixture_requirements', []) if f['type'] == 'mechanical_operation')
-        for s in specs
-    )
-    interunit_fixtures = sum(
-        sum(1 for f in s.get('fixture_requirements', []) if f['type'] == 'interunit_call')
-        for s in specs
-    )
-
-    # Path category breakdown across all specs
+    total_fixtures = sum(len(spec.get("fixture_requirements", [])) for spec in specs)
+    fixture_type_counts: dict[str, int] = defaultdict(int)
     category_counts: dict[str, int] = {
-        'happy_path': 0, 'error_handling': 0, 'edge_cases': 0, 'alternative_flows': 0
+        "happy_path": 0,
+        "error_handling": 0,
+        "edge_cases": 0,
+        "alternative_flows": 0,
     }
+    seam_kind_counts: dict[str, int] = defaultdict(int)
+
     for spec in specs:
-        for cat, count in spec['source']['path_summary'].items():
-            category_counts[cat] = category_counts.get(cat, 0) + count
+        seam_kind_counts[spec["integration_point"]["seam_kind"]] += 1
+
+        for fixture in spec.get("fixture_requirements", []):
+            fixture_type_counts[fixture.get("type", "unknown")] += 1
+
+        for category, count in spec["feasibility"]["path_summary"].items():
+            category_counts[category] = category_counts.get(category, 0) + count
 
     output_data = {
-        'stage': 'integration-test-specs',
-        'metadata': {
-            'spec_count': len(specs),
-            'seam_types': sorted(seam_types),
-            'input_file': str(input_path),
-            'total_original_paths': total_original_paths,
-            'total_representative_paths': total_representative_paths,
-            'reduction_percentage': round(reduction_pct, 1),
-            'total_fixture_requirements': total_fixtures,
-            'mechanical_fixtures': mechanical_fixtures,
-            'interunit_fixtures': interunit_fixtures,
-            'category_breakdown': category_counts,
+        "stage": "integration-seam-test-specs",
+        "metadata": {
+            "spec_count": len(specs),
+            "seam_types": sorted(seam_types),
+            "input_file": str(input_path),
+            "graph_format": graph_format,
+            "inventories_root": str(inventories_root),
+            "inventory_count": len(inventory_paths),
+            "inventory_seam_sources": len(seams),
+            "graph_backed_seam_sources": graph_backed_seams,
+            "inventory_only_seam_sources": inventory_only_seams,
+            "total_original_paths": total_original_paths,
+            "total_representative_paths": total_representative_paths,
+            "reduction_percentage": round(reduction_pct, 1),
+            "total_fixture_requirements": total_fixtures,
+            "fixture_type_counts": dict(sorted(fixture_type_counts.items())),
+            "category_breakdown": category_counts,
+            "seam_kind_counts": dict(sorted(seam_kind_counts.items())),
         },
-        'test_specs': specs,
+        "test_specs": specs,
     }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, 'w', encoding='utf-8') as f:
-        yaml.dump(
-            output_data,
-            f,
-            default_flow_style=False,
-            sort_keys=config.get_yaml_sort_keys(),
-            width=config.get_yaml_width(),
-            indent=config.get_yaml_indent(),
-        )
+    with open(output_path, "w", encoding="utf-8") as f:
+        yaml.dump(output_data, f, **yaml_dump_options())
 
-    print(f"\n✓ Generated {len(specs)} test specifications → {output_path}")
-    print(f"  Original paths:      {total_original_paths}")
-    print(f"  Representative paths: {total_representative_paths}")
-    print(f"  Reduction:           {reduction_pct:.1f}%")
-    print(f"  Fixture requirements: {total_fixtures} "
-          f"({mechanical_fixtures} mechanical, {interunit_fixtures} interunit)")
+    print(f"\n✓ Generated {len(specs)} integration seam test specification(s) → {output_path}")
+    print(f"  Inventory seam sources:    {len(seams)}")
+    print(f"  Graph-backed seams:        {graph_backed_seams}")
+    print(f"  Inventory-only seams:      {inventory_only_seams}")
+    print(f"  Original paths:            {total_original_paths}")
+    print(f"  Representative paths:      {total_representative_paths}")
+    print(f"  Reduction:                 {reduction_pct:.1f}%")
+    print(f"  Fixture requirements:      {total_fixtures}")
+
     if args.verbose:
-        print(f"\n  Path categories:")
-        for cat, count in sorted(category_counts.items(), key=lambda x: -x[1]):
-            print(f"    {cat}: {count}")
+        print("\n  Seam kinds:")
+        for seam_kind, count in sorted(seam_kind_counts.items()):
+            print(f"    {seam_kind}: {count}")
+
+        print("\n  Path categories:")
+        for category, count in sorted(category_counts.items(), key=lambda item: -item[1]):
+            print(f"    {category}: {count}")
+
+        print("\n  Fixture types:")
+        for fixture_type, count in sorted(fixture_type_counts.items()):
+            print(f"    {fixture_type}: {count}")
 
     return 0
 
 
-if __name__ == '__main__':
-    sys.exit(main())
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -2,7 +2,7 @@
 """
 Diagnostics for inventory-first execution-instance control-flow graphs.
 
-This checker is designed for graphs built by build_full_call_graph_from_inventory.py.
+This checker is designed for graphs built by stage1_build_call_graph.py.
 It avoids old EI numbering heuristics and instead relies on graph node metadata.
 """
 
@@ -14,6 +14,7 @@ import pickle
 import re
 import sys
 from collections import Counter
+from collections.abc import Hashable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,11 +22,10 @@ from typing import Any
 import networkx as nx
 import yaml
 
-from pybastion_integration.stages.build_full_call_graph_from_inventory import (
-    analysis_info,
-    hierarchy_info,
+from pybastion_integration.stages.stage1_build_call_graph import (
     signature_info,
 )
+from pybastion_integration.utils.inventory_index import analysis_info, hierarchy_info
 
 SUCCESS_EXIT_TERMINATORS: set[str] = {
     "return",
@@ -125,6 +125,226 @@ def validate_ei_ids(cfg: nx.DiGraph) -> dict[str, Any]:
     }
 
 
+def analyze_integration_point_graph_coverage(cfg: nx.DiGraph) -> dict[str, Any]:
+    missing_call_edges: list[dict[str, Any]] = []
+    bad_call_targets: list[dict[str, Any]] = []
+    paths_not_ending_at_integration_ei: list[dict[str, Any]] = []
+    same_unit_integration_points: list[dict[str, Any]] = []
+    integration_points: list[dict[str, Any]] = []
+    missing_call_edges_by_kind: Counter[str] = Counter()
+    missing_call_edges_by_suppressed_by: Counter[str] = Counter()
+
+    for node_id, node_data in cfg.nodes(data=True):
+        if not node_data.get("is_integration_point", False):
+            continue
+
+        integration_kind = node_data.get("integration_kind")
+        execution_paths = node_data.get("execution_paths") or []
+
+        item = {
+            "ei_id": node_id,
+            "callable_id": node_data.get("callable_id"),
+            "callable_fqn": node_data.get("callable_fqn"),
+            "integration_kind": integration_kind,
+            "integration_target": node_data.get("integration_target"),
+            "integration_resolved_target": node_data.get("integration_resolved_target"),
+            "execution_path_count": len(execution_paths),
+            "suppressed_by": node_data.get("integration_suppressed_by"),
+        }
+        integration_points.append(item)
+
+        if integration_kind == "same_unit":
+            same_unit_integration_points.append(item)
+
+        outgoing_call_edges = [
+            (dst, edge_data)
+            for _, dst, edge_data in cfg.out_edges(node_id, data=True)
+            if edge_data.get("edge_type") == "call"
+        ]
+
+        if not outgoing_call_edges:
+            missing_call_edges.append(item)
+            missing_call_edges_by_kind[str(integration_kind or "unknown")] += 1
+
+            suppressed_by = item.get("suppressed_by")
+            if suppressed_by:
+                missing_call_edges_by_suppressed_by[str(suppressed_by)] += 1
+            else:
+                missing_call_edges_by_suppressed_by["<not suppressed>"] += 1
+
+        for dst, edge_data in outgoing_call_edges:
+            dst_data = cfg.nodes[dst]
+            dst_category = dst_data.get("category")
+
+            if dst_category not in {
+                "execution_instance",
+                "collapsed_internal_operation",
+                "external_call",
+                "external_placeholder"
+            }:
+                bad_call_targets.append(
+                    {
+                        **item,
+                        "target_node_id": dst,
+                        "target_category": dst_category,
+                        "target_callable_id": dst_data.get("callable_id"),
+                        "target_callable_fqn": dst_data.get("callable_fqn"),
+                        "edge_type": edge_data.get("edge_type"),
+                        "call_kind": edge_data.get("call_kind"),
+                    }
+                )
+
+        for path in execution_paths:
+            if not isinstance(path, list) or not path:
+                paths_not_ending_at_integration_ei.append(
+                    {
+                        **item,
+                        "path": path,
+                        "reason": "empty_or_invalid_path",
+                    }
+                )
+                continue
+
+            if path[-1] != node_id:
+                paths_not_ending_at_integration_ei.append(
+                    {
+                        **item,
+                        "path": path,
+                        "reason": "path_does_not_end_at_integration_ei",
+                        "actual_last_ei": path[-1],
+                    }
+                )
+
+    return {
+        "count": (
+                len(missing_call_edges)
+                + len(bad_call_targets)
+                + len(paths_not_ending_at_integration_ei)
+                + len(same_unit_integration_points)
+        ),
+        "integration_point_count": len(integration_points),
+        "missing_call_edges_count": len(missing_call_edges),
+        "missing_call_edges": missing_call_edges,
+        "missing_call_edges_by_kind": dict(sorted(missing_call_edges_by_kind.items())),
+        "missing_call_edges_by_suppressed_by": dict(sorted(missing_call_edges_by_suppressed_by.items())),
+        "bad_call_targets_count": len(bad_call_targets),
+        "bad_call_targets": bad_call_targets,
+        "paths_not_ending_at_integration_ei_count": len(paths_not_ending_at_integration_ei),
+        "paths_not_ending_at_integration_ei": paths_not_ending_at_integration_ei,
+        "same_unit_integration_points_count": len(same_unit_integration_points),
+        "same_unit_integration_points": same_unit_integration_points,
+    }
+
+
+def classify_placeholder_reason(
+        *,
+        integration_target: Any,
+        integration_resolved_target: Any,
+        target_node_id: Hashable,
+) -> str:
+    target = str(integration_resolved_target or integration_target or "")
+    target_node_id_str = str(target_node_id)
+
+    if "::unknown::" in target_node_id_str:
+        return "unknown_resolution"
+
+    if "::stdlib::" in target_node_id_str:
+        return "stdlib_placeholder"
+
+    if "::extlib::" in target_node_id_str:
+        return "extlib_placeholder"
+
+    if "::interunit::" in target_node_id_str:
+        last = target.rsplit(".", 1)[-1] if target else ""
+        if last and last[:1].isupper():
+            return "interunit_type_or_constructor"
+        return "interunit_unresolved_callable"
+
+    return "unclassified_placeholder"
+
+
+def analyze_interunit_placeholder_targets(cfg: nx.DiGraph) -> dict[str, Any]:
+    interunit_placeholder_targets: list[dict[str, Any]] = []
+    interunit_real_targets: list[dict[str, Any]] = []
+    placeholder_reason_counts: Counter[str] = Counter()
+
+    for node_id, node_data in cfg.nodes(data=True):
+        if not node_data.get("is_integration_point", False):
+            continue
+
+        if node_data.get("integration_kind") != "interunit":
+            continue
+
+        outgoing_call_edges = [
+            (dst, edge_data)
+            for _, dst, edge_data in cfg.out_edges(node_id, data=True)
+            if edge_data.get("edge_type") == "call"
+        ]
+
+        for dst, edge_data in outgoing_call_edges:
+            dst_data = cfg.nodes[dst]
+            target_category = dst_data.get("category")
+
+            integration_target = node_data.get("integration_target")
+            integration_resolved_target = node_data.get("integration_resolved_target")
+
+            item = {
+                "ei_id": node_id,
+                "callable_id": node_data.get("callable_id"),
+                "callable_fqn": node_data.get("callable_fqn"),
+                "integration_kind": node_data.get("integration_kind"),
+                "integration_target": integration_target,
+                "integration_resolved_target": integration_resolved_target,
+                "target_node_id": dst,
+                "target_category": target_category,
+                "target_callable_id": dst_data.get("callable_id"),
+                "target_callable_fqn": dst_data.get("callable_fqn"),
+                "edge_call_kind": edge_data.get("call_kind"),
+                "edge_target_fqn": edge_data.get("target_fqn"),
+                "edge_resolved_target": edge_data.get("resolved_target"),
+            }
+
+            if target_category == "external_placeholder":
+                placeholder_reason = classify_placeholder_reason(
+                    integration_target=integration_target,
+                    integration_resolved_target=integration_resolved_target,
+                    target_node_id=dst,
+                )
+                item["placeholder_reason"] = placeholder_reason
+                placeholder_reason_counts[placeholder_reason] += 1
+                interunit_placeholder_targets.append(item)
+            else:
+                interunit_real_targets.append(item)
+
+    return {
+        "count": len(interunit_placeholder_targets),
+        "interunit_placeholder_targets_count": len(interunit_placeholder_targets),
+        "interunit_real_targets_count": len(interunit_real_targets),
+        "interunit_placeholder_targets_by_reason": dict(
+            sorted(placeholder_reason_counts.items())
+        ),
+        "interunit_placeholder_targets": interunit_placeholder_targets,
+        "interunit_real_targets": interunit_real_targets,
+    }
+
+
+def classify_interunit_placeholder_reason(item: dict[str, Any]) -> str:
+    target = item.get("integration_resolved_target") or item.get("integration_target") or ""
+
+    if "." not in target:
+        return "unknown"
+
+    last = target.rsplit(".", 1)[-1]
+
+    if last[:1].isupper():
+        return "class_or_type_constructor"
+
+    if last in {"StrategyCriticality"}:
+        return "enum_or_value_type"
+
+    return "unresolved_callable_like_target"
+
+
 def analyze_collapsed_node_health(cfg: nx.DiGraph) -> dict[str, Any]:
     collapsed_without_return: list[dict[str, Any]] = []
     collapsed_without_incoming_call: list[dict[str, Any]] = []
@@ -192,7 +412,12 @@ def analyze_edge_target_health(cfg: nx.DiGraph) -> dict[str, Any]:
 
         if edge_type == "call":
             dst_category = dst_data.get("category")
-            if dst_category not in {"execution_instance", "collapsed_internal_operation"}:
+            if dst_category not in {
+                "execution_instance",
+                "collapsed_internal_operation",
+                "external_call",
+                "external_placeholder",
+            }:
                 bad_call_targets.append(
                     {
                         "from": src,
@@ -1410,11 +1635,11 @@ def section_match(item: dict[str, Any], include_when: dict[str, Any]) -> bool:
 
 
 def build_section_payloads(
-    cfg: nx.DiGraph,
-    results: list[dict[str, Any]],
-    config: CheckerConfig,
-    private_helper_items: list[dict[str, Any]],
-    same_unit_reference_items: list[dict[str, Any]],
+        cfg: nx.DiGraph,
+        results: list[dict[str, Any]],
+        config: CheckerConfig,
+        private_helper_items: list[dict[str, Any]],
+        same_unit_reference_items: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     missing_return_items = build_missing_return_edge_items(results)
     low_signal_items = build_low_signal_items(results)
@@ -1589,6 +1814,8 @@ def build_analysis_registry(
         "edge_target_health": analyze_edge_target_health(cfg),
         "callable_call_cycles": analyze_callable_call_cycles(cfg),
         "external_seams": analyze_external_seams(results),
+        "integration_point_graph_coverage": analyze_integration_point_graph_coverage(cfg),
+        "interunit_placeholder_targets": analyze_interunit_placeholder_targets(cfg),
     }
 
 
@@ -1696,16 +1923,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--summary",
         metavar="CODES",
-        default="aghprs",
+        default="aghiprst",
         help=(
             "Console summary sections. Codes: "
             "a=abstraction, "
             "g=general, "
             "h=structural-health, "
+            "i=integration-point-graph, "
             "l=low-signal, "
             "p=private-helpers, "
             "r=missing-returns, "
-            "s=same-unit. "
+            "s=same-unit, "
+            "t=interunit-placeholder-targets. "
             "If omitted, default configured sections with findings are shown. "
             "If set to only 'l', low-signal is added to the default summary. "
             "Any other value makes summary output include-only for the specified codes."

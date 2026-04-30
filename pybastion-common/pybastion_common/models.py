@@ -37,6 +37,7 @@ class UnitBindingEntry:
     value_kind: str | None = None
     value_expr: str | None = None
 
+
 @dataclass(slots=True)
 class UnitIndexEntry:
     id: str
@@ -50,6 +51,9 @@ class UnitIndexEntry:
     ordinal_within_parent: int
     child_ids: list[str] = field(default_factory=list)
     is_async: bool = False
+    synthetic: bool = False
+    implicit: bool = False
+    implicit_kind: str | None = None
 
 
 @dataclass(slots=True)

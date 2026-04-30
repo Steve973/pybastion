@@ -121,6 +121,48 @@ class UnitIndexVisitor(ast.NodeVisitor):
             ScopeFrame(id=unit_id, fqn=module_fqn, kind="unit")
         ]
 
+    def _has_explicit_class_callable(
+            self,
+            node: ast.ClassDef,
+            name: str,
+    ) -> bool:
+        return any(
+            isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and child.name == name
+            for child in node.body
+        )
+
+    def _add_implicit_class_callables(
+            self,
+            *,
+            class_id: str,
+            class_fqn: str,
+            node: ast.ClassDef,
+    ) -> None:
+        if self._has_explicit_class_callable(node, "__init__"):
+            return
+
+        self.method_counters[class_id] = self.method_counters.get(class_id, 0) + 1
+        callable_id = generate_method_id(class_id, self.method_counters[class_id])
+
+        self.ordinal_counters.setdefault(callable_id, 0)
+
+        self.add_entry(
+            entry_id=callable_id,
+            kind="method",
+            name="__init__",
+            fqn=f"{class_fqn}.__init__",
+            parent_id=class_id,
+            owner_id=class_id,
+            lineno=node.lineno,
+            end_lineno=node.lineno,
+            ordinal_within_parent=self.next_ordinal(class_id),
+            is_async=False,
+            synthetic=True,
+            implicit=True,
+            implicit_kind="default_constructor",
+        )
+
     def current_scope(self) -> ScopeFrame:
         return self.scope_stack[-1]
 
@@ -142,6 +184,9 @@ class UnitIndexVisitor(ast.NodeVisitor):
             end_lineno: int,
             ordinal_within_parent: int,
             is_async: bool = False,
+            synthetic: bool = False,
+            implicit: bool = False,
+            implicit_kind: str | None = None,
     ) -> None:
         entry = UnitIndexEntry(
             id=entry_id,
@@ -154,6 +199,9 @@ class UnitIndexVisitor(ast.NodeVisitor):
             end_lineno=end_lineno,
             ordinal_within_parent=ordinal_within_parent,
             is_async=is_async,
+            synthetic=synthetic,
+            implicit=implicit,
+            implicit_kind=implicit_kind,
         )
         self.entries.append(entry)
         self.entry_by_id[entry_id] = entry
@@ -291,6 +339,12 @@ class UnitIndexVisitor(ast.NodeVisitor):
             lineno=node.lineno,
             end_lineno=getattr(node, "end_lineno", node.lineno),
             ordinal_within_parent=self.next_ordinal(parent_id),
+        )
+
+        self._add_implicit_class_callables(
+            class_id=class_id,
+            class_fqn=fqn,
+            node=node,
         )
 
         self.scope_stack.append(

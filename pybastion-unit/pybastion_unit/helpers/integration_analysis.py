@@ -148,14 +148,24 @@ def _is_internal_self_target(
     return False
 
 
-def _is_forbidden_integration_branch(
-        branch: Branch,
-        callable_fqn: str,
-        callable_inventory: dict[str, str],
+def _is_collapsible_operation_target(
+        resolved_target: str | None,
+        collapsible_operation_fqns: set[str],
 ) -> bool:
+    if not resolved_target:
+        return False
+
+    return resolved_target in collapsible_operation_fqns
+
+
+def _is_forbidden_integration_branch(branch: Branch) -> bool:
     owner = branch.owner_info
     if owner is not None and owner.stmt_type == "Try" and owner.region == "except":
         return True
+
+    for decorator in branch.decorators:
+        if decorator.get("name", "") in ("MechanicalOperation", "UtilityOperation"):
+            return True
 
     constraint = branch.constraint
     if constraint is None:
@@ -220,7 +230,7 @@ def _classify_integration_target(
     if candidate in inventory_fqns or candidate in project_fqns:
         if candidate.startswith(f"{unit_fqn}."):
             return {
-                "is_integration": True,
+                "is_integration": False,
                 "kind": "same_unit",
                 "resolved_target": candidate,
             }
@@ -303,6 +313,7 @@ def build_integration_entries(
         unit_fqn: str,
         project_fqns: set[str],
         callable_inventory: dict[str, str],
+        collapsible_operation_fqns: set[str],
         known_types: dict[str, TypeRef],
         resolve_target: ResolverFn,
         signature_for_branch: SignatureFn | None = None,
@@ -314,11 +325,7 @@ def build_integration_entries(
         if not _is_operation_branch(branch):
             continue
 
-        if _is_forbidden_integration_branch(
-                branch,
-                callable_fqn=callable_fqn,
-                callable_inventory=callable_inventory,
-        ):
+        if _is_forbidden_integration_branch(branch):
             continue
 
         constraint = branch.constraint
@@ -331,6 +338,12 @@ def build_integration_entries(
             continue
 
         resolved_target, resolved_type = resolve_target(raw_target, known_types)
+        if _is_collapsible_operation_target(
+                resolved_target,
+                collapsible_operation_fqns,
+        ):
+            continue
+
         classification = _classify_integration_target(
             raw_target=raw_target,
             resolved_target=resolved_target,
