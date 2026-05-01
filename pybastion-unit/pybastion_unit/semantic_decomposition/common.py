@@ -8,7 +8,7 @@ from pybastion_common.models import (
     StatementOutcome,
     TargetHint,
 )
-from pybastion_unit.shared.knowledge_base import NO_OP_CALLS
+from pybastion_common.knowledge_base import NO_OP_CALLS
 from .decomp_types import DecomposerResult
 
 

@@ -36,7 +36,7 @@ from pybastion_unit.helpers.decorator_processing import extract_statement_decora
 from pybastion_unit.helpers.type_indexing import build_module_index
 from pybastion_unit.semantic_decomposition import decompose_statement
 from pybastion_unit.semantic_decomposition.decomp_types import DecompositionContext, ControlOwner, OwnerKind
-from pybastion_unit.shared.callable_id_generation import (
+from pybastion_unit.helpers.callable_id_generation import (
     FUNC_ID_EXPR,
     generate_ei_id,
     generate_function_entry_ei_id,

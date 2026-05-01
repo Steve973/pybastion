@@ -134,18 +134,3 @@ def generate_ei_id(callable_id: str, ei_num: int) -> str:
         EI ID string (e.g., "U12AB34CD56_F001_E0001")
     """
     return f"{callable_id}{EI_ID_DELIM}{EI_EX_ITEM_CHAR}{ei_num:04d}"
-
-
-def ei_id_to_integration_id(ei_id: str) -> str:
-    """
-    Convert an EI ID to an integration fact ID.
-
-    Integration IDs are simply "I" prepended to the EI ID.
-
-    Args:
-        ei_id: Execution Item ID (e.g., "U12AB34CD56_F001_E0001")
-
-    Returns:
-        Integration ID string (e.g., "IU12AB34CD56_F001_E0001")
-    """
-    return f"{EI_INTEGRATION_CHAR}{ei_id}"

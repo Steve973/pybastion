@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
 from pybastion_common.models import Branch, TypeRef
-from pybastion_unit.shared.knowledge_base import (
+from pybastion_common.knowledge_base import (
     BUILTIN_METHODS,
     BUILTIN_RECEIVER_METHODS,
     COMMON_EXTLIB_MODULES,

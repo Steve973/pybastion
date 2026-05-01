@@ -30,7 +30,7 @@ from typing import Literal
 
 from pybastion_common.models import ProjectIndex, TypeRef, UnitIndex, UnitIndexEntry, UnitBindingEntry
 from pybastion_unit.helpers.type_indexing import inspect_unit_types
-from pybastion_unit.shared.callable_id_generation import (
+from pybastion_unit.helpers.callable_id_generation import (
     generate_binding_id,
     generate_class_id,
     generate_function_id,

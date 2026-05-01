@@ -18,7 +18,7 @@ from typing import Any
 
 from typing_extensions import Self
 
-from pybastion_unit.shared.callable_id_generation import ei_id_to_integration_id
+EI_INTEGRATION_CHAR: str = "I"
 
 
 @dataclass(slots=True)
@@ -1212,6 +1212,21 @@ class IntegrationCandidate:
 
         return result
 
+    @staticmethod
+    def ei_id_to_integration_id(ei_id: str) -> str:
+        """
+        Convert an EI ID to an integration fact ID.
+
+        Integration IDs are simply "I" prepended to the EI ID.
+
+        Args:
+            ei_id: Execution Item ID (e.g., "U12AB34CD56_F001_E0001")
+
+        Returns:
+            Integration ID string (e.g., "IU12AB34CD56_F001_E0001")
+        """
+        return f"{EI_INTEGRATION_CHAR}{ei_id}"
+
     def to_ledger_integration_fact(self) -> dict[str, Any]:
         """
         Transform to ledger IntegrationFact format.
@@ -1222,7 +1237,7 @@ class IntegrationCandidate:
         integration_id: str | None = None
         if self.execution_paths and self.execution_paths[0]:
             last_ei = self.execution_paths[0][-1]
-            integration_id = ei_id_to_integration_id(last_ei)
+            integration_id = self.ei_id_to_integration_id(last_ei)
 
         fact: dict[str, Any] = {}
 
