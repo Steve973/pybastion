@@ -1,8 +1,15 @@
 """
-Configuration loader for integration flow testing.
+Configuration loader for the pybastion integration analysis pipeline.
 
-Loads settings from integration_config.toml (shipped with tool) and provides
-convenient access to all configuration values with proper path resolution.
+The current pipeline is inventory-first:
+
+  Stage 1: Build the EI-level call graph from inventory files
+  Stage 2: Generate integration seam test specifications from the graph
+  Stage 3: Split integration seam specs by source-unit -> target-unit pair
+
+Path configuration uses a parent-relative model rather than placeholder
+substitution. Absolute paths are used as-is. Relative child paths are resolved
+against their owning parent path.
 """
 
 from __future__ import annotations
@@ -12,19 +19,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Handle Python 3.11+ (tomllib in stdlib) vs earlier (tomli package)
 if sys.version_info >= (3, 11):
     import tomllib
 else:
     try:
         import tomli as tomllib
     except ImportError:
-        print(
-            "ERROR: tomli package required for Python <3.11",
-            file=sys.stderr
-        )
+        print("ERROR: tomli package required for Python <3.11", file=sys.stderr)
         print("Install with: pip install tomli", file=sys.stderr)
-        print("Run ./integration-setup.sh to install dependencies", file=sys.stderr)
         sys.exit(1)
 
 
@@ -35,33 +37,19 @@ class StoreInConfig(argparse.Action):
         super().__init__(option_strings, dest, **kwargs)
 
     def __call__(self, parser, namespace, values, option_string=None):
-        # Call the setter method for the property
         method = getattr(self.config_obj, self.setter_method)
         method(values)
 
 
-# ============================================================================
-# Configuration Loading
-# ============================================================================
-
 _MODULE_DIR = Path(__file__).parent
 _CONFIG_PATH = _MODULE_DIR / "integration_config.toml"
+_TARGET_ROOT: Path | None = None
+_PATH_OVERRIDES: dict[str, Path | str] = {}
+_STAGE_OVERRIDES: dict[str, str] = {}
+_GRAPH_CHECKER_OVERRIDES: dict[str, Path | str | bool] = {}
 
 
 def load_config(config_path: Path | None = None) -> dict[str, Any]:
-    """
-    Load configuration from TOML file.
-
-    Args:
-        config_path: Optional path to config file (default: integration_config.toml in tool repo)
-
-    Returns:
-        Configuration dictionary
-
-    Raises:
-        FileNotFoundError: If config file doesn't exist
-        ValueError: If config file is invalid
-    """
     path = config_path or _CONFIG_PATH
 
     if not path.exists():
@@ -71,56 +59,57 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
         )
 
     try:
-        with path.open('rb') as f:
-            config = tomllib.load(f)
-        return config
-    except Exception as e:
-        raise ValueError(f"Failed to parse {path}: {e}")
+        with path.open("rb") as f:
+            return tomllib.load(f)
+    except Exception as exc:
+        raise ValueError(f"Failed to parse {path}: {exc}") from exc
 
 
-# Load configuration on import
 _CONFIG = load_config()
 
-# ============================================================================
-# Path Resolution
-# ============================================================================
 
-_TARGET_ROOT: Path | None = None
+def get_config() -> dict[str, Any]:
+    return _CONFIG
 
 
 def set_target_root(path: Path | str | None) -> None:
-    """
-    Set the target project root for path resolution.
-
-    Args:
-        path: Path to target project root, or None to use CWD
-    """
     global _TARGET_ROOT
     _TARGET_ROOT = Path(path).resolve() if path else None
 
 
 def get_target_root() -> Path:
-    """Get the current target root (or CWD if not set)."""
     return _TARGET_ROOT or Path.cwd()
 
 
-def resolve_path(
-        config_value: str,
-        relative_to_target: bool = True,
-        allow_absolute: bool = True
-) -> Path:
-    """
-    Resolve a config path value.
+def set_path_override(name: str, value: Path | str | None) -> None:
+    if value is not None:
+        _PATH_OVERRIDES[name] = value
 
-    Resolution priority:
-    1. If absolute path and allowed → use as-is
-    2. If relative_to_target → target_root / config_value
-    3. Otherwise → relative to tool repo (module directory)
-    """
+
+def set_stage_override(name: str, value: str | None) -> None:
+    if value is not None:
+        _STAGE_OVERRIDES[name] = value
+
+
+def set_graph_checker_override(name: str, value: Path | str | bool | None) -> None:
+    if value is not None:
+        _GRAPH_CHECKER_OVERRIDES[name] = value
+
+
+def resolve_path(
+        config_value: str | Path,
+        *,
+        base: Path | None = None,
+        relative_to_target: bool = True,
+        allow_absolute: bool = True,
+) -> Path:
     path = Path(config_value)
 
     if allow_absolute and path.is_absolute():
         return path
+
+    if base is not None:
+        return base / path
 
     if relative_to_target:
         return get_target_root() / path
@@ -128,174 +117,170 @@ def resolve_path(
     return _MODULE_DIR / path
 
 
+def _section(name: str) -> dict[str, Any]:
+    value = _CONFIG.get(name, {})
+    return value if isinstance(value, dict) else {}
+
+
+def _get_str(section: str, key: str, default: str) -> str:
+    value = _section(section).get(key, default)
+    return str(value)
+
+
+def _path_value(key: str, default: str) -> str | Path:
+    return _PATH_OVERRIDES.get(key, _get_str("paths", key, default))
+
+
+def _stage_value(key: str, default: str) -> str:
+    return str(_STAGE_OVERRIDES.get(key, _get_str("stages", key, default)))
+
+
+def _graph_checker_value(key: str, default: str | bool) -> str | bool | Path:
+    return _GRAPH_CHECKER_OVERRIDES.get(key, _section("graph_checker").get(key, default))
+
+
 # ============================================================================
-# Path Configuration
+# Path configuration
 # ============================================================================
 
-def get_ledgers_root() -> Path:
-    """Get the root directory for ledger discovery (relative to target project)."""
+def get_analysis_output_root() -> Path:
     return resolve_path(
-        _CONFIG.get('paths', {}).get('ledgers_root', 'dist/pybastion/ledgers'),
-        relative_to_target=True
+        _path_value("analysis_output_root", "dist/pybastion"),
+        relative_to_target=True,
     )
 
 
 def get_inventories_root() -> Path:
-    """Get the root directory for inventory discovery (relative to target project)."""
     return resolve_path(
-        _CONFIG.get('paths', {}).get('inventories_root', 'dist/pybastion/inventory'),
-        relative_to_target=True
+        _path_value("inventories_root", "inventory"),
+        base=get_analysis_output_root(),
     )
 
 
 def get_integration_output_dir() -> Path:
-    """Get the output directory for integration flow artifacts (relative to target project)."""
     return resolve_path(
-        _CONFIG.get('paths', {}).get('integration_output_dir', 'dist/pybastion/integration-output'),
-        relative_to_target=True
+        _path_value("integration_output_dir", "integration-output"),
+        base=get_analysis_output_root(),
     )
 
 
 def get_spec_split_output_dir() -> Path:
-    """Get the output directory for split spec files (relative to target project)."""
     return resolve_path(
-        _CONFIG.get('paths', {}).get('spec_split_output_dir', 'dist/pybastion/integration-output/split-specs'),
-        relative_to_target=True
-    )
-
-
-def get_callable_inventory_path() -> Path:
-    """Get the callable inventory file path (relative to target project)."""
-    return resolve_path(
-        _CONFIG.get('paths', {}).get('project_inventory_file', 'dist/pybastion/inspect/callable-inventory.txt'),
-        relative_to_target=True
+        _path_value("spec_split_output_dir", "specs"),
+        base=get_integration_output_dir(),
     )
 
 
 # ============================================================================
-# Discovery Configuration
+# Stage configuration
 # ============================================================================
 
-def get_ledger_structure() -> str:
-    """Get ledger directory structure: 'auto' | 'flat' | 'package'."""
-    return _CONFIG.get('discovery', {}).get('ledger_structure', 'auto')
+def get_stage1_format() -> str:
+    value = _stage_value("stage1_format", "pickle").strip().lower()
+    if value not in {"pickle", "yaml"}:
+        raise ValueError(f"Invalid stages.stage1_format: {value!r}; expected 'pickle' or 'yaml'")
+    return value
 
-
-def get_namespace_anchor() -> str | None:
-    """Get optional namespace anchor to strip."""
-    anchor = _CONFIG.get('discovery', {}).get('namespace_anchor', '')
-    return anchor if anchor else None
-
-
-# ============================================================================
-# Stage Output Files
-# ============================================================================
 
 def get_stage_output(stage: int) -> Path:
-    """
-    Get the output file path for a given stage.
-
-    Args:
-        stage: Stage number (1-4)
-
-    Returns:
-        Full path to stage output file (in target project)
-    """
     output_dir = get_integration_output_dir()
-    stages = _CONFIG.get('stages', {})
 
-    filename_key = f'stage{stage}_output'
-    filename = stages.get(filename_key, f'stage{stage}-output.yaml')
-
-    return output_dir / filename
+    match stage:
+        case 1:
+            default = "stage1-ei-cfg.pkl" if get_stage1_format() == "pickle" else "stage1-ei-cfg.yaml"
+            return resolve_path(_stage_value("stage1_output", default), base=output_dir)
+        case 2:
+            return resolve_path(_stage_value("stage2_output", "stage2-integration-test-specs.yaml"), base=output_dir)
+        case 3:
+            return get_spec_split_output_dir()
+        case _:
+            raise ValueError(f"Unsupported stage: {stage}")
 
 
 def get_stage_input(stage: int) -> Path:
-    """
-    Get the expected input file for a given stage (output of previous stage).
-
-    Args:
-        stage: Stage number (2-4)
-
-    Returns:
-        Path to expected input file
-    """
-    if stage < 2 or stage > 4:
-        raise ValueError(f"Stage must be 2-4 (got {stage})")
-
+    if stage not in {2, 3}:
+        raise ValueError(f"Stage must be 2 or 3 (got {stage})")
     return get_stage_output(stage - 1)
 
 
 # ============================================================================
-# Output Format Configuration
+# Graph checker configuration
+# ============================================================================
+
+def graph_checker_enabled() -> bool:
+    return bool(_graph_checker_value("enabled", False))
+
+
+def get_graph_checker_script() -> Path:
+    configured = _graph_checker_value("script", "utils/check_inventory_graph.py")
+    return resolve_path(configured, relative_to_target=False)
+
+
+def get_graph_checker_report() -> Path:
+    configured = _graph_checker_value("report", "inventory-graph-report.yaml")
+    return resolve_path(configured, base=get_integration_output_dir())
+
+
+def get_graph_checker_summary() -> str:
+    return str(_graph_checker_value("summary", "l"))
+
+
+# ============================================================================
+# Output format configuration
 # ============================================================================
 
 def get_yaml_width() -> int:
-    """Get YAML line width."""
-    return _CONFIG.get('output_format', {}).get('yaml_width', 100)
+    return int(_section("output_format").get("yaml_width", 100))
 
 
 def get_yaml_indent() -> int:
-    """Get YAML indentation."""
-    return _CONFIG.get('output_format', {}).get('yaml_indent', 2)
+    return int(_section("output_format").get("yaml_indent", 2))
 
 
 def get_yaml_sort_keys() -> bool:
-    """Check if YAML keys should be sorted."""
-    return _CONFIG.get('output_format', {}).get('yaml_sort_keys', False)
+    return bool(_section("output_format").get("yaml_sort_keys", False))
 
 
 def include_metadata() -> bool:
-    """Check if metadata sections should be included."""
-    return _CONFIG.get('output_format', {}).get('include_metadata', True)
+    return bool(_section("output_format").get("include_metadata", True))
 
 
 def debug_output() -> bool:
-    """Check if debug information should be included."""
-    return _CONFIG.get('output_format', {}).get('debug_output', False)
+    return bool(_section("output_format").get("debug_output", False))
 
 
 # ============================================================================
-# Logging Configuration
+# Logging configuration
 # ============================================================================
 
 def get_verbosity() -> int:
-    """Get verbosity level: 0 (quiet) | 1 (normal) | 2 (verbose)."""
-    return _CONFIG.get('logging', {}).get('verbosity', 1)
+    return int(_section("logging").get("verbosity", 1))
 
 
 def show_progress() -> bool:
-    """Check if progress should be displayed."""
-    return _CONFIG.get('logging', {}).get('show_progress', True)
+    return bool(_section("logging").get("show_progress", True))
 
 
 # ============================================================================
-# Utility Functions
+# Utility functions
 # ============================================================================
 
 def ensure_output_dir() -> None:
-    """Ensure the integration output directory exists."""
     get_integration_output_dir().mkdir(parents=True, exist_ok=True)
+    get_spec_split_output_dir().mkdir(parents=True, exist_ok=True)
 
 
 def validate_config() -> list[str]:
-    """
-    Validate configuration settings.
+    errors: list[str] = []
 
-    Returns:
-        List of error messages (empty if valid)
-    """
-    errors = []
-
-    if not get_ledgers_root().exists():
-        errors.append(f"Ledgers root does not exist: {get_ledgers_root()}")
+    try:
+        graph_format = get_stage1_format()
+    except ValueError as exc:
+        errors.append(str(exc))
+        graph_format = "pickle"
 
     if not get_inventories_root().exists():
         errors.append(f"Inventories root does not exist: {get_inventories_root()}")
-
-    structure = get_ledger_structure()
-    if structure not in {'auto', 'flat', 'package'}:
-        errors.append(f"Invalid ledger_structure: {structure} (must be 'auto', 'flat', or 'package')")
 
     verbosity = get_verbosity()
     if verbosity not in {0, 1, 2}:
@@ -307,25 +292,31 @@ def validate_config() -> list[str]:
     if get_yaml_indent() <= 0:
         errors.append(f"yaml_indent must be > 0 (got {get_yaml_indent()})")
 
+    stage1_output = get_stage_output(1)
+    if graph_format == "pickle" and stage1_output.suffix not in {".pkl", ".pickle"}:
+        errors.append(f"stage1_format is pickle but stage1_output does not look like a pickle file: {stage1_output}")
+    if graph_format == "yaml" and stage1_output.suffix not in {".yaml", ".yml"}:
+        errors.append(f"stage1_format is yaml but stage1_output does not look like a YAML file: {stage1_output}")
+
     return errors
 
 
 def print_config_summary() -> None:
-    """Print a summary of current configuration."""
     print("Configuration Summary:")
-    print(f"  Target root:      {get_target_root()}")
-    print(f"  Ledgers root:     {get_ledgers_root()}")
-    print(f"  Inventories root: {get_inventories_root()}")
-    print(f"  Output dir:       {get_integration_output_dir()}")
-    print(f"  Structure:        {get_ledger_structure()}")
-    print(f"  Stage 1 output:   {get_stage_output(1)}")
-    print(f"  Stage 2 output:   {get_stage_output(2)}")
-    print(f"  Stage 3 output:   {get_stage_output(3)}")
+    print(f"  Target root:          {get_target_root()}")
+    print(f"  Analysis output root: {get_analysis_output_root()}")
+    print(f"  Inventories root:     {get_inventories_root()}")
+    print(f"  Output dir:           {get_integration_output_dir()}")
+    print(f"  Split specs dir:      {get_spec_split_output_dir()}")
+    print(f"  Stage 1 output:       {get_stage_output(1)}")
+    print(f"  Stage 1 format:       {get_stage1_format()}")
+    print(f"  Stage 2 output:       {get_stage_output(2)}")
+    print(f"  Stage 3 output dir:   {get_stage_output(3)}")
+    print(f"  Graph checker:        {graph_checker_enabled()}")
+    print(f"  Graph checker script: {get_graph_checker_script()}")
+    print(f"  Graph check report:   {get_graph_checker_report()}")
 
 
-# ============================================================================
-# Automatic Validation on Import
-# ============================================================================
 def run_validation() -> None:
     validation_errors = validate_config()
     if validation_errors:

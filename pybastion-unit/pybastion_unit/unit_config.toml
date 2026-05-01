@@ -1,37 +1,40 @@
 # Default unit analysis configuration.
 # This file belongs in pybastion_unit/unit_config.toml.
-# In the normal case you only need:
+#
+# Normal usage:
 #   python pybastion_unit/run_project_analysis.py /path/to/target/project
 #
-# Paths under [paths] are resolved relative to the target project root.
-# Paths under [scripts] are resolved relative to the pybastion_unit package root.
+# Path resolution:
+#   source_root resolves against the target project root.
+#   analysis_output_root resolves against the target project root.
+#   inspect_root, eis_root, inventory_root, and logs_root resolve against analysis_output_root.
+#   readiness.output resolves against inspect_root.
+#   script paths resolve against the pybastion_unit package root.
+#   Absolute paths are used as-is.
 
 [paths]
-# Default: <target-project>/src if it exists, else <target-project>
 source_root = "src"
-
-# Default: <target-project>/dist/pybastion
-output_root = "dist/pybastion"
-
-# These default under output_root. Override only if you want a different layout.
-inspect_root = "dist/pybastion/inspect"
-eis_root = "dist/pybastion/eis"
-inventory_root = "dist/pybastion/inventory"
-logs_root = "dist/pybastion/logs"
+analysis_output_root = "dist/pybastion"
+inspect_root = "inspect"
+eis_root = "eis"
+inventory_root = "inventory"
+logs_root = "logs"
 
 [scripts]
-# These resolve relative to the pybastion_unit package root.
 stage1 = "stages/stage1_inspect_units.py"
 stage2 = "stages/stage2_enumerate_exec_items.py"
 stage3 = "stages/stage3_enumerate_callables.py"
-
-[run]
-stage1 = true
-stage2 = true
-stage3 = true
+readiness = "helpers/analyze_readiness.py"
 
 [behavior]
-emit_legacy_inventory = false
 continue_on_error = true
 clean_logs = true
 clean_outputs = true
+
+[readiness]
+enabled = false
+output = "readiness.yaml"
+format = "yaml"
+grouping = "smt"
+include_info = true
+# max_findings_per_type = 50

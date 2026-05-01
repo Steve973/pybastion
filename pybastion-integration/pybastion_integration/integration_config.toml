@@ -1,77 +1,55 @@
-# Integration Flow Testing Configuration
-# Edit these values to match your project structure
+# Integration analysis pipeline configuration
+#
+# Path rules:
+#   - Absolute paths are used exactly as written.
+#   - analysis_output_root is relative to --target-root.
+#   - inventories_root is relative to analysis_output_root.
+#   - integration_output_dir is relative to analysis_output_root.
+#   - spec_split_output_dir is relative to integration_output_dir.
+#   - project_inventory_file is relative to analysis_output_root.
+#
+# This lets callers move all pybastion analysis output by changing only
+# analysis_output_root, while still allowing any child path to be overridden.
 
 [paths]
-# Where unit ledgers are located relative to the project root
-ledgers_root = "dist/pybastion/ledgers"
+# Top-level pybastion analysis output directory under the analyzed project.
+analysis_output_root = "dist/pybastion"
 
-# Where the unit inventory YAML files are located relative to the project root
-inventories_root = "dist/pybastion/inventory"
+# Where the unit inventory YAML files are located.
+# This location is relative to analysis_output_root.
+inventories_root = "inventory"
 
-# Where integration flow outputs will be written
-integration_output_dir = "dist/pybastion/integration-output"
+# Where integration analysis outputs will be written.
+# This location is relative to analysis_output_root.
+integration_output_dir = "integration-output"
 
-# Where the split integration spec files will be written
-spec_split_output_dir = "dist/pybastion/integration-output/split-specs"
-
-# The text file with lines in the format of FQN:ID
-project_inventory_file = "dist/pybastion/inspect/callable-inventory.txt"
-
-[discovery]
-# Ledger directory structure: "auto" | "flat" | "package"
-ledger_structure = "auto"
-
-# Optional namespace anchor to strip when resolving packages
-namespace_anchor = ""
+# Where Stage 3 split spec files will be written.
+# This location is relative to integration_output_dir.
+spec_split_output_dir = "specs"
 
 [stages]
-# Output filenames for each stage (relative to integration_output_dir)
-stage1_output = "stage1-call-graph.yaml"
+# Output filenames for stages that produce a single file.
+stage1_output = "stage1-ei-cfg.pkl"
 stage2_output = "stage2-integration-test-specs.yaml"
-stage3_output = "{source_unit}__{target_unit}.yaml (multiple files)"
 
-[processing]
-# Maximum depth when traversing flows (prevents infinite loops)
-max_flow_depth = 20
+# Stage 1 graph format. Must match stage1_output extension and Stage 2 --graph-format.
+stage1_format = "pickle"
 
-# Minimum window length for sliding windows
-min_window_length = 2
-
-# Maximum window length (0 = use full flow length)
-max_window_length = 7
-
-# Treat boundary integrations as terminal nodes
-boundaries_are_terminal = true
-
-[pattern_analysis]
-# Maximum depth for pattern analysis traversal
-max_depth = 15
-
-# Flows at or above this threshold are considered "long" and analyzed
-long_flow_threshold = 8
+[graph_checker]
+# Optional graph consistency checker after Stage 1.
+enabled = false
+script = "utils/check_inventory_graph.py"
+report = "inventory-graph-report.yaml"
+summary = "l"
 
 [output_format]
-# YAML formatting options
 yaml_width = 100
 yaml_indent = 2
 yaml_sort_keys = false
-
-# Include metadata sections in outputs
 include_metadata = true
-
-# Include debug information in outputs
 debug_output = false
 
 [logging]
-# Verbosity level: 0 (quiet) | 1 (normal) | 2 (verbose)
+# Verbosity level: 0 (quiet) | 1 (normal) | 2 (verbose).
 verbosity = 1
-
-# Show progress bars for long-running operations
 show_progress = true
-
-[validation]
-# Path to JSON schema file in THIS repo, relative to root
-schema_path = "../specs/integration-flow-schema.json"
-
-# Validate outputs against schema
-validate_outputs = true
