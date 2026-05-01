@@ -27,7 +27,8 @@ classifiers = [
 ]
 
 [tool.poetry]
-package-mode = false
+package-mode = true
+packages = [{ include = "pybastion", from = "src" }]
 
 [tool.poetry.dependencies]
 pybastion-common =      { path = "pybastion-common", develop = true }
@@ -40,6 +41,7 @@ black = ">=24.0.0"
 ruff = ">=0.1.0"
 
 [tool.poetry.scripts]
+pybastion = "pybastion.cli:main"
 pybastion-unit = "pybastion_unit.cli:main"
 pybastion-integration = "pybastion_integration.cli:main"
 
