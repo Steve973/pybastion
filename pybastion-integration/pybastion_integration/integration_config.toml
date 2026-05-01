@@ -6,7 +6,6 @@
 #   - inventories_root is relative to analysis_output_root.
 #   - integration_output_dir is relative to analysis_output_root.
 #   - spec_split_output_dir is relative to integration_output_dir.
-#   - project_inventory_file is relative to analysis_output_root.
 #
 # This lets callers move all pybastion analysis output by changing only
 # analysis_output_root, while still allowing any child path to be overridden.

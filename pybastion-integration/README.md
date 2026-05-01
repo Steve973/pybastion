@@ -153,13 +153,13 @@ For each integration flow window, test with use case coverage:
 
 For flow window `[A→B, B→C, C→API]`:
 
-| Use Case | Entry Input | Mock Behavior | Expected Outcome | Category |
-|----------|-------------|---------------|------------------|----------|
-| Normal success | `{"user_id": "123"}` | API returns `{"status": "ok"}` | Data flows correctly, result returned | Happy path |
-| Empty API response | `{"user_id": "123"}` | API returns `{}` | System handles gracefully | Boundary |
-| API timeout | `{"user_id": "123"}` | API raises Timeout | Error propagates to A | Error |
-| Invalid data from B | `{"user_id": "123"}` | B returns wrong type | Contract violation caught | Error |
-| Large dataset | `{"user_id": "123"}` | API returns 10k items | Handles large data | Boundary |
+| Use Case            | Entry Input          | Mock Behavior                  | Expected Outcome                      | Category   |
+|---------------------|----------------------|--------------------------------|---------------------------------------|------------|
+| Normal success      | `{"user_id": "123"}` | API returns `{"status": "ok"}` | Data flows correctly, result returned | Happy path |
+| Empty API response  | `{"user_id": "123"}` | API returns `{}`               | System handles gracefully             | Boundary   |
+| API timeout         | `{"user_id": "123"}` | API raises Timeout             | Error propagates to A                 | Error      |
+| Invalid data from B | `{"user_id": "123"}` | B returns wrong type           | Contract violation caught             | Error      |
+| Large dataset       | `{"user_id": "123"}` | API returns 10k items          | Handles large data                    | Boundary   |
 
 ---
 
@@ -308,14 +308,14 @@ These will be resolved during specification development:
 
 Integration flow testing complements unit testing:
 
-| Aspect | Unit Testing | Integration Flow Testing |
-|--------|--------------|--------------------------|
-| **Focus** | Execution items within one unit | Seams between units |
-| **Coverage** | 100% of EIs (exhaustive paths) | Use case coverage of seam interactions |
-| **Scope** | Single unit, mock everything outside | Multiple units, mock at window boundary |
-| **Failures mean** | Internal logic is wrong | Units don't compose correctly |
-| **Generated from** | Unit Ledger (EI enumeration) | Integration Flow Graph (seam enumeration) |
-| **Execution paths** | Test all variations | Use minimal valid paths to reach seams |
+| Aspect              | Unit Testing                         | Integration Flow Testing                  |
+|---------------------|--------------------------------------|-------------------------------------------|
+| **Focus**           | Execution items within one unit      | Seams between units                       |
+| **Coverage**        | 100% of EIs (exhaustive paths)       | Use case coverage of seam interactions    |
+| **Scope**           | Single unit, mock everything outside | Multiple units, mock at window boundary   |
+| **Failures mean**   | Internal logic is wrong              | Units don't compose correctly             |
+| **Generated from**  | Unit Ledger (EI enumeration)         | Integration Flow Graph (seam enumeration) |
+| **Execution paths** | Test all variations                  | Use minimal valid paths to reach seams    |
 
 **Together they provide:**
 - Unit tests: Every line of code works correctly in isolation
