@@ -3,14 +3,11 @@ from __future__ import annotations
 import argparse
 from collections.abc import Sequence
 
-from pybastion_integration.run_integration_analysis import main as integration_main
-from pybastion_unit.run_project_analysis import main as unit_main
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pybastion",
-        description="Run PyBastion unit and integration analysis pipelines.",
+        description="Run PyBastion analysis pipelines.",
     )
 
     subcommands = parser.add_subparsers(dest="command", metavar="COMMAND")
@@ -18,6 +15,7 @@ def build_parser() -> argparse.ArgumentParser:
     unit = subcommands.add_parser(
         "unit",
         help="Run the unit analysis pipeline.",
+        description="Run the PyBastion unit analysis pipeline.",
     )
     unit.add_argument(
         "args",
@@ -28,6 +26,7 @@ def build_parser() -> argparse.ArgumentParser:
     integration = subcommands.add_parser(
         "integration",
         help="Run the integration analysis pipeline.",
+        description="Run the PyBastion integration analysis pipeline.",
     )
     integration.add_argument(
         "args",
@@ -38,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     all_cmd = subcommands.add_parser(
         "all",
         help="Run unit analysis, then integration analysis.",
+        description="Run the full PyBastion unit and integration analysis pipeline.",
     )
     all_cmd.add_argument(
         "project_root",
@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     all_cmd.add_argument(
         "--check-graph",
         action="store_true",
-        help="Run integration graph checker after Stage 1.",
+        help="Run integration graph checker after integration Stage 1.",
     )
     all_cmd.add_argument(
         "-v",
@@ -74,10 +74,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_unit(args: Sequence[str]) -> int:
+    from pybastion_unit.run_project_analysis import main as unit_main
+
     return unit_main(list(args))
 
 
 def run_integration(args: Sequence[str]) -> int:
+    from pybastion_integration.run_integration_analysis import main as integration_main
+
     return integration_main(list(args))
 
 
@@ -127,7 +131,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_all(parsed)
         case _:
             parser.print_help()
-            return 2
+            return 0
 
 
 if __name__ == "__main__":

@@ -7,7 +7,11 @@ import subprocess
 import sys
 from pathlib import Path
 
-from config import AnalysisConfig, load_analysis_config, validate_analysis_config
+from pybastion_unit.config import (
+    AnalysisConfig,
+    load_analysis_config,
+    validate_analysis_config,
+)
 
 ALL_STAGE_NUMS = [1, 2, 3]
 STAGE_NAMES = {
