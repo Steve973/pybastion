@@ -17,16 +17,16 @@ import ast
 import json
 import re
 import sys
-from pybastion_common.common_config import (
-    load_toml_config,
-    require_table,
-    select_config_table,
-)
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
 import yaml
+from pybastion_common.common_config import (
+    load_toml_config,
+    require_table,
+    select_config_table,
+)
 
 from pybastion_unit.helpers.type_indexing import inspect_unit_types
 from pybastion_unit.stages.stage1_inspect_units import derive_fqn, process_file
