@@ -25,7 +25,7 @@ def config_init(
 
     if not resource.is_file():
         raise FileNotFoundError(
-            "Configuration template not found: pybastion:pybastion_config.toml"
+            "Configuration template not found: pybastion_common:pybastion_config.toml"
         )
 
     dest_path.write_text(resource.read_text(encoding="utf-8"), encoding="utf-8")

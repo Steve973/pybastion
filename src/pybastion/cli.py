@@ -52,18 +52,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Combined namespaced PyBastion config file.",
     )
     all_cmd.add_argument(
-        "--unit-config",
-        type=Path,
-        default=None,
-        help="Unit pipeline TOML config path.",
-    )
-    all_cmd.add_argument(
-        "--integration-config",
-        type=Path,
-        default=None,
-        help="Integration pipeline TOML config path.",
-    )
-    all_cmd.add_argument(
         "--readiness",
         action="store_true",
         help="Run unit readiness preflight before unit analysis.",

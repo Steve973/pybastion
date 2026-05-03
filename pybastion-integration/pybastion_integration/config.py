@@ -41,7 +41,6 @@ class StoreInConfig(argparse.Action):
 
 
 _MODULE_DIR = Path(__file__).parent
-_CONFIG_PATH = _MODULE_DIR / "integration_config.toml"
 _TARGET_ROOT: Path | None = None
 _PATH_OVERRIDES: dict[str, Path | str] = {}
 _STAGE_OVERRIDES: dict[str, str] = {}
@@ -57,11 +56,8 @@ def load_config(config_path: Path | None = None) -> dict[str, Any]:
             f"Expected location: {_CONFIG_PATH}"
         )
 
-    try:
-        with path.open("rb") as f:
-            return tomllib.load(f)
-    except Exception as exc:
-        raise ValueError(f"Failed to parse {path}: {exc}") from exc
+    payload = load_toml_config(path)
+    return select_config_table("integration", payload)
 
 
 _CONFIG = load_config()
@@ -303,13 +299,3 @@ def print_config_summary() -> None:
     print(f"  Graph checker:        {graph_checker_enabled()}")
     print(f"  Graph checker script: {get_graph_checker_script()}")
     print(f"  Graph check report:   {get_graph_checker_report()}")
-
-
-def run_validation() -> None:
-    validation_errors = validate_config()
-    if validation_errors:
-        print("Configuration validation failed:", file=sys.stderr)
-        for error in validation_errors:
-            print(f"  ✗ {error}", file=sys.stderr)
-        print(f"\nCheck configuration in: {_CONFIG_PATH}", file=sys.stderr)
-        sys.exit(1)
