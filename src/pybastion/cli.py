@@ -92,13 +92,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write default PyBastion configuration files.",
     )
     config_init_parser.add_argument(
-        "name",
-        nargs="?",
-        choices=("unit", "integration", "all"),
-        default="all",
-        help="Which configuration file to write.",
-    )
-    config_init_parser.add_argument(
         "--dest-dir",
         type=Path,
         default=None,
