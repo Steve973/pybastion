@@ -1,5 +1,38 @@
-# Integration analysis pipeline configuration
-#
+# ==============================================================================
+# Unit analysis configuration ==================================================
+# ==============================================================================
+
+[unit.paths]
+source_root = "src"
+analysis_output_root = "dist/pybastion"
+inspect_root = "inspect"
+eis_root = "eis"
+inventory_root = "inventory"
+logs_root = "logs"
+
+[unit.scripts]
+stage1 = "stages/stage1_inspect_units.py"
+stage2 = "stages/stage2_enumerate_exec_items.py"
+stage3 = "stages/stage3_enumerate_callables.py"
+readiness = "helpers/analyze_readiness.py"
+
+[unit.behavior]
+continue_on_error = true
+clean_logs = true
+clean_outputs = true
+
+[unit.readiness]
+enabled = false
+output = "readiness.yaml"
+format = "yaml"
+grouping = "smt"
+include_info = true
+# max_findings_per_type = 50
+
+# ==============================================================================
+# Integration analysis configuration ===========================================
+# ==============================================================================
+
 # Path rules:
 #   - Absolute paths are used exactly as written.
 #   - analysis_output_root is relative to --target-root.
@@ -10,7 +43,7 @@
 # This lets callers move all pybastion analysis output by changing only
 # analysis_output_root, while still allowing any child path to be overridden.
 
-[paths]
+[integration.paths]
 # Top-level pybastion analysis output directory under the analyzed project.
 analysis_output_root = "dist/pybastion"
 
@@ -26,7 +59,7 @@ integration_output_dir = "integration-output"
 # This location is relative to integration_output_dir.
 spec_split_output_dir = "specs"
 
-[stages]
+[integration.stages]
 # Output filenames for stages that produce a single file.
 stage1_output = "stage1-ei-cfg.pkl"
 stage2_output = "stage2-integration-test-specs.yaml"
@@ -34,21 +67,21 @@ stage2_output = "stage2-integration-test-specs.yaml"
 # Stage 1 graph format. Must match stage1_output extension and Stage 2 --graph-format.
 stage1_format = "pickle"
 
-[graph_checker]
+[integration.graph_checker]
 # Optional graph consistency checker after Stage 1.
 enabled = false
 script = "utils/check_inventory_graph.py"
 report = "inventory-graph-report.yaml"
 summary = "l"
 
-[output_format]
+[integration.output_format]
 yaml_width = 100
 yaml_indent = 2
 yaml_sort_keys = false
 include_metadata = true
 debug_output = false
 
-[logging]
+[integration.logging]
 # Verbosity level: 0 (quiet) | 1 (normal) | 2 (verbose).
 verbosity = 1
 show_progress = true

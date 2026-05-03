@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Sequence
+from pathlib import Path
+
+import sys
+
+from pybastion.config_init import config_init
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pybastion",
-        description="Run PyBastion analysis pipelines.",
+        description="Run PyBastion unit and integration analysis pipelines.",
     )
 
     subcommands = parser.add_subparsers(dest="command", metavar="COMMAND")
@@ -15,7 +20,6 @@ def build_parser() -> argparse.ArgumentParser:
     unit = subcommands.add_parser(
         "unit",
         help="Run the unit analysis pipeline.",
-        description="Run the PyBastion unit analysis pipeline.",
     )
     unit.add_argument(
         "args",
@@ -26,7 +30,6 @@ def build_parser() -> argparse.ArgumentParser:
     integration = subcommands.add_parser(
         "integration",
         help="Run the integration analysis pipeline.",
-        description="Run the PyBastion integration analysis pipeline.",
     )
     integration.add_argument(
         "args",
@@ -37,11 +40,28 @@ def build_parser() -> argparse.ArgumentParser:
     all_cmd = subcommands.add_parser(
         "all",
         help="Run unit analysis, then integration analysis.",
-        description="Run the full PyBastion unit and integration analysis pipeline.",
     )
     all_cmd.add_argument(
         "project_root",
         help="Root of the target project to analyze.",
+    )
+    all_cmd.add_argument(
+        "--config",
+        type=Path,
+        default=None,
+        help="Combined namespaced PyBastion config file.",
+    )
+    all_cmd.add_argument(
+        "--unit-config",
+        type=Path,
+        default=None,
+        help="Unit pipeline TOML config path.",
+    )
+    all_cmd.add_argument(
+        "--integration-config",
+        type=Path,
+        default=None,
+        help="Integration pipeline TOML config path.",
     )
     all_cmd.add_argument(
         "--readiness",
@@ -70,6 +90,49 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print commands without executing pipeline subprocesses.",
     )
 
+    config = subcommands.add_parser(
+        "config",
+        help="Manage PyBastion configuration files.",
+    )
+    config_subcommands = config.add_subparsers(
+        dest="config_command",
+        metavar="COMMAND",
+    )
+
+    config_init_parser = config_subcommands.add_parser(
+        "init",
+        help="Write default PyBastion configuration files.",
+    )
+    config_init_parser.add_argument(
+        "name",
+        nargs="?",
+        choices=("unit", "integration", "all"),
+        default="all",
+        help="Which configuration file to write.",
+    )
+    config_init_parser.add_argument(
+        "--dest-dir",
+        type=Path,
+        default=None,
+        help="Directory where config files should be written. Defaults to the current directory.",
+    )
+    config_init_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite existing config files.",
+    )
+
+    help_cmd = subcommands.add_parser(
+        "help",
+        help="Show help for pybastion or a subcommand.",
+    )
+    help_cmd.add_argument(
+        "topic",
+        nargs="?",
+        choices=("unit", "integration", "all", "config"),
+        help="Optional command to show help for.",
+    )
+
     return parser
 
 
@@ -86,8 +149,13 @@ def run_integration(args: Sequence[str]) -> int:
 
 
 def run_all(args: argparse.Namespace) -> int:
+    unit_config = args.unit_config or args.config
+    integration_config = args.integration_config or args.config
+
     unit_args = [args.project_root]
 
+    if unit_config:
+        unit_args.extend(["--config", str(unit_config)])
     if args.readiness:
         unit_args.append("--readiness")
     if args.verbose:
@@ -106,6 +174,8 @@ def run_all(args: argparse.Namespace) -> int:
         args.project_root,
     ]
 
+    if integration_config:
+        integration_args.extend(["--config", str(integration_config)])
     if args.check_graph:
         integration_args.append("--check-graph")
     if args.verbose:
@@ -116,6 +186,48 @@ def run_all(args: argparse.Namespace) -> int:
         integration_args.append("--dry-run")
 
     return run_integration(integration_args)
+
+
+def run_config(args: argparse.Namespace) -> int:
+    match args.config_command:
+        case "init":
+            try:
+                written = config_init(
+                    dest_dir=args.dest_dir,
+                    force=args.force,
+                )
+            except FileExistsError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 1
+            except ValueError as exc:
+                print(f"ERROR: {exc}", file=sys.stderr)
+                return 2
+
+            print(f"Wrote {written}")
+
+            return 0
+
+        case _:
+            print("Usage: pybastion config init [unit|integration|all] [--dest-dir DIR] [--force]")
+            return 2
+
+
+def print_topic_help(topic: str | None) -> int:
+    parser = build_parser()
+
+    if topic is None:
+        parser.print_help()
+        return 0
+
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            subparser = action.choices.get(topic)
+            if subparser is not None:
+                subparser.print_help()
+                return 0
+
+    parser.print_help()
+    return 2
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -129,6 +241,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_integration(parsed.args)
         case "all":
             return run_all(parsed)
+        case "config":
+            return run_config(parsed)
+        case "help":
+            return print_topic_help(parsed.topic)
         case _:
             parser.print_help()
             return 0

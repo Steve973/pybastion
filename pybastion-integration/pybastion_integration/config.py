@@ -19,15 +19,14 @@ import sys
 from pathlib import Path
 from typing import Any
 
-if sys.version_info >= (3, 11):
-    import tomllib
-else:
-    try:
-        import tomli as tomllib
-    except ImportError:
-        print("ERROR: tomli package required for Python <3.11", file=sys.stderr)
-        print("Install with: pip install tomli", file=sys.stderr)
-        sys.exit(1)
+from pybastion_common.common_config import (
+    get_bool,
+    get_int,
+    get_str,
+    load_toml_config,
+    require_table,
+    select_config_table,
+)
 
 
 class StoreInConfig(argparse.Action):
@@ -118,26 +117,11 @@ def resolve_path(
 
 
 def _section(name: str) -> dict[str, Any]:
-    value = _CONFIG.get(name, {})
-    return value if isinstance(value, dict) else {}
+    return require_table(_CONFIG, name)
 
 
 def _get_str(section: str, key: str, default: str) -> str:
-    value = _section(section).get(key, default)
-    return str(value)
-
-
-def _path_value(key: str, default: str) -> str | Path:
-    return _PATH_OVERRIDES.get(key, _get_str("paths", key, default))
-
-
-def _stage_value(key: str, default: str) -> str:
-    return str(_STAGE_OVERRIDES.get(key, _get_str("stages", key, default)))
-
-
-def _graph_checker_value(key: str, default: str | bool) -> str | bool | Path:
-    return _GRAPH_CHECKER_OVERRIDES.get(key, _section("graph_checker").get(key, default))
-
+    return get_str(_section(section), key, default)
 
 # ============================================================================
 # Path configuration
@@ -208,7 +192,11 @@ def get_stage_input(stage: int) -> Path:
 # ============================================================================
 
 def graph_checker_enabled() -> bool:
-    return bool(_graph_checker_value("enabled", False))
+    value = _GRAPH_CHECKER_OVERRIDES.get("enabled")
+    if value is not None:
+        return bool(value)
+
+    return get_bool(_section("graph_checker"), "enabled", False)
 
 
 def get_graph_checker_script() -> Path:
@@ -230,23 +218,23 @@ def get_graph_checker_summary() -> str:
 # ============================================================================
 
 def get_yaml_width() -> int:
-    return int(_section("output_format").get("yaml_width", 100))
+    return get_int(_section("output_format"), "yaml_width", 100)
 
 
 def get_yaml_indent() -> int:
-    return int(_section("output_format").get("yaml_indent", 2))
+    return get_int(_section("output_format"), "yaml_indent", 2)
 
 
 def get_yaml_sort_keys() -> bool:
-    return bool(_section("output_format").get("yaml_sort_keys", False))
+    return get_bool(_section("output_format"), "yaml_sort_keys", False)
 
 
 def include_metadata() -> bool:
-    return bool(_section("output_format").get("include_metadata", True))
+    return get_bool(_section("output_format"), "include_metadata", True)
 
 
 def debug_output() -> bool:
-    return bool(_section("output_format").get("debug_output", False))
+    return get_bool(_section("output_format"), "debug_output", False)
 
 
 # ============================================================================
@@ -254,11 +242,11 @@ def debug_output() -> bool:
 # ============================================================================
 
 def get_verbosity() -> int:
-    return int(_section("logging").get("verbosity", 1))
+    return get_int(_section("logging"), "verbosity", 1)
 
 
 def show_progress() -> bool:
-    return bool(_section("logging").get("show_progress", True))
+    return get_bool(_section("logging"), "show_progress", True)
 
 
 # ============================================================================
