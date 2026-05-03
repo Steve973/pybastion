@@ -99,11 +99,14 @@ def readiness_command(config: AnalysisConfig) -> list[str]:
         config.readiness_format,
         "--grouping",
         config.readiness_grouping,
-        "--config",
-        str(config.config_path),
     ]
+
+    if config.config_path is not None:
+        cmd.extend(["--config", str(config.config_path)])
+
     if config.readiness_max_findings_per_type is not None:
         cmd.extend(["--max-findings-per-type", str(config.readiness_max_findings_per_type)])
+
     return cmd
 
 

@@ -17,7 +17,7 @@ from pybastion_common.common_config import (
 
 @dataclass(slots=True)
 class AnalysisConfig:
-    config_path: Path
+    config_path: Path | None
     project_root: Path
     package_root: Path
     stages_root: Path
@@ -103,12 +103,16 @@ def load_analysis_config(project_root: Path, config_path: Path | None = None) ->
     package_root = Path(__file__).resolve().parent
     stages_root = package_root / "stages"
 
-    resolved_config_path = (config_path or (package_root / "unit_config.toml")).resolve()
-    if not resolved_config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {resolved_config_path}")
+    if config_path is not None:
+        resolved_config_path: Path | None = config_path.resolve()
+        if not resolved_config_path.exists():
+            raise FileNotFoundError(f"Config file not found: {resolved_config_path}")
 
-    payload = load_toml_config(resolved_config_path)
-    payload = select_config_table("unit", payload)
+        payload = load_toml_config(resolved_config_path)
+        payload = select_config_table("unit", payload)
+    else:
+        resolved_config_path = None
+        payload = {}
 
     reject_unknown_keys(payload, _ALLOWED_TOP_LEVEL_KEYS, "unit config root")
 

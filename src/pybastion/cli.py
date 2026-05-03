@@ -118,7 +118,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_unit(args: Sequence[str]) -> int:
-    from pybastion_unit.run_project_analysis import main as unit_main
+    from pybastion_unit.run_unit_analysis import main as unit_main
 
     return unit_main(list(args))
 

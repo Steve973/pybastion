@@ -17,7 +17,11 @@ import ast
 import json
 import re
 import sys
-import tomllib
+from pybastion_common.common_config import (
+    load_toml_config,
+    require_table,
+    select_config_table,
+)
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Literal
@@ -205,13 +209,16 @@ class Config:
 
 def load_config(path: Path | None) -> Config:
     cfg = Config()
+
     if path is None:
         return cfg
+
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
 
-    data = tomllib.loads(path.read_text(encoding="utf-8"))
-    readiness = data.get("readiness", {}) if isinstance(data, dict) else {}
+    payload = load_toml_config(path)
+    unit_payload = select_config_table("unit", payload)
+    readiness = require_table(unit_payload, "readiness")
 
     exclude_dirs = readiness.get("exclude_dirs")
     if isinstance(exclude_dirs, list):
