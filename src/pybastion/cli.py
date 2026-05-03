@@ -130,8 +130,8 @@ def run_integration(args: Sequence[str]) -> int:
 
 
 def run_all(args: argparse.Namespace) -> int:
-    unit_config = args.unit_config or args.config
-    integration_config = args.integration_config or args.config
+    unit_config = args.config
+    integration_config = args.config
 
     unit_args = [args.project_root]
 
