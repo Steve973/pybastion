@@ -41,26 +41,37 @@ class StoreInConfig(argparse.Action):
 
 
 _MODULE_DIR = Path(__file__).parent
+
 _TARGET_ROOT: Path | None = None
+_CONFIG: dict[str, Any] = {}
+
 _PATH_OVERRIDES: dict[str, Path | str] = {}
 _STAGE_OVERRIDES: dict[str, str] = {}
 _GRAPH_CHECKER_OVERRIDES: dict[str, Path | str | bool] = {}
 
 
 def load_config(config_path: Path | None = None) -> dict[str, Any]:
-    path = config_path or _CONFIG_PATH
+    if config_path is None:
+        return {}
+
+    path = config_path.resolve()
 
     if not path.exists():
-        raise FileNotFoundError(
-            f"Configuration file not found: {path}\n"
-            f"Expected location: {_CONFIG_PATH}"
-        )
+        raise FileNotFoundError(f"Configuration file not found: {path}")
 
     payload = load_toml_config(path)
     return select_config_table("integration", payload)
 
 
-_CONFIG = load_config()
+def configure(
+    *,
+    config_path: Path | None = None,
+    target_root: Path | str | None = None,
+) -> None:
+    global _CONFIG
+
+    _CONFIG = load_config(config_path)
+    set_target_root(target_root)
 
 
 def get_config() -> dict[str, Any]:
@@ -69,6 +80,7 @@ def get_config() -> dict[str, Any]:
 
 def set_target_root(path: Path | str | None) -> None:
     global _TARGET_ROOT
+
     _TARGET_ROOT = Path(path).resolve() if path else None
 
 
@@ -92,11 +104,11 @@ def set_graph_checker_override(name: str, value: Path | str | bool | None) -> No
 
 
 def resolve_path(
-        config_value: str | Path,
-        *,
-        base: Path | None = None,
-        relative_to_target: bool = True,
-        allow_absolute: bool = True,
+    config_value: str | Path,
+    *,
+    base: Path | None = None,
+    relative_to_target: bool = True,
+    allow_absolute: bool = True,
 ) -> Path:
     path = Path(config_value)
 
@@ -119,34 +131,59 @@ def _section(name: str) -> dict[str, Any]:
 def _get_str(section: str, key: str, default: str) -> str:
     return get_str(_section(section), key, default)
 
+
+def _get_int(section: str, key: str, default: int) -> int:
+    return get_int(_section(section), key, default)
+
+
+def _get_bool(section: str, key: str, default: bool) -> bool:
+    return get_bool(_section(section), key, default)
+
+
+def _get_path_value(key: str, default: str) -> str | Path:
+    return _PATH_OVERRIDES.get(key, _get_str("paths", key, default))
+
+
+def _get_stage_value(key: str, default: str) -> str:
+    return _STAGE_OVERRIDES.get(key, _get_str("stages", key, default))
+
+
+def _get_graph_checker_value(key: str, default: str) -> str | Path | bool:
+    return _GRAPH_CHECKER_OVERRIDES.get(
+        key,
+        _get_str("graph_checker", key, default),
+    )
+
+
 # ============================================================================
 # Path configuration
 # ============================================================================
 
+
 def get_analysis_output_root() -> Path:
     return resolve_path(
-        _path_value("analysis_output_root", "dist/pybastion"),
+        _get_path_value("analysis_output_root", "dist/pybastion"),
         relative_to_target=True,
     )
 
 
 def get_inventories_root() -> Path:
     return resolve_path(
-        _path_value("inventories_root", "inventory"),
+        _get_path_value("inventories_root", "inventory"),
         base=get_analysis_output_root(),
     )
 
 
 def get_integration_output_dir() -> Path:
     return resolve_path(
-        _path_value("integration_output_dir", "integration-output"),
+        _get_path_value("integration_output_dir", "integration-output"),
         base=get_analysis_output_root(),
     )
 
 
 def get_spec_split_output_dir() -> Path:
     return resolve_path(
-        _path_value("spec_split_output_dir", "specs"),
+        _get_path_value("spec_split_output_dir", "specs"),
         base=get_integration_output_dir(),
     )
 
@@ -155,10 +192,14 @@ def get_spec_split_output_dir() -> Path:
 # Stage configuration
 # ============================================================================
 
+
 def get_stage1_format() -> str:
-    value = _stage_value("stage1_format", "pickle").strip().lower()
+    value = _get_stage_value("stage1_format", "pickle").strip().lower()
     if value not in {"pickle", "yaml"}:
-        raise ValueError(f"Invalid stages.stage1_format: {value!r}; expected 'pickle' or 'yaml'")
+        raise ValueError(
+            f"Invalid stages.stage1_format: {value!r}; "
+            "expected 'pickle' or 'yaml'"
+        )
     return value
 
 
@@ -167,10 +208,23 @@ def get_stage_output(stage: int) -> Path:
 
     match stage:
         case 1:
-            default = "stage1-ei-cfg.pkl" if get_stage1_format() == "pickle" else "stage1-ei-cfg.yaml"
-            return resolve_path(_stage_value("stage1_output", default), base=output_dir)
+            default = (
+                "stage1-ei-cfg.pkl"
+                if get_stage1_format() == "pickle"
+                else "stage1-ei-cfg.yaml"
+            )
+            return resolve_path(
+                _get_stage_value("stage1_output", default),
+                base=output_dir,
+            )
         case 2:
-            return resolve_path(_stage_value("stage2_output", "stage2-integration-test-specs.yaml"), base=output_dir)
+            return resolve_path(
+                _get_stage_value(
+                    "stage2_output",
+                    "stage2-integration-test-specs.yaml",
+                ),
+                base=output_dir,
+            )
         case 3:
             return get_spec_split_output_dir()
         case _:
@@ -187,67 +241,78 @@ def get_stage_input(stage: int) -> Path:
 # Graph checker configuration
 # ============================================================================
 
+
 def graph_checker_enabled() -> bool:
     value = _GRAPH_CHECKER_OVERRIDES.get("enabled")
     if value is not None:
         return bool(value)
 
-    return get_bool(_section("graph_checker"), "enabled", False)
+    return _get_bool("graph_checker", "enabled", False)
 
 
 def get_graph_checker_script() -> Path:
-    configured = _graph_checker_value("script", "utils/check_inventory_graph.py")
+    configured = _get_graph_checker_value(
+        "script",
+        "utils/check_inventory_graph.py",
+    )
     return resolve_path(configured, relative_to_target=False)
 
 
 def get_graph_checker_report() -> Path:
-    configured = _graph_checker_value("report", "inventory-graph-report.yaml")
+    configured = _get_graph_checker_value(
+        "report",
+        "inventory-graph-report.yaml",
+    )
     return resolve_path(configured, base=get_integration_output_dir())
 
 
 def get_graph_checker_summary() -> str:
-    return str(_graph_checker_value("summary", "l"))
+    value = _get_graph_checker_value("summary", "l")
+    return str(value)
 
 
 # ============================================================================
 # Output format configuration
 # ============================================================================
 
+
 def get_yaml_width() -> int:
-    return get_int(_section("output_format"), "yaml_width", 100)
+    return _get_int("output_format", "yaml_width", 100)
 
 
 def get_yaml_indent() -> int:
-    return get_int(_section("output_format"), "yaml_indent", 2)
+    return _get_int("output_format", "yaml_indent", 2)
 
 
 def get_yaml_sort_keys() -> bool:
-    return get_bool(_section("output_format"), "yaml_sort_keys", False)
+    return _get_bool("output_format", "yaml_sort_keys", False)
 
 
 def include_metadata() -> bool:
-    return get_bool(_section("output_format"), "include_metadata", True)
+    return _get_bool("output_format", "include_metadata", True)
 
 
 def debug_output() -> bool:
-    return get_bool(_section("output_format"), "debug_output", False)
+    return _get_bool("output_format", "debug_output", False)
 
 
 # ============================================================================
 # Logging configuration
 # ============================================================================
 
+
 def get_verbosity() -> int:
-    return get_int(_section("logging"), "verbosity", 1)
+    return _get_int("logging", "verbosity", 1)
 
 
 def show_progress() -> bool:
-    return get_bool(_section("logging"), "show_progress", True)
+    return _get_bool("logging", "show_progress", True)
 
 
 # ============================================================================
 # Utility functions
 # ============================================================================
+
 
 def ensure_output_dir() -> None:
     get_integration_output_dir().mkdir(parents=True, exist_ok=True)
@@ -263,24 +328,37 @@ def validate_config() -> list[str]:
         errors.append(str(exc))
         graph_format = "pickle"
 
-    if not get_inventories_root().exists():
-        errors.append(f"Inventories root does not exist: {get_inventories_root()}")
+    inventories_root = get_inventories_root()
+    if not inventories_root.exists():
+        errors.append(f"Inventories root does not exist: {inventories_root}")
 
     verbosity = get_verbosity()
     if verbosity not in {0, 1, 2}:
         errors.append(f"verbosity must be 0, 1, or 2 (got {verbosity})")
 
-    if get_yaml_width() <= 0:
-        errors.append(f"yaml_width must be > 0 (got {get_yaml_width()})")
+    yaml_width = get_yaml_width()
+    if yaml_width <= 0:
+        errors.append(f"yaml_width must be > 0 (got {yaml_width})")
 
-    if get_yaml_indent() <= 0:
-        errors.append(f"yaml_indent must be > 0 (got {get_yaml_indent()})")
+    yaml_indent = get_yaml_indent()
+    if yaml_indent <= 0:
+        errors.append(f"yaml_indent must be > 0 (got {yaml_indent})")
 
     stage1_output = get_stage_output(1)
-    if graph_format == "pickle" and stage1_output.suffix not in {".pkl", ".pickle"}:
-        errors.append(f"stage1_format is pickle but stage1_output does not look like a pickle file: {stage1_output}")
+    if graph_format == "pickle" and stage1_output.suffix not in {
+        ".pkl",
+        ".pickle",
+    }:
+        errors.append(
+            "stage1_format is pickle but stage1_output does not look like "
+            f"a pickle file: {stage1_output}"
+        )
+
     if graph_format == "yaml" and stage1_output.suffix not in {".yaml", ".yml"}:
-        errors.append(f"stage1_format is yaml but stage1_output does not look like a YAML file: {stage1_output}")
+        errors.append(
+            "stage1_format is yaml but stage1_output does not look like "
+            f"a YAML file: {stage1_output}"
+        )
 
     return errors
 

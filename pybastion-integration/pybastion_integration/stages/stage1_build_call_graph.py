@@ -16,14 +16,16 @@ from __future__ import annotations
 
 import argparse
 import pickle
-import sys
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 import networkx as nx
+import sys
 import yaml
 
+from pybastion_integration.utils.check_ei_successors import run_preflight
+from pybastion_integration.utils.check_inventory_graph import path_contains_recorded_execution_path
 from pybastion_integration.utils.inventory_index import (
     CallableContext,
     InventoryIndex,
@@ -81,6 +83,22 @@ def safe_node_id_part(value: str | None) -> str:
         .replace(":", "_")
         .replace("|", "_")
     )
+
+
+def inventory_successor_targets(branch: dict[str, Any]) -> list[str]:
+    outcome = branch.get("statement_outcome") or {}
+
+    if not isinstance(outcome, dict):
+        return []
+
+    if outcome.get("is_terminal"):
+        return []
+
+    target_ei = outcome.get("target_ei")
+    if not target_ei:
+        return []
+
+    return [str(target_ei)]
 
 
 def add_external_placeholder_node(
@@ -211,9 +229,16 @@ def add_callable_nodes(cfg: nx.DiGraph, context: CallableContext) -> None:
         )
 
 
-def add_explicit_within_callable_edges(cfg: nx.DiGraph, context: CallableContext) -> None:
+def add_explicit_within_callable_edges(
+        cfg: nx.DiGraph,
+        context: CallableContext,
+        modeled_call_site_eis: set[str],
+) -> None:
     for branch in context.branches:
         src = branch["id"]
+
+        if src in modeled_call_site_eis:
+            continue
 
         statement_outcome = branch.get("statement_outcome") or {}
         target_ei = statement_outcome.get("target_ei")
@@ -287,19 +312,6 @@ def compute_exception_exit_eis(context: CallableContext) -> list[str]:
         if outcome.get("is_terminal") and outcome.get("terminates_via") in EXCEPTION_EXIT_TERMINATORS:
             exits.append(branch["id"])
     return exits
-
-
-def immediate_intra_callable_successors(cfg: nx.DiGraph, callable_id: str, ei_id: str) -> list[str]:
-    successors: list[str] = []
-    for succ in cfg.successors(ei_id):
-        edge = cfg.edges[ei_id, succ]
-        if edge.get("within_callable") and edge.get("callable_id") == callable_id:
-            successors.append(succ)
-    return successors
-
-
-def resolve_return_destinations(cfg: nx.DiGraph, context: CallableContext, ei_id: str) -> list[str]:
-    return immediate_intra_callable_successors(cfg, context.callable_id, ei_id)
 
 
 def resolve_project_callable_target(
@@ -473,7 +485,8 @@ def add_call_and_return_edges(
         inventory_index: InventoryIndex,
         local_callables_by_unit: dict[str, dict[str, str]],
         contract_impl_index: dict[str, list[str]],
-) -> None:
+) -> set[str]:
+    modeled_call_site_eis: set[str] = set()
     success_exit_cache: dict[str, list[str]] = {}
     exception_exit_cache: dict[str, list[str]] = {}
 
@@ -481,10 +494,11 @@ def add_call_and_return_edges(
         ei_id = branch["id"]
         integration_candidates = context.integration_by_ei.get(ei_id, [])
         operation_target = operation_target_for_branch(branch)
-        return_targets = resolve_return_destinations(cfg, context, ei_id)
 
         if not integration_candidates and not operation_target:
             continue
+
+        return_targets = inventory_successor_targets(branch)
 
         if not integration_candidates:
             resolved_callable_id, resolved_target_repr = resolve_project_callable_target(
@@ -496,18 +510,22 @@ def add_call_and_return_edges(
             )
 
             if resolved_callable_id is None:
-                resolved_callable_id, resolved_target_repr = resolve_collapsible_decorated_target(
-                    operation_target=operation_target,
-                    context=context,
-                    callable_contexts=inventory_index.callable_contexts,
-                    fqn_to_callable_id=inventory_index.fqn_to_callable_id,
+                resolved_callable_id, resolved_target_repr = (
+                    resolve_collapsible_decorated_target(
+                        operation_target=operation_target,
+                        context=context,
+                        callable_contexts=inventory_index.callable_contexts,
+                        fqn_to_callable_id=inventory_index.fqn_to_callable_id,
+                    )
                 )
 
             if resolved_callable_id is None:
                 continue
 
             target_context = inventory_index.callable_contexts[resolved_callable_id]
-            collapse_target, marker_name, marker_type = is_collapsible_operation_entry(target_context.entry)
+            collapse_target, marker_name, marker_type = is_collapsible_operation_entry(
+                target_context.entry
+            )
 
             if collapse_target:
                 collapsed_node_id = f"collapsed::{ei_id}::{resolved_callable_id}"
@@ -549,6 +567,8 @@ def add_call_and_return_edges(
                         original_call_site=ei_id,
                         returns_from=resolved_callable_id,
                     )
+
+                modeled_call_site_eis.add(ei_id)
                 continue
 
             add_call_to_callable_with_returns(
@@ -564,6 +584,7 @@ def add_call_and_return_edges(
                 success_exit_cache=success_exit_cache,
                 exception_exit_cache=exception_exit_cache,
             )
+            modeled_call_site_eis.add(ei_id)
             continue
 
         for candidate in integration_candidates:
@@ -592,16 +613,20 @@ def add_call_and_return_edges(
                 )
 
             if resolved_callable_id is None and not contract_targets:
-                resolved_callable_id, resolved_target_repr = resolve_collapsible_decorated_target(
-                    operation_target=operation_target,
-                    context=context,
-                    callable_contexts=inventory_index.callable_contexts,
-                    fqn_to_callable_id=inventory_index.fqn_to_callable_id,
+                resolved_callable_id, resolved_target_repr = (
+                    resolve_collapsible_decorated_target(
+                        operation_target=operation_target,
+                        context=context,
+                        callable_contexts=inventory_index.callable_contexts,
+                        fqn_to_callable_id=inventory_index.fqn_to_callable_id,
+                    )
                 )
 
             if resolved_callable_id is None and contract_targets:
                 for contract_callable_id, contract_target_fqn in contract_targets:
-                    target_context = inventory_index.callable_contexts[contract_callable_id]
+                    target_context = inventory_index.callable_contexts[
+                        contract_callable_id
+                    ]
                     add_call_to_callable_with_returns(
                         cfg,
                         call_site_ei=ei_id,
@@ -615,11 +640,15 @@ def add_call_and_return_edges(
                         success_exit_cache=success_exit_cache,
                         exception_exit_cache=exception_exit_cache,
                     )
+
+                modeled_call_site_eis.add(ei_id)
                 continue
 
             if resolved_callable_id is not None:
                 target_context = inventory_index.callable_contexts[resolved_callable_id]
-                collapse_target, marker_name, marker_type = is_collapsible_operation_entry(target_context.entry)
+                collapse_target, marker_name, marker_type = is_collapsible_operation_entry(
+                    target_context.entry
+                )
 
                 if collapse_target:
                     collapsed_node_id = f"collapsed::{ei_id}::{resolved_callable_id}"
@@ -661,6 +690,8 @@ def add_call_and_return_edges(
                             original_call_site=ei_id,
                             returns_from=resolved_callable_id,
                         )
+
+                    modeled_call_site_eis.add(ei_id)
                     continue
 
                 add_call_to_callable_with_returns(
@@ -676,6 +707,7 @@ def add_call_and_return_edges(
                     success_exit_cache=success_exit_cache,
                     exception_exit_cache=exception_exit_cache,
                 )
+                modeled_call_site_eis.add(ei_id)
                 continue
 
             placeholder_node_id = add_external_placeholder_node(
@@ -694,15 +726,9 @@ def add_call_and_return_edges(
                 candidate=candidate,
                 operation_target=operation_target,
             )
+            modeled_call_site_eis.add(ei_id)
 
-
-def path_exists_exactly(cfg: nx.DiGraph, path: list[str]) -> bool:
-    if not path:
-        return False
-    for index in range(len(path) - 1):
-        if not cfg.has_edge(path[index], path[index + 1]):
-            return False
-    return True
+    return modeled_call_site_eis
 
 
 def verify_recorded_execution_paths(
@@ -712,19 +738,79 @@ def verify_recorded_execution_paths(
     failures: list[dict[str, Any]] = []
 
     for context in callable_contexts.values():
+        try:
+            entry_ei = entry_ei_for_context(context)
+        except ValueError as exc:
+            failures.append(
+                {
+                    "callable_id": context.callable_id,
+                    "callable_fqn": context.callable_fqn,
+                    "reason": "missing_entry_ei",
+                    "message": str(exc),
+                }
+            )
+            continue
+
         for candidates in context.integration_by_ei.values():
             for candidate in candidates:
+                target_ei = candidate.get("ei_id")
+                if not target_ei:
+                    failures.append(
+                        {
+                            "callable_id": context.callable_id,
+                            "callable_fqn": context.callable_fqn,
+                            "integration_id": candidate.get("id"),
+                            "reason": "missing_integration_ei_id",
+                            "path": None,
+                        }
+                    )
+                    continue
+
+                if not cfg.has_node(entry_ei):
+                    failures.append(
+                        {
+                            "callable_id": context.callable_id,
+                            "callable_fqn": context.callable_fqn,
+                            "integration_id": candidate.get("id"),
+                            "ei_id": target_ei,
+                            "reason": "entry_ei_not_in_graph",
+                            "entry_ei": entry_ei,
+                        }
+                    )
+                    continue
+
+                if not cfg.has_node(target_ei):
+                    failures.append(
+                        {
+                            "callable_id": context.callable_id,
+                            "callable_fqn": context.callable_fqn,
+                            "integration_id": candidate.get("id"),
+                            "ei_id": target_ei,
+                            "reason": "integration_ei_not_in_graph",
+                            "entry_ei": entry_ei,
+                        }
+                    )
+                    continue
+
                 for path in candidate.get("execution_paths", []) or []:
-                    if not path_exists_exactly(cfg, path):
+                    if not path_contains_recorded_execution_path(
+                            cfg=cfg,
+                            start_node=entry_ei,
+                            target_node=target_ei,
+                            recorded_path=path,
+                    ):
                         failures.append(
                             {
                                 "callable_id": context.callable_id,
                                 "callable_fqn": context.callable_fqn,
                                 "integration_id": candidate.get("id"),
-                                "ei_id": candidate.get("ei_id"),
+                                "ei_id": target_ei,
+                                "entry_ei": entry_ei,
                                 "path": path,
+                                "reason": "recorded_path_not_reachable_in_graph",
                             }
                         )
+
     return failures
 
 
@@ -740,19 +826,30 @@ def build_graph_from_inventories(
     for context in inventory_index.callable_contexts.values():
         add_callable_nodes(cfg, context)
 
-    for context in inventory_index.callable_contexts.values():
-        add_explicit_within_callable_edges(cfg, context)
+    modeled_call_site_eis: set[str] = set()
 
     for context in inventory_index.callable_contexts.values():
-        add_call_and_return_edges(
-            cfg,
-            context,
-            inventory_index,
-            local_callables_by_unit,
-            contract_impl_index,
+        modeled_call_site_eis.update(
+            add_call_and_return_edges(
+                cfg,
+                context,
+                inventory_index,
+                local_callables_by_unit,
+                contract_impl_index,
+            )
         )
 
-    failures = verify_recorded_execution_paths(cfg, inventory_index.callable_contexts)
+    for context in inventory_index.callable_contexts.values():
+        add_explicit_within_callable_edges(
+            cfg,
+            context,
+            modeled_call_site_eis,
+        )
+
+    failures = verify_recorded_execution_paths(
+        cfg,
+        inventory_index.callable_contexts,
+    )
     return cfg, inventory_index, failures
 
 
@@ -801,6 +898,21 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.verbose:
         print(f"Found {len(inventory_paths)} inventory file(s)")
+
+    preflight_report = args.output.parent / "ei-successor-preflight.yaml"
+    preflight_ok = run_preflight(
+        inventories_root=args.inventories_root,
+        report_path=preflight_report,
+        fail_on_error=True,
+        verbose=args.verbose,
+    )
+
+    if not preflight_ok:
+        print(
+            f"ERROR: EI successor preflight failed. See report: {preflight_report}",
+            file=sys.stderr,
+        )
+        return 2
 
     cfg, inventory_index, failures = build_graph_from_inventories(inventory_paths)
 

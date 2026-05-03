@@ -22,10 +22,11 @@ from typing import Any
 import networkx as nx
 import yaml
 
-from pybastion_integration.stages.stage1_build_call_graph import (
+from pybastion_integration.utils.inventory_index import (
+    analysis_info,
+    hierarchy_info,
     signature_info,
 )
-from pybastion_integration.utils.inventory_index import analysis_info, hierarchy_info
 
 SUCCESS_EXIT_TERMINATORS: set[str] = {
     "return",
