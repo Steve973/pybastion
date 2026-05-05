@@ -16,7 +16,9 @@ purposes:
    as ordinary direct calls in the project call graph
 
 All markers use a pipe-delimited syntax embedded in comments immediately
-preceding the function or method definition.
+preceding the item that they pertain to. Some markers appear immediately above
+the function or method definition, and others appear immediately before the
+statement that they apply to.
 
 Note that project analysis markers are captured during the unit analysis phase,
 along with any other decorator. Their usage, however, pertains to the
@@ -49,7 +51,16 @@ def to_dict(self) -> dict:
     return {"name": self.name}
 ```
 
-Or inside docstrings:
+Immediately preceding the statement that they apply to:
+
+```python
+def find_waldo(self) -> str:
+    # :: FeatureStart | name=waldo_search | comment="Where's Waldo?"
+    location: str = location_analysis("waldo")
+    return location
+```
+
+Or inside method-level docstrings when they apply to the entire method:
 
 ```python
 def validate_schema(data: dict) -> bool:
@@ -61,11 +72,12 @@ def validate_schema(data: dict) -> bool:
     return schema.validate(data)
 ```
 
-## Operation Markers
+## Operation Markers (Function and Method Scope)
 
 Operation markers denote functions that should be excluded from integration
 flow tracing. These are mechanical transformations or utility operations that
-do not contain business logic.
+do not contain business logic. All operation markers are applied to functions
+and methods.
 
 ### MechanicalOperation
 
@@ -197,13 +209,14 @@ def process_payment(amount: float, method: str) -> PaymentResult:
     return finalize_transaction(result)  # Flow continues
 ```
 
-## Reachability Markers
+## Reachability Markers (Function and Method Scope)
 
 Reachability markers describe callables that may be executed even when they do
 not appear to have a normal direct caller in the project call graph. These
 markers are used by diagnostics and test planning to avoid misclassifying
 framework entry points, externally invoked API methods, and abstraction-based
-dispatch targets as unused or suspicious.
+dispatch targets as unused or suspicious. All reachability markers are applied
+to functions and methods.
 
 Reachability markers do not exclude a callable from flow tracing by default.
 They explain how the callable is reached.
@@ -286,14 +299,20 @@ def resolve_from_index(request: ResolutionRequest) -> ResolutionResult:
     return index_resolver.resolve(request)
 ```
 
-## Feature Flow Markers
+## Feature Flow Markers (Statement Scope)
 
-Feature flow markers define the boundaries and structure of end-to-end
-feature flows that span multiple integration points. They enable automated
-tracing of execution paths from feature entry to exit, including branching
-and convergence.
+Feature-flow markers are analysis markers used to guide feature-level
+integration tracing over the project EI graph. They identify feature-relevant
+EIs, force branch-path selection where shortest-path tracing would choose the
+wrong route, mark branch convergence, and identify completion paths that should
+become feature integration test obligations. When features span multiple units
+and contain multiple integration points, feature-flow markers become critical
+for accurately tracing the execution paths that comprise the feature.
 
-### Overview of Feature Flow Model
+Feature flow markers apply to statements. Place the marker comment immediately
+before the statement whose execution item should carry the marker.
+
+### Overview of the Feature Flow Model
 
 A feature flow consists of:
 - **One entry point** (FeatureStart) – where the feature begins
@@ -304,14 +323,33 @@ A feature flow consists of:
   feature completes
 
 All markers in a feature flow are correlated by the `name` field. Branches
-within a feature flow are correlated by the `branch_name` field.
+within a feature flow are correlated by the `branch` field.
+
+One or more markers apply to the next code statement:
+
+```python
+def resolve(params: ResolutionParams) -> ResolutionResult:
+    # :: FeatureStart | name=full_resolution
+    configs = _normalize_strategy_configs(params.strategy_configs)
+
+    # :: FeatureBranch | name=full_resolution | branch=main | control_polarity=true
+    # :: FeatureBranch | name=full_resolution | branch=resolve_no_env | control_polarity=false
+    for env in params.target_environments:
+        result = resolve_environment(env)
+
+    # :: FeatureEnd | name=full_resolution
+    return _format_result(result)
+```
+
+The marker does not apply to the surrounding callable as a whole. It applies to
+the execution item generated for the marked statement.
 
 ### FeatureStart
 
-Marks the entry point where a feature flow begins.
+Marks the statement where a feature flow begins.
 
 **Format:**
-```
+```text
 :: FeatureStart | name=FEATURE_NAME | variants=VARIANT_LIST | comment="DESC"
 ```
 
@@ -327,36 +365,45 @@ Marks the entry point where a feature flow begins.
 - Each feature flow must have exactly one FeatureStart
 - Must have at least one corresponding FeatureEnd or FeatureEndConditional
   with the same `name`
+- Applies to the statement immediately following the marker
 
 **Example:**
 ```python
-# :: FeatureStart | name=dependency_resolution
 def resolve(params: ResolutionParams) -> ResolutionResult:
     """Resolve package dependencies."""
+
+    # :: FeatureStart | name=dependency_resolution
     configs = _normalize_strategy_configs(params.strategy_configs)
+
     repo = open_repository(params.repo_id, params.repo_config)
     services = load_services(repo, configs)
     result = rl_resolve(services, params.environments, roots)
+
+    # :: FeatureEnd | name=dependency_resolution
     return _format_result(result)
 ```
 
 **Example with test variants:**
 ```python
-# :: FeatureStart | name=resolution
-# :: | variants=index_resolver,builder_resolver,hybrid_fallback
 def resolve(services: ResolutionServices, env: Env, roots: list) -> Result:
     """
     Main resolution entry point.
-    
+
     Test variants configure different resolver strategies:
     - index_resolver: Use PyPI index-based resolution
     - builder_resolver: Build from sdist when needed
     - hybrid_fallback: Try index first, fall back to builder
     """
+
+    # :: FeatureStart | name=resolution | variants=index_resolver,builder_resolver,hybrid_fallback
     provider = ProjectResolutionProvider(services=services, env=env)
+
     reporter = ProjectResolutionReporter()
     resolver = Resolver(provider, reporter)
-    return resolver.resolve(roots)
+    result = resolver.resolve(roots)
+
+    # :: FeatureEnd | name=resolution
+    return result
 ```
 
 ### FeatureTrace
@@ -365,17 +412,17 @@ Marks a waypoint along a feature flow path. Used to track intermediate steps
 or disambiguate complex flows.
 
 **Format:**
-```
-:: FeatureTrace | name=FEATURE_NAME | branch_name=BRANCH | comment="DESC"
+```text
+:: FeatureTrace | name=FEATURE_NAME | branch=BRANCH | comment="DESC"
 ```
 
 **Fields:**
 
-| Field       | Required | Description                                    |
-|-------------|----------|------------------------------------------------|
-| name        | Yes      | Feature flow identifier (matches FeatureStart) |
-| branch_name | No       | Branch identifier if on a named branch         |
-| comment     | No       | Human-readable description                     |
+| Field   | Required | Description                                    |
+|---------|----------|------------------------------------------------|
+| name    | Yes      | Feature flow identifier (matches FeatureStart) |
+| branch  | No       | Branch identifier if on a named branch         |
+| comment | No       | Human-readable description                     |
 
 **When to use:**
 - To mark intermediate steps in a complex feature flow
@@ -384,77 +431,153 @@ or disambiguate complex flows.
 
 **Example – Simple waypoint:**
 ```python
-# :: FeatureTrace | name=dependency_resolution
-def open_repository(repo_id: str, config: dict) -> Repository:
-    """Open repository for dependency resolution."""
-    return RepositoryFactory.create(repo_id, config)
+def resolve(params: ResolutionParams) -> ResolutionResult:
+    # :: FeatureStart | name=dependency_resolution
+    configs = _normalize_strategy_configs(params.strategy_configs)
+
+    # :: FeatureTrace | name=dependency_resolution
+    repo = open_repository(params.repo_id, params.repo_config)
+
+    services = load_services(repo, configs)
+    result = rl_resolve(services, params.environments, roots)
+
+    # :: FeatureEnd | name=dependency_resolution
+    return _format_result(result)
 ```
 
 **Example – Branch waypoint:**
 ```python
-# :: FeatureTrace | name=resolution | branch_name=remote_fetch
-def fetch_from_pypi(package_name: str) -> Artifact:
-    """Fetch package from PyPI - remote fetch branch."""
-    return pypi_client.fetch(package_name)
+def get_artifact(key: str) -> Artifact:
+    # :: FeatureBranch | name=artifact_retrieval | branch=cache_hit | control_polarity=true
+    # :: FeatureBranch | name=artifact_retrieval | branch=cache_miss | control_polarity=false
+    if cached := _check_cache(key):
+        # :: FeatureTrace | name=artifact_retrieval | branch=cache_hit
+        return cached
+
+    # :: FeatureTrace | name=artifact_retrieval | branch=cache_miss
+    artifact = remote_repository.fetch(key)
+
+    _update_cache(key, artifact)
+    return artifact
 ```
 
 **Example – Multiple feature flows:**
 ```python
-# :: FeatureTrace | name=dependency_resolution
-# :: FeatureTrace | name=package_installation
-def open_repository(repo_id: str, config: dict) -> Repository:
-    """
-    Open repository - used by multiple features.
-    
-    Waypoint for both dependency_resolution and package_installation flows.
-    """
-    return RepositoryFactory.create(repo_id, config)
+def resolve(params: ResolutionParams) -> ResolutionResult:
+    # :: FeatureTrace | name=dependency_resolution
+    # :: FeatureTrace | name=package_installation
+    repo = open_repository(params.repo_id, params.repo_config)
+
+    ...
 ```
 
 ### FeatureBranch
 
-Marks a decision point where a feature flow splits into multiple named paths.
+Marks a control statement where a feature flow splits into one or more named
+paths.
+
+A control statement may have multiple feature-relevant outcomes. Each
+FeatureBranch marker describes one named branch mapping for the marked control
+statement. Multiple FeatureBranch markers may appear on the same control
+statement.
 
 **Format:**
-```
-:: FeatureBranch | name=FEATURE_NAME | branches=BRANCH_LIST | comment="DESC"
+```text
+:: FeatureBranch | name=FEATURE_NAME | branch=BRANCH | control_polarity=true|false | comment="DESC"
 ```
 
 **Fields:**
 
-| Field    | Required | Description                                    |
-|----------|----------|------------------------------------------------|
-| name     | Yes      | Feature flow identifier (matches FeatureStart) |
-| branches | Yes      | Comma-separated list of branch names           |
-| comment  | No       | Human-readable description                     |
+| Field                  | Required | Description                                     |
+|------------------------|----------|-------------------------------------------------|
+| `name`                 | Yes      | Feature flow identifier (matches FeatureStart)  |
+| `branch` or `branches` | Yes      | Branch name, or comma-separated branch names    |
+| `control_polarity`     | No       | Selects the modeled control outcome for this branch |
+| `comment`              | No       | Human-readable description                      |
 
 **Branch lifecycle:**
-1. FeatureBranch declares branch names (e.g., `path_a,path_b`)
-2. Each branch continues via FeatureTrace with `branch_name` set
-3. Each branch must eventually:
-   - Reach a FeatureEnd or FeatureEndConditional with that `branch_name`, OR
+1. FeatureBranch names a feature branch at a control statement
+2. `control_polarity`, when present, maps that branch to a modeled control
+   outcome
+3. Each branch may continue via FeatureTrace markers with the same `branch`
+4. Each branch must eventually:
+   - Reach a FeatureEnd or FeatureEndConditional for that branch, OR
    - Participate in a FeatureConverge that retires the branch
 
-**Example:**
+**Control polarity:**
+
+`control_polarity` maps a named feature branch to a modeled control outcome.
+
+| Statement           | `control_polarity=true`                  | `control_polarity=false`                         |
+|---------------------|------------------------------------------|--------------------------------------------------|
+| `if`                | Condition satisfied                      | Condition not satisfied                          |
+| `for` / `async for` | Loop body entered / another iteration    | Zero iterations / no more iterations             |
+| `while`             | Condition initially true / body entered  | Condition initially false / body skipped         |
+| `match`             | A case matched                           | No case matched / fallthrough, when modeled      |
+
+If multiple modeled outcomes have the same polarity, `control_polarity` alone
+may not uniquely identify one outgoing path. In that case, the tracer may keep
+all matching outcomes, or an additional selector may be needed.
+
+**Example – Loop with main and no-input branches:**
 ```python
-# :: FeatureBranch | name=artifact_retrieval | branches=cache_hit,cache_miss
-def get_artifact(key: str) -> Artifact:
-    """Retrieve artifact with cache fallback."""
-    cached = _check_cache(key)
-    if cached:
-        return cached  # Goes to cache_hit branch
-    return _fetch_from_remote(key)  # Goes to cache_miss branch
+def resolve(params: ResolutionParams) -> ResolutionResult:
+    # :: FeatureStart | name=full_resolution
+    results = []
 
-# :: FeatureTrace | name=artifact_retrieval | branch_name=cache_hit
-def _return_cached(artifact: Artifact) -> Artifact:
-    """Cache hit path."""
-    return artifact
+    # :: FeatureBranch | name=full_resolution | branch=main | control_polarity=true
+    # :: FeatureBranch | name=full_resolution | branch=resolve_no_env | control_polarity=false
+    for env in params.target_environments:
+        result = resolve_environment(env)
+        results.append(result)
 
-# :: FeatureTrace | name=artifact_retrieval | branch_name=cache_miss
-def _fetch_from_remote(key: str) -> Artifact:
-    """Cache miss path - fetch from remote."""
-    artifact = remote_repository.fetch(key)
-    _update_cache(key, artifact)
+    # :: FeatureBranch | name=full_resolution | branch=main | control_polarity=true
+    # :: FeatureBranch | name=full_resolution | branch=resolve_no_result | control_polarity=false
+    if results:
+        # :: FeatureEnd | name=full_resolution | branch=main
+        return ResolutionResult.success(results)
+
+    # :: FeatureEndConditional | name=full_resolution | branch=resolve_no_result | on_condition=no_resolved_environments
+    return ResolutionResult.empty()
+```
+
+**Example – Conditional success and failure branches:**
+```python
+def process_order(order: Order) -> OrderResult:
+    # :: FeatureStart | name=order_processing
+    validation = validate_order(order)
+
+    # :: FeatureBranch | name=order_processing | branch=main | control_polarity=true
+    # :: FeatureBranch | name=order_processing | branch=validation_failed | control_polarity=false
+    if validation.ok:
+        charge = charge_payment(order.payment)
+
+        # :: FeatureEnd | name=order_processing | branch=main
+        return OrderResult.success(charge)
+
+    # :: FeatureEndConditional | name=order_processing | branch=validation_failed | on_condition=validation_failed
+    return OrderResult.failure(validation.errors)
+```
+
+**Example – Match branches:**
+```python
+def resolve_source(source: SourceConfig) -> Artifact:
+    # :: FeatureStart | name=source_resolution
+    source_type = source.kind
+
+    # :: FeatureBranch | name=source_resolution | branch=pypi | control_polarity=true
+    # :: FeatureBranch | name=source_resolution | branch=local | control_polarity=true
+    # :: FeatureBranch | name=source_resolution | branch=unsupported_source | control_polarity=false
+    match source_type:
+        case "pypi":
+            artifact = fetch_from_pypi(source)
+        case "local":
+            artifact = load_from_local_path(source)
+        case _:
+            # :: FeatureEndConditional | name=source_resolution | branch=unsupported_source | on_condition=unsupported_source
+            return Artifact.error("Unsupported source")
+
+    # :: FeatureEnd | name=source_resolution
     return artifact
 ```
 
@@ -463,7 +586,7 @@ def _fetch_from_remote(key: str) -> Artifact:
 Marks a point where multiple branches merge back together.
 
 **Format:**
-```
+```text
 :: FeatureConverge | name=FEATURE_NAME | branches=BRANCH_LIST
 :: | into=PARENT_BRANCH | comment="DESC"
 ```
@@ -482,69 +605,57 @@ Marks a point where multiple branches merge back together.
 - If `into` is present: branches converge back to the named parent branch
 - All branch names in `branches` are retired after convergence
 - The parent flow (main or named branch) resumes after convergence
+- Applies to the statement immediately following the marker
 
 **Example – Converge to main:**
 ```python
-# :: FeatureBranch | name=validation | branches=fast_path,slow_path
-def validate_input(data: dict) -> ValidationResult:
-    """Validate input data."""
-    if _is_simple_case(data):
-        return _fast_validate(data)
-    return _slow_validate(data)
+def validate_input(data: dict) -> ProcessedResult:
+    # :: FeatureStart | name=validation
+    simple_case = _is_simple_case(data)
 
-# :: FeatureTrace | name=validation | branch_name=fast_path
-def _fast_validate(data: dict) -> ValidationResult:
-    """Fast validation path."""
-    return ValidationResult(valid=True)
+    # :: FeatureBranch | name=validation | branch=fast_path | control_polarity=true
+    # :: FeatureBranch | name=validation | branch=slow_path | control_polarity=false
+    if simple_case:
+        result = _fast_validate(data)
+    else:
+        result = _slow_validate(data)
 
-# :: FeatureTrace | name=validation | branch_name=slow_path
-def _slow_validate(data: dict) -> ValidationResult:
-    """Slow validation path with full checks."""
-    return ValidationResult(valid=_check_all_rules(data))
+    # :: FeatureConverge | name=validation | branches=fast_path,slow_path
+    processed = _process_result(result)
 
-# :: FeatureConverge | name=validation | branches=fast_path,slow_path
-def _process_result(result: ValidationResult) -> ProcessedResult:
-    """Both paths converge here - back to main flow."""
-    return ProcessedResult(result)
+    # :: FeatureEnd | name=validation
+    return processed
 ```
 
 **Example – Nested branching (converge to parent branch):**
 ```python
-# :: FeatureBranch | name=resolution | branches=local,remote
 def resolve_package(name: str) -> Package:
-    """Resolve package from local or remote."""
-    if _check_local_cache(name):
-        return _resolve_local(name)
-    return _resolve_remote(name)
+    # :: FeatureStart | name=resolution
+    cached = _check_local_cache(name)
 
-# :: FeatureTrace | name=resolution | branch_name=remote
-# :: FeatureBranch | name=resolution | branches=pypi,conda
-def _resolve_remote(name: str) -> Package:
-    """Remote resolution - branches to PyPI or Conda."""
-    if _is_conda_package(name):
-        return _fetch_conda(name)
-    return _fetch_pypi(name)
+    # :: FeatureBranch | name=resolution | branch=local | control_polarity=true
+    # :: FeatureBranch | name=resolution | branch=remote | control_polarity=false
+    if cached:
+        package = _resolve_local(name)
+    else:
+        source = _select_remote_source(name)
 
-# :: FeatureTrace | name=resolution | branch_name=pypi
-def _fetch_pypi(name: str) -> Package:
-    """Fetch from PyPI."""
-    return pypi.fetch(name)
+        # :: FeatureBranch | name=resolution | branch=pypi | control_polarity=true
+        # :: FeatureBranch | name=resolution | branch=conda | control_polarity=true
+        match source:
+            case "pypi":
+                package = _fetch_pypi(name)
+            case "conda":
+                package = _fetch_conda(name)
 
-# :: FeatureTrace | name=resolution | branch_name=conda
-def _fetch_conda(name: str) -> Package:
-    """Fetch from Conda."""
-    return conda.fetch(name)
+        # :: FeatureConverge | name=resolution | branches=pypi,conda | into=remote
+        package = _cache_remote_package(package)
 
-# :: FeatureConverge | name=resolution | branches=pypi,conda | into=remote
-def _cache_remote_package(pkg: Package) -> Package:
-    """Sub-branches converge back to remote branch."""
-    _update_cache(pkg)
-    return pkg
+    # :: FeatureConverge | name=resolution | branches=local,remote
+    validated = _validate_package(package)
 
-# :: FeatureConverge | name=resolution | branches=local,remote
-def _finalize_resolution(pkg: Package) -> Package:
-    """Both local and remote converge back to main."""
-    return _validate_package(pkg)
+    # :: FeatureEnd | name=resolution
+    return validated
 ```
 
 ### FeatureEnd
@@ -552,87 +663,75 @@ def _finalize_resolution(pkg: Package) -> Package:
 Marks a definitive exit point where a feature flow completes.
 
 **Format:**
-```
-:: FeatureEnd | name=FEATURE_NAME | branch_name=BRANCH | comment="DESC"
+```text
+:: FeatureEnd | name=FEATURE_NAME | branch=BRANCH | comment="DESC"
 ```
 
 **Fields:**
 
-| Field       | Required | Description                                    |
-|-------------|----------|------------------------------------------------|
-| name        | Yes      | Feature flow identifier (matches FeatureStart) |
-| branch_name | No       | Branch identifier if ending a named branch     |
-| comment     | No       | Human-readable description                     |
+| Field   | Required | Description                                    |
+|---------|----------|------------------------------------------------|
+| name    | Yes      | Feature flow identifier (matches FeatureStart) |
+| branch  | No       | Branch identifier if ending a named branch     |
+| comment | No       | Human-readable description                     |
 
 **Constraints:**
 - Each feature flow must have at least one FeatureEnd or FeatureEndConditional
 - If multiple ends exist, they represent different completion paths
-- If on a named branch, must include `branch_name`
+- If on a named branch, include `branch`
+- Applies to the statement immediately following the marker
 
 **Example – Single end:**
 ```python
-# :: FeatureStart | name=dependency_resolution
 def resolve(params: ResolutionParams) -> ResolutionResult:
-    """Resolve package dependencies."""
-    # ... resolution logic ...
-    return _format_result(result)
+    # :: FeatureStart | name=dependency_resolution
+    result = rl_resolve(params)
 
-# :: FeatureEnd | name=dependency_resolution
-def _format_result(result: ResolveResult) -> ResolutionResult:
-    """Format resolution result for output."""
-    return ResolutionResult(
-        requirements_by_env=_extract_requirements(result),
-        resolved_wheels_by_env=_extract_wheels(result)
-    )
+    # :: FeatureEnd | name=dependency_resolution
+    return _format_result(result)
 ```
 
 **Example – Multiple ends for different paths:**
 ```python
-# :: FeatureStart | name=validation_pipeline
 def validate_config(config: dict) -> ValidationResult:
-    """Validate configuration through pipeline."""
-    if not _check_schema(config):
-        return _fail_early(config)
-    
-    result = _validate_business_rules(config)
-    if result.has_errors:
-        return _format_errors(result)
-    
-    return _success_result(result)
+    # :: FeatureStart | name=validation_pipeline
+    schema_result = _check_schema(config)
 
-# :: FeatureEnd | name=validation_pipeline
-def _fail_early(config: dict) -> ValidationResult:
-    """Early failure path - schema invalid."""
-    return ValidationResult.failure("Schema validation failed")
+    # :: FeatureBranch | name=validation_pipeline | branch=main | control_polarity=true
+    # :: FeatureBranch | name=validation_pipeline | branch=schema_invalid | control_polarity=false
+    if schema_result.valid:
+        business_result = _validate_business_rules(config)
 
-# :: FeatureEnd | name=validation_pipeline
-def _format_errors(result: ValidationResult) -> ValidationResult:
-    """Business rule failure path."""
-    return result.with_formatted_messages()
+        # :: FeatureBranch | name=validation_pipeline | branch=main | control_polarity=true
+        # :: FeatureBranch | name=validation_pipeline | branch=business_invalid | control_polarity=false
+        if business_result.valid:
+            # :: FeatureEnd | name=validation_pipeline | branch=main
+            return ValidationResult.success()
 
-# :: FeatureEnd | name=validation_pipeline
-def _success_result(result: ValidationResult) -> ValidationResult:
-    """Success path."""
-    return result.with_success_metadata()
+        # :: FeatureEnd | name=validation_pipeline | branch=business_invalid
+        return ValidationResult.failure(business_result.errors)
+
+    # :: FeatureEnd | name=validation_pipeline | branch=schema_invalid
+    return ValidationResult.failure(schema_result.errors)
 ```
 
 **Example - Branch-specific end:**
 ```python
-# :: FeatureBranch | name=payment | branches=credit_card,paypal
 def process_payment(method: str, amount: float) -> PaymentResult:
-    """Process payment via selected method."""
-    if method == "credit_card":
-        return _process_credit_card(amount)
-    return _process_paypal(amount)
+    # :: FeatureStart | name=payment
+    payment_method = method
 
-# :: FeatureEnd | name=payment | branch_name=credit_card
-def _finalize_credit_card(result: CreditResult) -> PaymentResult:
-    """Credit card branch ends here."""
-    return PaymentResult.from_credit(result)
+    # :: FeatureBranch | name=payment | branch=credit_card | control_polarity=true
+    # :: FeatureBranch | name=payment | branch=paypal | control_polarity=false
+    if payment_method == "credit_card":
+        result = _process_credit_card(amount)
 
-# :: FeatureEnd | name=payment | branch_name=paypal
-def _finalize_paypal(result: PayPalResult) -> PaymentResult:
-    """PayPal branch ends here."""
+        # :: FeatureEnd | name=payment | branch=credit_card
+        return PaymentResult.from_credit(result)
+
+    result = _process_paypal(amount)
+
+    # :: FeatureEnd | name=payment | branch=paypal
     return PaymentResult.from_paypal(result)
 ```
 
@@ -642,8 +741,8 @@ Marks a conditional exit point where a feature flow may complete based on
 runtime conditions.
 
 **Format:**
-```
-:: FeatureEndConditional | name=FEATURE_NAME | on_condition=CONDITION | branch_name=BRANCH | comment="DESC"
+```text
+:: FeatureEndConditional | name=FEATURE_NAME | on_condition=CONDITION | branch=BRANCH | comment="DESC"
 ```
 
 **Fields:**
@@ -652,36 +751,55 @@ runtime conditions.
 |--------------|----------|-------------------------------------------------|
 | name         | Yes      | Feature flow identifier (matches FeatureStart)  |
 | on_condition | Yes      | Description of the condition that triggers exit |
-| branch_name  | No       | Branch identifier if ending a named branch      |
+| branch       | No       | Branch identifier if ending a named branch      |
 | comment      | No       | Human-readable description                      |
 
 **When to use:**
 - Early termination based on runtime conditions
 - Error paths that exit the feature
 - Optional exit points in conditional logic
+- Dead-end paths where the feature cannot proceed
+- Empty-input or no-work paths
 
 **Example:**
 ```python
-# :: FeatureStart | name=data_processing
 def process_data(data: dict) -> ProcessedData:
-    """Process incoming data."""
-    if not _validate_input(data):
-        return _abort_processing(data)  # Conditional exit
-    
-    result = _transform_data(data)
-    return _finalize_processing(result)
+    # :: FeatureStart | name=data_processing
+    valid = _validate_input(data)
 
-# :: FeatureEndConditional | name=data_processing
-# :: | on_condition=invalid_input
-def _abort_processing(data: dict) -> ProcessedData:
-    """Conditional exit - invalid input."""
+    # :: FeatureBranch | name=data_processing | branch=main | control_polarity=true
+    # :: FeatureBranch | name=data_processing | branch=invalid_input | control_polarity=false
+    if valid:
+        result = _transform_data(data)
+
+        # :: FeatureEnd | name=data_processing | branch=main
+        return _finalize_processing(result)
+
+    # :: FeatureEndConditional | name=data_processing | branch=invalid_input | on_condition=invalid_input
     return ProcessedData.error("Invalid input")
-
-# :: FeatureEnd | name=data_processing
-def _finalize_processing(result: TransformResult) -> ProcessedData:
-    """Normal completion path."""
-    return ProcessedData.success(result)
 ```
+
+## Notes for Implementation
+
+- Feature flow markers are statement-applicable.
+- Markers are collected from comments immediately preceding the marked
+  statement.
+- The marker applies to the EI generated for the marked statement.
+- Multiple feature flow markers may be attached to the same statement.
+- Multiple FeatureBranch markers may be attached to the same control statement.
+- FeatureBranch uses `branch` to name a single feature branch.
+- FeatureBranch may use `branches` where a comma-separated list is useful, but
+  one marker per named branch is preferred when mapping branches to control
+  outcomes.
+- `control_polarity` is meaningful only when the marked statement has modeled
+  control outcomes.
+- Feature flow tracing should use the project-level EI graph and the marker
+  metadata attached to EI nodes.
+- Feature flow tracing should preserve meaningful branch paths, including early
+  exits and dead-end branches.
+- Feasibility analysis may be used to filter impossible path combinations.
+- Do not reconstruct source control flow during feature tracing. Use the EI graph
+  and the control outcomes emitted by unit analysis.
 
 ## Co-occurrence Rules
 
@@ -726,9 +844,9 @@ Feature flow markers have codebase-wide co-occurrence rules based on the
 - If `into` is present, it must reference a currently active branch
 - After convergence, the listed branch names are retired
 
-## Extraction During Ledger Generation
+## Extraction During Inventory Generation
 
-When analyzing a callable during ledger generation:
+When analyzing a callable during inventory generation:
 
 1. **Collect comments** immediately preceding the function or method signature
    - Look backwards from the function line
@@ -755,15 +873,15 @@ When analyzing a callable during ledger generation:
    - Strip whitespace around delimiters
    - Remove surrounding quotes from values
 
-5. **Add to ledger** as decorators array in the callable entry
+5. **Add to Inventory** as a decorator array in the callable entry
 
-## Ledger Output Format
+## Inventory Output Format
 
-Markers appear in the ledger as an array under the `markers` field:
+Markers appear in the inventory as an array under the `markers` field:
 
 **Operation marker:**
 ```yaml
-- id: C001M003
+- id: U1234567890_M001
   kind: callable
   name: to_mapping
   signature: 'to_mapping(self) -> dict[str, Any]'
@@ -806,7 +924,7 @@ Markers appear in the ledger as an array under the `markers` field:
     branches: [...]
 ```
 
-**Multiple markers on same function:**
+**Multiple markers on the same statement:**
 ```yaml
 - id: F005
   kind: callable
@@ -883,10 +1001,11 @@ def validate_schema(data: dict) -> bool:
 
 ### Python – Multiple Markers
 ```python
-# :: FeatureTrace | name=dependency_resolution
-# :: FeatureTrace | name=package_installation
 def open_repository(repo_id: str, config: dict) -> Repository:
     """Open repository - shared by multiple features."""
+
+    # :: FeatureTrace | name=dependency_resolution
+    # :: FeatureTrace | name=package_installation
     return RepositoryFactory.create(repo_id, config)
 ```
 

@@ -86,19 +86,38 @@ def safe_node_id_part(value: str | None) -> str:
 
 
 def inventory_successor_targets(branch: dict[str, Any]) -> list[str]:
-    outcome = branch.get("statement_outcome") or {}
+    targets: list[str] = []
 
-    if not isinstance(outcome, dict):
-        return []
+    def add_target(target_ei: Any, is_terminal: Any) -> None:
+        if target_ei and not is_terminal:
+            targets.append(str(target_ei))
 
-    if outcome.get("is_terminal"):
-        return []
+    statement_outcome = branch.get("statement_outcome") or {}
+    if isinstance(statement_outcome, dict):
+        add_target(
+            statement_outcome.get("target_ei"),
+            statement_outcome.get("is_terminal"),
+        )
 
-    target_ei = outcome.get("target_ei")
-    if not target_ei:
-        return []
+    for conditional in branch.get("conditional_targets", []) or []:
+        if not isinstance(conditional, dict):
+            continue
 
-    return [str(target_ei)]
+        add_target(
+            conditional.get("target_ei"),
+            conditional.get("is_terminal"),
+        )
+
+    for disruptive in branch.get("disruptive_outcomes", []) or []:
+        if not isinstance(disruptive, dict):
+            continue
+
+        add_target(
+            disruptive.get("target_ei"),
+            disruptive.get("is_terminal"),
+        )
+
+    return list(dict.fromkeys(targets))
 
 
 def add_external_placeholder_node(

@@ -35,7 +35,8 @@ ANALYSIS_DECORATORS: dict[str, Any] = {
     'Operation': {
         'MechanicalOperation': {
             'effect': 'exclude_from_flow',
-            'scope': 'immediate',
+            'analysis_scope': 'immediate',
+            'target_scope': 'callable',
             'common_fields': ['comment'],
             'fields': {
                 'type': {
@@ -63,7 +64,8 @@ ANALYSIS_DECORATORS: dict[str, Any] = {
         },
         'UtilityOperation': {
             'effect': 'exclude_from_flow',
-            'scope': 'immediate',
+            'analysis_scope': 'immediate',
+            'target_scope': 'callable',
             'common_fields': ['comment'],
             'fields': {
                 'type': {
@@ -88,17 +90,48 @@ ANALYSIS_DECORATORS: dict[str, Any] = {
             },
         },
     },
+
+    'Reachability': {
+        'ExternalApiMethod': {
+            'effect': 'mark_external_entrypoint',
+            'analysis_scope': 'codebase',
+            'target_scope': 'callable',
+            'common_fields': ['comment'],
+            'fields': {},
+        },
+        'FrameworkCallback': {
+            'effect': 'mark_framework_callback',
+            'analysis_scope': 'codebase',
+            'target_scope': 'callable',
+            'common_fields': ['comment'],
+            'fields': {
+                'hook': {
+                    'required': False,
+                    'strict': False,
+                    'value_cardinality': '1..1',
+                },
+            },
+        },
+        'CalledThroughAbstraction': {
+            'effect': 'mark_abstraction_reachable',
+            'analysis_scope': 'codebase',
+            'target_scope': 'callable',
+            'common_fields': ['comment'],
+            'fields': {},
+        },
+    },
+
     'Feature': {
         'FeatureStart': {
-            'effect': 'mark_flow_boundary',
-            'scope': 'codebase',
+            'effect': 'mark_flow_start',
+            'analysis_scope': 'codebase',
+            'target_scope': 'statement',
             'common_fields': ['name', 'comment'],
             'fields': {
                 'variants': {
                     'required': False,
                     'strict': False,
                     'value_cardinality': '1..N',
-                    'exclusive': False,
                 },
             },
             'co_occurrence': {
@@ -134,33 +167,48 @@ ANALYSIS_DECORATORS: dict[str, Any] = {
                 },
             },
         },
+
         'FeatureTrace': {
             'effect': 'mark_flow_waypoint',
-            'scope': 'codebase',
+            'analysis_scope': 'codebase',
+            'target_scope': 'statement',
             'common_fields': ['name', 'comment'],
             'fields': {
-                'branch_name': {
+                'branch': {
                     'required': False,
                     'strict': False,
                     'value_cardinality': '1..1',
                 },
             },
         },
+
         'FeatureBranch': {
             'effect': 'mark_flow_branch',
-            'scope': 'codebase',
+            'analysis_scope': 'codebase',
+            'target_scope': 'statement',
             'common_fields': ['name', 'comment'],
             'fields': {
-                'branches': {
-                    'required': True,
+                'branch': {
+                    'required': False,
                     'strict': False,
-                    'value_cardinality': '1..N',
+                    'value_cardinality': '1..1',
+                },
+                'control_polarity': {
+                    'required': False,
+                    'strict': True,
+                    'value_cardinality': '1..1',
+                    'values': ['true', 'false'],
                 },
             },
+            'required_one_of': [
+                ['branch', 'branches'],
+            ],
         },
+
         'FeatureConverge': {
             'effect': 'mark_flow_convergence',
-            'scope': 'codebase',
+            'analysis_scope': 'codebase',
+            'target_scope': 'statement',
             'common_fields': ['name', 'comment'],
             'fields': {
                 'branches': {
@@ -175,29 +223,33 @@ ANALYSIS_DECORATORS: dict[str, Any] = {
                 },
             },
         },
+
         'FeatureEndConditional': {
-            'effect': 'mark_flow_boundary',
-            'scope': 'codebase',
+            'effect': 'mark_flow_conditional_end',
+            'analysis_scope': 'codebase',
+            'target_scope': 'statement',
             'common_fields': ['name', 'comment'],
             'fields': {
+                'branch': {
+                    'required': False,
+                    'strict': False,
+                    'value_cardinality': '1..1',
+                },
                 'on_condition': {
                     'required': True,
                     'strict': False,
                     'value_cardinality': '1..1',
                 },
-                'branch_name': {
-                    'required': False,
-                    'strict': False,
-                    'value_cardinality': '1..1',
-                },
             },
         },
+
         'FeatureEnd': {
-            'effect': 'mark_flow_boundary',
-            'scope': 'codebase',
+            'effect': 'mark_flow_end',
+            'analysis_scope': 'codebase',
+            'target_scope': 'statement',
             'common_fields': ['name', 'comment'],
             'fields': {
-                'branch_name': {
+                'branch': {
                     'required': False,
                     'strict': False,
                     'value_cardinality': '1..1',
@@ -239,16 +291,14 @@ def get_decorator_effect(decorator_name: str) -> str | None:
     return None
 
 
-def get_decorator_scope(decorator_name: str) -> str | None:
-    """
-    Return the scope ('immediate' or 'codebase') for a decorator name.
-
-    Returns None if decorator is not known.
-    """
+def get_decorator_analysis_scope(decorator_name: str) -> str | None:
     schema = get_decorator_schema(decorator_name)
-    if schema:
-        return schema.get('scope')
-    return None
+    return schema.get('analysis_scope') if schema else None
+
+
+def get_decorator_target_scope(decorator_name: str) -> str | None:
+    schema = get_decorator_schema(decorator_name)
+    return schema.get('target_scope') if schema else None
 
 
 def is_known_decorator(decorator_name: str) -> bool:
@@ -303,7 +353,7 @@ def extract_statement_decorators(
             else:
                 break  # Code line, stop
 
-    return decorators
+    return list(reversed(decorators))
 
 
 def extract_callable_decorators(
@@ -484,101 +534,117 @@ def validate_decorator(decorator: dict[str, Any]) -> list[DecoratorValidationErr
 
 
 # =============================================================================
-# Co-occurrence Validation
+# Marker Validation
 # =============================================================================
 
-class CoOccurrenceValidationError:
-    """A co-occurrence validation error for a feature flow."""
+class AnalysisMarkerValidationError:
+    """A marker validation error."""
 
-    def __init__(self, feature_name: str, message: str) -> None:
+    def __init__(self, marker_name: str, feature_name: str, message: str) -> None:
+        self.marker_name = marker_name
         self.feature_name = feature_name
         self.message = message
 
     def __repr__(self) -> str:
-        return f"CoOccurrenceValidationError(feature={self.feature_name!r}: {self.message})"
+        return f"AnalysisMarkerValidationError(feature={self.feature_name!r}: {self.message})"
 
 
-def validate_feature_co_occurrences(
-        inventory_entries: list[dict[str, Any]],
-) -> list[CoOccurrenceValidationError]:
-    """
-    Validate codebase-wide co-occurrence rules for feature decorators.
+def validate_feature_marker_co_occurrences(
+        by_flow: dict[str, dict[str, list[dict[str, Any]]]],
+) -> list[AnalysisMarkerValidationError]:
+    errors: list[AnalysisMarkerValidationError] = []
 
-    Collects all feature decorators from inventory entries, groups them by
-    feature name, then checks co-occurrence rules defined on FeatureStart.
-
-    Returns a list of co-occurrence errors (empty if valid).
-    """
-    errors: list[CoOccurrenceValidationError] = []
-
-    # Collect all feature decorators grouped by feature name
-    # by_flow: flow_name -> decorator_type -> list of decorator instances
-    by_flow: dict[str, dict[str, list[dict[str, Any]]]] = {}
-
-    def collect(entries: list[dict[str, Any]]) -> None:
-        for entry in entries:
-            for dec in entry.get('decorators', []):
-                dec_name = dec.get('name', '')
-                if get_decorator_scope(dec_name) == 'codebase':
-                    feature_flow_name = dec.get('kwargs', {}).get('name')
-                    if feature_flow_name:
-                        if feature_flow_name not in by_flow:
-                            by_flow[feature_flow_name] = {}
-                        if dec_name not in by_flow[feature_flow_name]:
-                            by_flow[feature_flow_name][dec_name] = []
-                        by_flow[feature_flow_name][dec_name].append(dec)
-            if 'children' in entry:
-                collect(entry['children'])
-
-    collect(inventory_entries)
-
-    feature_schema = get_decorator_schema('FeatureStart')
-    if not feature_schema:
-        return errors
-
-    co_occurrence = feature_schema.get('co_occurrence', {})
-    required = co_occurrence.get('required', {})
-
-    for flow_name, dec_types in by_flow.items():
-        if 'FeatureStart' not in dec_types:
+    for flow_name, marker_types in by_flow.items():
+        if 'FeatureStart' not in marker_types:
             continue
 
-        # Check FeatureStart only appears once
-        if len(dec_types['FeatureStart']) > 1:
+        if len(marker_types['FeatureStart']) > 1:
             errors.append(
-                CoOccurrenceValidationError(
-                    flow_name,
-                    f"FeatureStart appears {len(dec_types['FeatureStart'])} times — must appear exactly once"
+                AnalysisMarkerValidationError(
+                    marker_name='FeatureStart',
+                    feature_name=flow_name,
+                    message='FeatureStart must appear exactly once per feature flow',
                 )
             )
 
-        # Check required one_of
-        one_of = required.get('one_of', {})
-        if one_of:
-            satisfied = any(dec_type in dec_types for dec_type in one_of)
-            if not satisfied:
-                errors.append(
-                    CoOccurrenceValidationError(
-                        flow_name,
-                        f"FeatureStart requires at least one of: {list(one_of.keys())}"
-                    )
+        if (
+                'FeatureEnd' not in marker_types
+                and 'FeatureEndConditional' not in marker_types
+        ):
+            errors.append(
+                AnalysisMarkerValidationError(
+                    marker_name='FeatureStart',
+                    feature_name=flow_name,
+                    message='Feature flow requires at least one FeatureEnd or FeatureEndConditional',
                 )
+            )
 
-        # Check non-repeatable co-occurrences
-        all_co_occurrence = {
-            **required.get('one_of', {}),
-            **co_occurrence.get('optional', {}),
-        }
-        for dec_type, rules in all_co_occurrence.items():
-            if not rules.get('repeatable', True):
-                count = len(dec_types.get(dec_type, []))
-                if count > 1:
-                    errors.append(
-                        CoOccurrenceValidationError(
-                            flow_name,
-                            f"{dec_type} is not repeatable for flow '{flow_name}' but appears {count} times"
-                        )
-                    )
+    return errors
+
+
+def validate_analysis_markers(
+        inventory_entries: list[dict[str, Any]],
+) -> list[AnalysisMarkerValidationError]:
+    errors: list[AnalysisMarkerValidationError] = []
+    by_flow: dict[str, dict[str, list[dict[str, Any]]]] = {}
+
+    def collect_marker(
+            marker: dict[str, Any],
+            *,
+            actual_target_scope: str,
+    ) -> None:
+        feature_name = marker.get('kwargs', {}).get('name')
+        marker_name = marker.get('name', '')
+        expected_target_scope = get_decorator_target_scope(marker_name)
+
+        if expected_target_scope is None:
+            errors.append(
+                AnalysisMarkerValidationError(
+                    feature_name=feature_name,
+                    marker_name=marker_name,
+                    message='Unknown analysis marker',
+                )
+            )
+            return
+
+        if expected_target_scope != actual_target_scope:
+            errors.append(
+                AnalysisMarkerValidationError(
+                    feature_name=feature_name,
+                    marker_name=marker_name,
+                    message=(
+                        f'Expected target_scope={expected_target_scope!r}, '
+                        f'found on {actual_target_scope!r}'
+                    ),
+                )
+            )
+            return
+
+        if get_decorator_analysis_scope(marker_name) != 'codebase':
+            return
+
+        flow_name = marker.get('kwargs', {}).get('name')
+        if not flow_name:
+            return
+
+        by_flow.setdefault(flow_name, {})
+        by_flow[flow_name].setdefault(marker_name, [])
+        by_flow[flow_name][marker_name].append(marker)
+
+    def collect(entries: list[dict[str, Any]]) -> None:
+        for entry in entries:
+            for marker in (entry.get('signature_info', {}) or {}).get('decorators', []) or []:
+                collect_marker(marker, actual_target_scope='callable')
+
+            for branch in (entry.get('analysis_info', {}) or {}).get('branches', []) or []:
+                for marker in branch.get('decorators', []) or []:
+                    collect_marker(marker, actual_target_scope='statement')
+
+            collect(entry.get('children', []) or [])
+
+    collect(inventory_entries)
+
+    errors.extend(validate_feature_marker_co_occurrences(by_flow))
 
     return errors
 

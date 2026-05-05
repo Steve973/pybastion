@@ -41,7 +41,7 @@ from pybastion_unit.helpers.chain_resolution import (
 from pybastion_unit.helpers.decorator_processing import (
     extract_callable_decorators,
     has_effect,
-    validate_feature_co_occurrences,
+    validate_analysis_markers,
 )
 from pybastion_unit.helpers.integration_analysis import (
     build_integration_entries,
@@ -1300,7 +1300,7 @@ def process_unit(
 
     add_execution_paths(roots)
 
-    for err in validate_feature_co_occurrences(roots):
+    for err in validate_analysis_markers(roots):
         print(f"Warning: {err}")
 
     for entry in unit.entries:

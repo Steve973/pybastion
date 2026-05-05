@@ -290,17 +290,54 @@ def find_feature_flows(
 
 
 def calculate_path_similarity(path1: list[str], path2: list[str]) -> float:
+    if not path1 or not path2:
+        return 0.0
+
+    if path1[0] != path2[0] or path1[-1] != path2[-1]:
+        # Paths with different first or last nodes
+        # are not comparable for compression.
+        return 0.0
+
     set1 = set(path1)
     set2 = set(path2)
-
-    if not set1 or not set2:
-        return 0.0
 
     intersection = len(set1 & set2)
     union = len(set1 | set2)
 
-    return intersection / union if union > 0 else 0.0
+    return intersection / union
 
+
+def path_grouping_signature(cfg: nx.DiGraph, path: list[str]) -> tuple:
+    end_data = cfg.nodes[path[-1]]
+    end_markers = [
+        dec
+        for dec in end_data.get("decorators", []) or []
+        if dec.get("name") in {"FeatureEnd", "FeatureEndConditional"}
+    ]
+
+    end_marker = end_markers[0] if end_markers else {}
+    kwargs = end_marker.get("kwargs", {}) or {}
+
+    integration_nodes = tuple(
+        node_id
+        for node_id in path
+        if cfg.nodes[node_id].get("is_integration_point")
+    )
+
+    branch_nodes = tuple(
+        node_id
+        for node_id in path
+        if (cfg.nodes[node_id].get("constraint") or {}).get("constraint_type")
+        in {"condition", "iteration"}
+    )
+
+    return (
+        end_marker.get("name"),
+        kwargs.get("branch"),
+        kwargs.get("on_condition"),
+        integration_nodes,
+        branch_nodes,
+    )
 
 
 def group_similar_paths(
@@ -308,8 +345,6 @@ def group_similar_paths(
     paths: list[list[str]],
     similarity_threshold: float = 0.8,
 ) -> list[dict[str, Any]]:
-    del cfg  # similarity grouping is path based only
-
     if not paths:
         return []
 
@@ -322,6 +357,9 @@ def group_similar_paths(
             for j in range(i + 1, len(groups)):
                 path_i = paths[groups[i][0]]
                 path_j = paths[groups[j][0]]
+
+                if path_grouping_signature(cfg, path_i) != path_grouping_signature(cfg, path_j):
+                    continue
 
                 if calculate_path_similarity(path_i, path_j) >= similarity_threshold:
                     groups[i].extend(groups[j])
