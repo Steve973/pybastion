@@ -24,6 +24,8 @@ code.
   - [Optional Graph Checker](#optional-graph-checker)
   - [Stage 2: Generate Integration Test Specifications](#stage-2-generate-integration-test-specifications)
   - [Stage 3: Split Specifications](#stage-3-split-specifications)
+  - [Stage 4: Feature Flow Analysis](#stage-4-feature-flow-analysis)
+    - [Feature Branch Expansion and Flow Case Assembly](#feature-branch-expansion-and-flow-case-assembly)
 - [Outputs](#outputs)
 - [What the Specs Are For](#what-the-specs-are-for)
 - [What the Pipeline Does Not Do](#what-the-pipeline-does-not-do)
@@ -217,6 +219,80 @@ task to a developer or an agent:
 
 > Here is the source unit. Here is the target unit. Here are the seams between
 > them. Generate or review tests for this relationship.
+
+## Stage 4: Feature Flow Analysis
+
+Stage 4 turns feature-flow analysis markers into testable integration flow
+cases. Earlier stages identify executable items, outcomes, integration points,
+and graph reachability. This stage uses that information to trace how a marked
+feature moves through the project, including branch-specific behavior,
+convergence, conditional completion paths, and shared downstream segments.
+
+The goal is not only to find a path from the start of a feature to its end. The
+goal is to identify the distinct feature cases, resulting from branch-specific
+execution paths, that should become integration test obligations.
+
+### Feature Branch Expansion and Flow Case Assembly
+
+Feature-flow tracing is not a single shortest-path problem. A feature may contain
+multiple marked branch points, and each branch point can expand the number of
+testable feature-flow cases.
+
+The tracer treats `FeatureStart` as the beginning of the feature's root `main`
+case. Feature branches then create branch-specific cases. When branches converge,
+the execution path may share a downstream segment, but the distinct feature cases
+are not erased. Convergence affects path reuse and segment assembly, not test-case
+identity.
+
+For example:
+
+```text
+main
+  -> branch group: a | b
+  -> converge
+  -> branch group: c | d
+  -> converge
+  -> FeatureEnd
+```
+
+This produces four testable feature-flow cases:
+
+```text
+main -> a -> c -> end
+main -> a -> d -> end
+main -> b -> c -> end
+main -> b -> d -> end
+```
+
+The number of final feature-flow cases is driven by the branch frontier
+encountered during traversal:
+
+- Each branch group multiplies the active cases that reach it.
+- Nested branch groups extend the current branch lineage.
+- A nested branch group multiplies only the cases in its own lineage, not
+  unrelated branches that do not reach it.
+- Convergence joins the execution location but preserves the case identity that
+  reached the convergence point.
+- Converged branches share a common downstream segment.
+
+To support this, marker-aware feature tracing should operate in three conceptual
+passes:
+
+1. Build a feature marker inventory from unit inventories.
+2. Use `FeatureBranch`, `FeatureConverge`, `FeatureEnd`, and
+   `FeatureEndConditional` markers to derive feature branch topology and
+   testable flow cases.
+3. Traverse the EI graph using branch-aware state, producing reusable path
+   segments and then assembling full feature-flow cases from those segments.
+
+Each segment records only its local EI path, but also carries its absolute branch
+lineage. Full feature-flow paths are assembled later by combining the appropriate
+main, branch, convergence, shared-tail, and end segments.
+
+`FeatureConverge` does not reduce the number of test cases. It identifies where
+separate branch paths can resume shared traversal. `FeatureEndConditional` marks
+a conditional test obligation and may terminate one branch case while other cases
+continue to a normal `FeatureEnd`.
 
 ## Outputs
 
