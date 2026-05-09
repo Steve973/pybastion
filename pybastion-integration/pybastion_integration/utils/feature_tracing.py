@@ -8,17 +8,13 @@ files.
 Feature markers provide feature intent. Execution and control-flow facts come
 from inventory EI metadata. When a marker is attached to a StatementAnchor, this
 helper resolves the full same-line EI decomposition for the marked statement.
-
-The current exported flow path generation is still a first-pass branch-forced
-path probe. The newer FeatureFlowCase / FeaturePathSegment model is the intended
-foundation for full branch-state traversal and segment assembly.
 """
 
 from __future__ import annotations
 
 import argparse
 import pickle
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -228,30 +224,15 @@ class FeatureBranchPoint:
     branch_markers: tuple[FeatureMarkerRecord, ...]
 
 
-# =============================================================================
-# Current exported flow path models
-# =============================================================================
-
 @dataclass(frozen=True)
-class FeatureFlowPath:
+class FeatureConvergePoint:
     feature_name: str
-    end_marker_type: str
-    start_marker: str
-    end_marker: str
-    variant: str
-    required_branch_marker: str | None
-    required_branch: str | None
-    required_target_eis: list[str]
-    path: list[dict[str, Any]]
-    path_length: int
-    reason: str
-
-
-@dataclass(frozen=True)
-class DiscardedFeatureFlowPath(FeatureFlowPath):
-    discarded_reason: str
-    duplicate_of_variant: str
-    duplicate_of_required_branch: str | None
+    converge_point_id: str
+    marker_node_id: str
+    converge_ei_id: str
+    source_branches: tuple[str, ...]
+    into_branch: str
+    marker: FeatureMarkerRecord
 
 
 # =============================================================================
@@ -651,29 +632,6 @@ def feature_marker_inventory_to_dict(
     }
 
 
-def write_feature_marker_inventory(
-        *,
-        inventory_root: Path,
-        output_path: Path,
-) -> dict[str, Any]:
-    inventory_paths = find_inventory_files(inventory_root)
-    inventories = build_feature_marker_inventory_from_paths(inventory_paths)
-    output = feature_marker_inventory_to_dict(inventories)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        yaml.dump(
-            output,
-            sort_keys=False,
-            allow_unicode=True,
-            width=float('inf'),
-        ),
-        encoding='utf-8',
-    )
-
-    return output
-
-
 # =============================================================================
 # Graph path helpers
 # =============================================================================
@@ -707,24 +665,6 @@ def shortest_path_or_none(
         return None
 
 
-def shortest_path_between_any(
-        cfg: nx.DiGraph,
-        sources: list[str],
-        targets: list[str],
-) -> list[str] | None:
-    best: list[str] | None = None
-
-    for source in sources:
-        for target in targets:
-            path = shortest_path_or_none(cfg, source, target)
-            if path is None:
-                continue
-            if best is None or len(path) < len(best):
-                best = path
-
-    return best
-
-
 class SegmentPathSearchMode(StrEnum):
     FIRST = 'first'
     SHORTEST = 'shortest'
@@ -737,6 +677,37 @@ def node_callable_name(
         node_id: str,
 ) -> str | None:
     return cfg.nodes.get(node_id, {}).get('callable_name')
+
+
+def case_callable_name(
+        cfg: nx.DiGraph,
+        case: FeatureFlowCase,
+) -> str | None:
+    for current_ei in case.current_eis:
+        callable_name = node_callable_name(cfg, current_ei)
+
+        if callable_name is not None:
+            return callable_name
+
+    return None
+
+
+def is_statement_anchor_node(
+        cfg: nx.DiGraph,
+        node_id: str,
+) -> bool:
+    node_data = cfg.nodes.get(node_id, {})
+
+    if node_data.get('stmt_type') == 'StatementAnchor':
+        return True
+
+    if node_data.get('condition') == 'statement anchor':
+        return True
+
+    if node_data.get('description') == 'statement anchor':
+        return True
+
+    return False
 
 
 def node_has_feature_marker(
@@ -811,8 +782,20 @@ def find_valid_segment_paths(
         mode: SegmentPathSearchMode = SegmentPathSearchMode.SHORTEST,
         max_paths: int | None = None,
         cutoff: int | None = None,
+        forbidden_nodes: set[str] | None = None,
 ) -> list[list[str]]:
     paths: list[list[str]] = []
+    forbidden_nodes = forbidden_nodes or set()
+    target_set = set(targets)
+
+    def is_allowed_path(path: list[str]) -> bool:
+        blocked_nodes = forbidden_nodes - target_set
+        interior_nodes = set(path[1:-1])
+
+        if interior_nodes & blocked_nodes:
+            return False
+
+        return is_navigation_valid_graph_path(cfg, path)
 
     for source in sources:
         if source not in cfg:
@@ -823,17 +806,33 @@ def find_valid_segment_paths(
                 continue
 
             if mode == SegmentPathSearchMode.SHORTEST:
+                # Shortest path may be invalid because it crosses forbidden
+                # sibling branch nodes. In that case, fall through to bounded
+                # simple-path search so a slightly longer valid path can still
+                # be selected.
                 path = shortest_path_or_none(
                     cfg,
                     source,
                     target,
                 )
 
-                if path is not None and is_navigation_valid_graph_path(
-                        cfg,
-                        path,
-                ):
+                if path is not None and is_allowed_path(path):
                     paths.append(path)
+                    continue
+
+                candidate_paths = nx.all_simple_paths(
+                    cfg,
+                    source,
+                    target,
+                    cutoff=cutoff or 250,
+                )
+
+                for candidate_path in candidate_paths:
+                    if not is_allowed_path(candidate_path):
+                        continue
+
+                    paths.append(candidate_path)
+                    break
 
                 continue
 
@@ -850,7 +849,7 @@ def find_valid_segment_paths(
                 continue
 
             for path in candidate_paths:
-                if not is_navigation_valid_graph_path(cfg, path):
+                if not is_allowed_path(path):
                     continue
 
                 paths.append(path)
@@ -871,40 +870,6 @@ def find_valid_segment_paths(
     return paths
 
 
-def has_valid_segment_path(
-        cfg: nx.DiGraph,
-        *,
-        source: str,
-        target: str,
-) -> bool:
-    return bool(
-        find_valid_segment_paths(
-            cfg,
-            sources=[source],
-            targets=[target],
-            mode=SegmentPathSearchMode.FIRST,
-            max_paths=1,
-        )
-    )
-
-
-def has_valid_segment_path_between_any(
-        cfg: nx.DiGraph,
-        *,
-        sources: list[str],
-        targets: list[str],
-) -> bool:
-    return bool(
-        find_valid_segment_paths(
-            cfg,
-            sources=sources,
-            targets=targets,
-            mode=SegmentPathSearchMode.FIRST,
-            max_paths=1,
-        )
-    )
-
-
 def trace_feature_path_segment(
         cfg: nx.DiGraph,
         *,
@@ -915,12 +880,14 @@ def trace_feature_path_segment(
         role: FeaturePathSegmentRole,
         disposition: FeaturePathSegmentDisposition,
         disposition_reason: FeaturePathSegmentDispositionReason,
+        forbidden_nodes: set[str] | None = None,
 ) -> FeaturePathSegment | None:
     paths = find_valid_segment_paths(
         cfg,
         sources=start_eis,
         targets=end_eis,
         mode=SegmentPathSearchMode.SHORTEST,
+        forbidden_nodes=forbidden_nodes,
     )
 
     if not paths:
@@ -938,40 +905,6 @@ def trace_feature_path_segment(
         disposition=disposition,
         disposition_reason=disposition_reason,
     )
-
-
-def build_path_through_required_targets(
-        cfg: nx.DiGraph,
-        *,
-        start_sources: list[str],
-        required_targets: list[str],
-        end_targets: list[str],
-) -> list[str] | None:
-    best: list[str] | None = None
-
-    for required_target in required_targets:
-        path_to_required = shortest_path_between_any(
-            cfg,
-            start_sources,
-            [required_target],
-        )
-        if path_to_required is None:
-            continue
-
-        path_to_end = shortest_path_between_any(
-            cfg,
-            [required_target],
-            end_targets,
-        )
-        if path_to_end is None:
-            continue
-
-        candidate = append_path(path_to_required, path_to_end)
-
-        if best is None or len(candidate) < len(best):
-            best = candidate
-
-    return best
 
 
 # =============================================================================
@@ -1139,6 +1072,159 @@ def build_feature_branch_points(
     return branch_points
 
 
+def branch_name_for_marker(branch_marker: FeatureMarkerRecord) -> str:
+    if branch_marker.branch_selection is None:
+        return 'main'
+
+    return branch_marker.branch_selection.branch or 'main'
+
+
+# =============================================================================
+# Converge point discovery helpers
+# =============================================================================
+
+def converge_point_ei_id(record: FeatureMarkerRecord) -> str:
+    if record.marked_statement is not None:
+        return record.marked_statement.entry_ei.ei_id
+
+    return record.node_id
+
+
+def parse_converge_source_branches(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+
+    if isinstance(value, str):
+        return tuple(
+            item.strip()
+            for item in value.split(',')
+            if item.strip()
+        )
+
+    if isinstance(value, list):
+        return tuple(
+            str(item).strip()
+            for item in value
+            if str(item).strip()
+        )
+
+    return ()
+
+
+def converge_into_branch(record: FeatureMarkerRecord) -> str:
+    value = record.kwargs.get('into')
+
+    if value is None:
+        return 'main'
+
+    text = str(value).strip()
+    return text if text else 'main'
+
+
+def build_feature_converge_points(
+        feature: FeatureMarkerInventory,
+) -> list[FeatureConvergePoint]:
+    converge_points: list[FeatureConvergePoint] = []
+
+    for index, converge_marker in enumerate(feature.converges, start=1):
+        converge_points.append(
+            FeatureConvergePoint(
+                feature_name=feature.feature_name,
+                converge_point_id=f'{feature.feature_name}::converge_point::{index}',
+                marker_node_id=converge_marker.node_id,
+                converge_ei_id=converge_point_ei_id(converge_marker),
+                source_branches=parse_converge_source_branches(
+                    converge_marker.kwargs.get('branches')
+                ),
+                into_branch=converge_into_branch(converge_marker),
+                marker=converge_marker,
+            )
+        )
+
+    return converge_points
+
+
+def branch_leaf_name(branch_path: tuple[str, ...]) -> str:
+    if not branch_path:
+        return 'main'
+
+    return branch_path[-1]
+
+
+def branch_path_for_converge_target(converge_point: FeatureConvergePoint) -> tuple[str, ...]:
+    if converge_point.into_branch == 'main':
+        return ('main',)
+
+    return tuple(
+        item.strip()
+        for item in converge_point.into_branch.split(BRANCH_PATH_SEPARATOR)
+        if item.strip()
+    )
+
+
+def converge_applies_to_case(
+        converge_point: FeatureConvergePoint,
+        case: FeatureFlowCase,
+) -> bool:
+    leaf_name = branch_leaf_name(case.active_branch_path)
+
+    if not converge_point.source_branches:
+        return True
+
+    return leaf_name in converge_point.source_branches
+
+
+# =============================================================================
+# Converge routing helpers
+# =============================================================================
+
+def trace_nearest_converge_point_for_case(
+        cfg: nx.DiGraph,
+        *,
+        case: FeatureFlowCase,
+        converge_points: list[FeatureConvergePoint],
+        branch_points: list[FeatureBranchPoint],
+) -> tuple[FeatureConvergePoint, FeaturePathSegment] | None:
+    best: tuple[FeatureConvergePoint, FeaturePathSegment] | None = None
+
+    for converge_point in converge_points:
+        if not converge_applies_to_case(
+                converge_point,
+                case,
+        ):
+            continue
+
+        forbidden_nodes = forbidden_sibling_branch_region_nodes(
+            cfg,
+            branch_points=branch_points,
+            case=case,
+            converge_point=converge_point,
+        )
+
+        segment = trace_feature_path_segment(
+            cfg,
+            feature_name=case.feature_name,
+            segment_branch_path=case.active_branch_path,
+            start_eis=list(case.current_eis),
+            end_eis=[converge_point.converge_ei_id],
+            role=FeaturePathSegmentRole.BRANCH_TO_CONVERGE,
+            disposition=FeaturePathSegmentDisposition.ACCEPTED,
+            disposition_reason=FeaturePathSegmentDispositionReason.EXACT_GRAPH_PATH,
+            forbidden_nodes=forbidden_nodes,
+        )
+
+        if segment is None:
+            continue
+
+        if best is None or len(segment.path) < len(best[1].path):
+            best = (
+                converge_point,
+                segment,
+            )
+
+    return best
+
+
 # =============================================================================
 # Branch case expansion helpers
 # =============================================================================
@@ -1152,6 +1238,107 @@ def selected_target_eis_for_branch_marker(
     return branch_marker.branch_selection.selected_target_eis
 
 
+def forbidden_sibling_branch_region_nodes(
+        cfg: nx.DiGraph,
+        *,
+        branch_points: list[FeatureBranchPoint],
+        case: FeatureFlowCase,
+        converge_point: FeatureConvergePoint,
+) -> set[str]:
+    active_leaf = branch_leaf_name(case.active_branch_path)
+    active_callable = case_callable_name(cfg, case)
+
+    if active_callable is None:
+        return set()
+
+    forbidden: set[str] = set()
+
+    converge_boundary_candidates = [
+        converge_point.marker_node_id,
+        converge_point.converge_ei_id,
+    ]
+
+    converge_boundary_key = min(
+        parse_ei_sort_key(node_id)
+        for node_id in converge_boundary_candidates
+        if node_id
+    )
+
+    for branch_point in branch_points:
+        branch_targets: list[tuple[str, str]] = []
+
+        for branch_marker in branch_point.branch_markers:
+            branch_name = branch_name_for_marker(branch_marker)
+            selected_targets = selected_target_eis_for_branch_marker(
+                branch_marker
+            )
+
+            for selected_target in selected_targets:
+                branch_targets.append(
+                    (
+                        branch_name,
+                        selected_target,
+                    )
+                )
+
+        branch_targets.sort(
+            key=lambda item: parse_ei_sort_key(item[1])
+        )
+
+        branch_names = {
+            branch_name
+            for branch_name, _target in branch_targets
+        }
+
+        if active_leaf not in branch_names:
+            continue
+
+        for index, (branch_name, branch_target) in enumerate(branch_targets):
+            if branch_name == active_leaf:
+                continue
+
+            branch_start_key = parse_ei_sort_key(branch_target)
+
+            later_branch_targets = [
+                parse_ei_sort_key(other_target)
+                for _other_branch_name, other_target in branch_targets[index + 1:]
+            ]
+
+            branch_end_key = min(
+                [
+                    *later_branch_targets,
+                    converge_boundary_key,
+                ]
+            )
+
+            for node_id in cfg.nodes:
+                node_text = str(node_id)
+
+                if node_text in {
+                    converge_point.marker_node_id,
+                    converge_point.converge_ei_id,
+                }:
+                    continue
+
+                if is_statement_anchor_node(
+                        cfg,
+                        node_text,
+                ):
+                    continue
+
+                node_data = cfg.nodes.get(node_text, {})
+
+                if node_data.get('callable_name') != active_callable:
+                    continue
+
+                node_key = parse_ei_sort_key(node_text)
+
+                if branch_start_key <= node_key < branch_end_key:
+                    forbidden.add(node_text)
+
+    return forbidden
+
+
 def extend_branch_path(
         branch_path: tuple[str, ...],
         branch_name: str,
@@ -1159,43 +1346,7 @@ def extend_branch_path(
     if branch_name == 'main':
         return branch_path
 
-    return (*branch_path, branch_name)
-
-
-def expand_case_at_branch_point(
-        case: FeatureFlowCase,
-        branch_point: FeatureBranchPoint,
-) -> list[FeatureFlowCase]:
-    expanded_cases: list[FeatureFlowCase] = []
-
-    for branch_marker in branch_point.branch_markers:
-        branch_name = branch_name_for_marker(branch_marker)
-        selected_target_eis = selected_target_eis_for_branch_marker(
-            branch_marker
-        )
-
-        if not selected_target_eis:
-            continue
-
-        next_branch_path = extend_branch_path(
-            case.case_branch_path,
-            branch_name,
-        )
-
-        expanded_cases.append(
-            FeatureFlowCase(
-                feature_name=case.feature_name,
-                case_branch_path=next_branch_path,
-                active_branch_path=next_branch_path,
-                current_eis=tuple(selected_target_eis),
-                segments=case.segments,
-                status=case.status,
-                end_kind=case.end_kind,
-                outcome_kind=case.outcome_kind,
-            )
-        )
-
-    return expanded_cases
+    return *branch_path, branch_name
 
 
 def expand_case_at_branch_point_with_segments(
@@ -1270,23 +1421,6 @@ def expand_cases_at_branch_point_with_segments(
     return expanded_cases
 
 
-def expand_cases_at_branch_point(
-        cases: list[FeatureFlowCase],
-        branch_point: FeatureBranchPoint,
-) -> list[FeatureFlowCase]:
-    expanded_cases: list[FeatureFlowCase] = []
-
-    for case in cases:
-        expanded_cases.extend(
-            expand_case_at_branch_point(
-                case,
-                branch_point,
-            )
-        )
-
-    return expanded_cases
-
-
 # =============================================================================
 # Segment-based feature flow tracing
 # =============================================================================
@@ -1318,11 +1452,26 @@ def trace_case_to_branch_point(
     )
 
 
+def trace_case_to_converge_point(
+        *,
+        case: FeatureFlowCase,
+        converge_point: FeatureConvergePoint,
+        segment: FeaturePathSegment,
+) -> FeatureFlowCase:
+    return append_segment_to_case(
+        case,
+        segment,
+        current_eis=[segment.end_ei],
+        active_branch_path=branch_path_for_converge_target(converge_point),
+    )
+
+
 def trace_case_to_end(
         cfg: nx.DiGraph,
         *,
         case: FeatureFlowCase,
         end: FeatureMarkerRecord,
+        forbidden_nodes: set[str] | None = None,
 ) -> FeatureFlowCase | None:
     end_targets = marker_end_eis(end)
 
@@ -1356,6 +1505,7 @@ def trace_case_to_end(
         role=role,
         disposition=disposition,
         disposition_reason=disposition_reason,
+        forbidden_nodes=forbidden_nodes,
     )
 
     if segment is None:
@@ -1385,6 +1535,7 @@ def trace_feature_flow_cases_to_end(
     ]
 
     branch_points = build_feature_branch_points(feature)
+    converge_points = build_feature_converge_points(feature)
 
     if not branch_points:
         completed_case = trace_case_to_end(
@@ -1396,10 +1547,34 @@ def trace_feature_flow_cases_to_end(
         return [completed_case] if completed_case is not None else []
 
     for branch_point in branch_points:
+        cases_after_converge: list[FeatureFlowCase] = []
+
+        for case in cases:
+            converge_result = trace_nearest_converge_point_for_case(
+                cfg,
+                case=case,
+                converge_points=converge_points,
+                branch_points=branch_points,
+            )
+
+            if converge_result is None:
+                cases_after_converge.append(case)
+                continue
+
+            converge_point, converge_segment = converge_result
+
+            converged_case = trace_case_to_converge_point(
+                case=case,
+                converge_point=converge_point,
+                segment=converge_segment,
+            )
+
+            cases_after_converge.append(converged_case)
+
         cases_reaching_branch_point: list[FeatureFlowCase] = []
         cases_bypassing_branch_point: list[FeatureFlowCase] = []
 
-        for case in cases:
+        for case in cases_after_converge:
             case_at_branch_point = trace_case_to_branch_point(
                 cfg,
                 case=case,
@@ -1429,6 +1604,34 @@ def trace_feature_flow_cases_to_end(
     completed_cases: list[FeatureFlowCase] = []
 
     for case in cases:
+        applicable_converge_points = [
+            converge_point
+            for converge_point in converge_points
+            if converge_applies_to_case(
+                converge_point,
+                case,
+            )
+        ]
+
+        converge_result = trace_nearest_converge_point_for_case(
+            cfg,
+            case=case,
+            converge_points=applicable_converge_points,
+            branch_points=branch_points,
+        )
+
+        if applicable_converge_points and converge_result is None:
+            continue
+
+        if converge_result is not None:
+            converge_point, converge_segment = converge_result
+
+            case = trace_case_to_converge_point(
+                case=case,
+                converge_point=converge_point,
+                segment=converge_segment,
+            )
+
         completed_case = trace_case_to_end(
             cfg,
             case=case,
@@ -1475,233 +1678,30 @@ def trace_feature_flow_cases(
 # =============================================================================
 
 def summarize_feature_flow_cases(
+        cfg: nx.DiGraph,
         inventories: dict[str, FeatureMarkerInventory],
 ) -> None:
-    for feature in inventories.values():
-        branch_points = build_feature_branch_points(feature)
-        if not branch_points:
-            continue
-
-        if not feature.starts:
-            continue
-
-        start = feature.starts[0]
-        cases = [
-            initial_feature_flow_case(
-                feature_name=feature.feature_name,
-                start_eis=marker_exit_eis(start),
-            )
-        ]
-
-        for branch_point in branch_points:
-            cases = expand_cases_at_branch_point(
-                cases,
-                branch_point,
-            )
-
-        print(f'Feature cases for {feature.feature_name}: {len(cases)}')
-        for case in cases:
-            print(f'  branch_path={case.case_branch_path} current_eis={case.current_eis}')
-
-
-# =============================================================================
-# Current first-pass branch-forced path export
-# =============================================================================
-
-def dedupe_feature_flow_paths(
-        flows: list[FeatureFlowPath],
-) -> tuple[list[FeatureFlowPath], list[DiscardedFeatureFlowPath]]:
-    result: list[FeatureFlowPath] = []
-    discarded: list[DiscardedFeatureFlowPath] = []
-    seen: dict[tuple[str, ...], FeatureFlowPath] = {}
-
-    for flow in flows:
-        key = tuple(
-            str(path_item.get('id'))
-            for path_item in flow.path
-        )
-
-        existing = seen.get(key)
-        if existing is not None:
-            base_data = {
-                field.name: getattr(flow, field.name)
-                for field in fields(FeatureFlowPath)
-            }
-
-            discarded.append(
-                DiscardedFeatureFlowPath(
-                    **base_data,
-                    discarded_reason='duplicate_path',
-                    duplicate_of_variant=existing.variant,
-                    duplicate_of_required_branch=existing.required_branch,
-                )
-            )
-            continue
-
-        seen[key] = flow
-        result.append(flow)
-
-    return result, discarded
-
-
-def branch_name_for_marker(branch_marker: FeatureMarkerRecord) -> str:
-    if branch_marker.branch_selection is None:
-        return 'main'
-
-    return branch_marker.branch_selection.branch or 'main'
-
-
-def is_explicit_main_branch_marker(branch_marker: FeatureMarkerRecord) -> bool:
-    return (
-            branch_marker.branch_selection is not None
-            and branch_name_for_marker(branch_marker) == 'main'
-            and bool(branch_marker.branch_selection.selected_target_eis)
+    cases = trace_feature_flow_cases(
+        cfg,
+        inventories,
     )
 
+    cases_by_feature: dict[str, list[FeatureFlowCase]] = {}
 
-def trace_feature_to_end_path_probe(
-        cfg: nx.DiGraph,
-        *,
-        feature: FeatureMarkerInventory,
-        start: FeatureMarkerRecord,
-        end: FeatureMarkerRecord,
-) -> tuple[list[FeatureFlowPath], list[DiscardedFeatureFlowPath]]:
-    flows: list[FeatureFlowPath] = []
+    for case in cases:
+        cases_by_feature.setdefault(
+            case.feature_name,
+            [],
+        ).append(case)
 
-    start_sources = marker_exit_eis(start)
-    end_targets = marker_end_eis(end)
+    for feature_name, feature_cases in sorted(cases_by_feature.items()):
+        print(f'Feature cases for {feature_name}: {len(feature_cases)}')
 
-    explicit_main_branch_marker = next(
-        (
-            branch_marker
-            for branch_marker in feature.branches
-            if is_explicit_main_branch_marker(branch_marker)
-        ),
-        None,
-    )
-
-    if explicit_main_branch_marker is not None:
-        branch_selection = explicit_main_branch_marker.branch_selection
-        assert branch_selection is not None
-
-        main_branch_path = build_path_through_required_targets(
-            cfg,
-            start_sources=start_sources,
-            required_targets=branch_selection.selected_target_eis,
-            end_targets=end_targets,
-        )
-
-        if main_branch_path is not None:
-            flows.append(
-                FeatureFlowPath(
-                    feature_name=feature.feature_name,
-                    end_marker_type=end.marker_name,
-                    start_marker=start.node_id,
-                    end_marker=end.node_id,
-                    variant='main',
-                    required_branch_marker=explicit_main_branch_marker.node_id,
-                    required_branch='main',
-                    required_target_eis=branch_selection.selected_target_eis,
-                    path=describe_path(cfg, main_branch_path),
-                    path_length=len(main_branch_path),
-                    reason='main_branch_target_forced',
-                )
+        for case in feature_cases:
+            print(
+                f'  branch_path={case.case_branch_path} '
+                f'current_eis={case.current_eis}'
             )
-    else:
-        main_branch_path = shortest_path_between_any(
-            cfg,
-            start_sources,
-            end_targets,
-        )
-
-        if main_branch_path is not None:
-            flows.append(
-                FeatureFlowPath(
-                    feature_name=feature.feature_name,
-                    end_marker_type=end.marker_name,
-                    start_marker=start.node_id,
-                    end_marker=end.node_id,
-                    variant='main',
-                    required_branch_marker=None,
-                    required_branch='main',
-                    required_target_eis=[],
-                    path=describe_path(cfg, main_branch_path),
-                    path_length=len(main_branch_path),
-                    reason='main_branch_path',
-                )
-            )
-
-    for branch_marker in feature.branches:
-        branch_selection = branch_marker.branch_selection
-        if branch_selection is None:
-            continue
-
-        branch_name = branch_name_for_marker(branch_marker)
-
-        if branch_name == 'main':
-            continue
-
-        required_targets = branch_selection.selected_target_eis
-        if not required_targets:
-            continue
-
-        branch_path = build_path_through_required_targets(
-            cfg,
-            start_sources=start_sources,
-            required_targets=required_targets,
-            end_targets=end_targets,
-        )
-
-        if branch_path is None:
-            continue
-
-        flows.append(
-            FeatureFlowPath(
-                feature_name=feature.feature_name,
-                end_marker_type=end.marker_name,
-                start_marker=start.node_id,
-                end_marker=end.node_id,
-                variant=branch_name,
-                required_branch=branch_name,
-                required_branch_marker=branch_marker.node_id,
-                required_target_eis=required_targets,
-                path=describe_path(cfg, branch_path),
-                path_length=len(branch_path),
-                reason='branch_target_forced',
-            )
-        )
-
-    return dedupe_feature_flow_paths(flows)
-
-
-def trace_feature_flow_path_probes(
-        cfg: nx.DiGraph,
-        inventories: dict[str, FeatureMarkerInventory],
-) -> tuple[list[FeatureFlowPath], list[DiscardedFeatureFlowPath]]:
-    flows: list[FeatureFlowPath] = []
-    discarded_flows: list[DiscardedFeatureFlowPath] = []
-
-    for feature in inventories.values():
-        if not feature.starts:
-            continue
-
-        start = feature.starts[0]
-        ends = [
-            *feature.ends,
-            *feature.conditional_ends,
-        ]
-
-        for end in ends:
-            kept, discarded = trace_feature_to_end_path_probe(
-                cfg,
-                feature=feature,
-                start=start,
-                end=end,
-            )
-            flows.extend(kept)
-            discarded_flows.extend(discarded)
-
-    return flows, discarded_flows
 
 
 # =============================================================================
@@ -1931,6 +1931,58 @@ def feature_branch_points_to_dict(
     }
 
 
+def feature_converge_points_to_dict(
+        inventories: dict[str, FeatureMarkerInventory],
+) -> dict[str, Any]:
+    features: list[dict[str, Any]] = []
+
+    for feature_name, feature in sorted(inventories.items()):
+        converge_points = build_feature_converge_points(feature)
+
+        features.append(
+            {
+                'feature_name': feature_name,
+                'converge_point_count': len(converge_points),
+                'converge_points': [
+                    {
+                        'converge_point_id': converge_point.converge_point_id,
+                        'marker_node_id': converge_point.marker_node_id,
+                        'converge_ei_id': converge_point.converge_ei_id,
+                        'source_branches': list(converge_point.source_branches),
+                        'into_branch': converge_point.into_branch,
+                    }
+                    for converge_point in converge_points
+                ],
+            }
+        )
+
+    return {
+        'feature_count': len(features),
+        'features': features,
+    }
+
+
+def write_feature_converge_points(
+        *,
+        inventories: dict[str, FeatureMarkerInventory],
+        output_path: Path,
+) -> dict[str, Any]:
+    output = feature_converge_points_to_dict(inventories)
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        yaml.dump(
+            output,
+            sort_keys=False,
+            allow_unicode=True,
+            width=float('inf'),
+        ),
+        encoding='utf-8',
+    )
+
+    return output
+
+
 def write_feature_branch_points(
         *,
         inventories: dict[str, FeatureMarkerInventory],
@@ -1996,48 +2048,6 @@ def write_feature_flow_cases(
     return output
 
 
-def feature_flow_paths_to_dict(
-        flows: list[FeatureFlowPath],
-        discarded_flows: list[DiscardedFeatureFlowPath],
-) -> dict[str, Any]:
-    return {
-        'flow_count': len(flows),
-        'discarded_flow_count': len(discarded_flows),
-        'flows': [
-            asdict(flow)
-            for flow in flows
-        ],
-        'discarded_flows': [
-            asdict(flow)
-            for flow in discarded_flows
-        ],
-    }
-
-
-def write_feature_flow_paths(
-        *,
-        cfg_path: Path,
-        inventories: dict[str, FeatureMarkerInventory],
-        output_path: Path,
-) -> dict[str, Any]:
-    cfg = load_cfg(cfg_path)
-    flows, discarded_flows = trace_feature_flow_path_probes(cfg, inventories)
-    output = feature_flow_paths_to_dict(flows, discarded_flows)
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        yaml.dump(
-            output,
-            sort_keys=False,
-            allow_unicode=True,
-            width=float('inf'),
-        ),
-        encoding='utf-8',
-    )
-
-    return output
-
-
 # =============================================================================
 # CLI
 # =============================================================================
@@ -2064,11 +2074,6 @@ def main() -> int:
         help='Optional stage1 EI CFG pickle for feature flow path probing.',
     )
     parser.add_argument(
-        '--flow-output',
-        type=Path,
-        help='Optional feature flow path probe YAML output path.',
-    )
-    parser.add_argument(
         '--branch-points-output',
         type=Path,
         help='Optional feature branch point topology YAML output path.',
@@ -2082,6 +2087,11 @@ def main() -> int:
         '--case-output',
         type=Path,
         help='Optional segment-assembled feature flow case YAML output path.',
+    )
+    parser.add_argument(
+        '--converge-points-output',
+        type=Path,
+        help='Optional feature converge point topology YAML output path.',
     )
 
     args = parser.parse_args()
@@ -2125,8 +2135,29 @@ def main() -> int:
         print(f'Feature branch points written to {args.branch_points_output}')
         print(f'Branch points: {branch_point_count}')
 
+    if args.converge_points_output:
+        converge_points_output = write_feature_converge_points(
+            inventories=inventories,
+            output_path=args.converge_points_output,
+        )
+
+        converge_point_count = sum(
+            feature['converge_point_count']
+            for feature in converge_points_output['features']
+        )
+
+        print(f'Feature converge points written to {args.converge_points_output}')
+        print(f'Converge points: {converge_point_count}')
+
     if args.summarize_flow_cases:
-        summarize_feature_flow_cases(inventories)
+        if args.cfg is None:
+            raise ValueError('--summarize-flow-cases requires --cfg')
+
+        cfg = load_cfg(args.cfg)
+        summarize_feature_flow_cases(
+            cfg,
+            inventories,
+        )
 
     if args.cfg and args.case_output:
         case_output = write_feature_flow_cases(
@@ -2137,17 +2168,6 @@ def main() -> int:
 
         print(f'Feature flow cases written to {args.case_output}')
         print(f'Feature flow cases: {case_output["case_count"]}')
-
-    if args.cfg and args.flow_output:
-        flow_output = write_feature_flow_paths(
-            cfg_path=args.cfg,
-            inventories=inventories,
-            output_path=args.flow_output,
-        )
-
-        print(f'Feature flow paths written to {args.flow_output}')
-        print(f'Feature flow paths: {flow_output["flow_count"]}')
-        print(f'Discarded feature flow paths: {flow_output["discarded_flow_count"]}')
 
     return 0
 
