@@ -80,6 +80,11 @@ class FeatureFlowOutcomeKind(StrEnum):
     UNKNOWN = 'unknown'
 
 
+class FeatureFlowUnresolvedReason(StrEnum):
+    NO_VALID_CONVERGE_PATH = 'no_valid_converge_path'
+    NO_VALID_END_PATH = 'no_valid_end_path'
+
+
 class FeaturePathSegmentDispositionReason(StrEnum):
     EXACT_GRAPH_PATH = 'exact_graph_path'
     REPAIRED_GRAPH_PATH = 'repaired_graph_path'
@@ -213,6 +218,24 @@ class FeatureFlowCase:
     status: FeatureFlowCaseStatus = FeatureFlowCaseStatus.ACTIVE
     end_kind: FeatureFlowEndKind | None = None
     outcome_kind: FeatureFlowOutcomeKind | None = None
+
+
+@dataclass(frozen=True)
+class UnresolvedFeatureFlowCase:
+    feature_name: str
+    case_branch_path: tuple[str, ...]
+    active_branch_path: tuple[str, ...]
+    current_eis: tuple[str, ...]
+    segments: tuple[FeaturePathSegment, ...]
+    reason: FeatureFlowUnresolvedReason
+    expected_converge_point: FeatureConvergePoint | None = None
+    expected_end_marker: FeatureMarkerRecord | None = None
+
+
+@dataclass(frozen=True)
+class FeatureFlowTraceResult:
+    completed_cases: list[FeatureFlowCase]
+    unresolved_cases: list[UnresolvedFeatureFlowCase]
 
 
 @dataclass(frozen=True)
@@ -1018,6 +1041,47 @@ def assemble_case_path(case: FeatureFlowCase) -> list[str]:
     return path
 
 
+def unresolved_case_for_converge_failure(
+        case: FeatureFlowCase,
+        *,
+        converge_point: FeatureConvergePoint,
+) -> UnresolvedFeatureFlowCase:
+    return UnresolvedFeatureFlowCase(
+        feature_name=case.feature_name,
+        case_branch_path=case.case_branch_path,
+        active_branch_path=case.active_branch_path,
+        current_eis=case.current_eis,
+        segments=case.segments,
+        reason=FeatureFlowUnresolvedReason.NO_VALID_CONVERGE_PATH,
+        expected_converge_point=converge_point,
+        expected_end_marker=None,
+    )
+
+
+def unresolved_case_for_end_failure(
+        case: FeatureFlowCase,
+        *,
+        end: FeatureMarkerRecord,
+) -> UnresolvedFeatureFlowCase:
+    return UnresolvedFeatureFlowCase(
+        feature_name=case.feature_name,
+        case_branch_path=case.case_branch_path,
+        active_branch_path=case.active_branch_path,
+        current_eis=case.current_eis,
+        segments=case.segments,
+        reason=FeatureFlowUnresolvedReason.NO_VALID_END_PATH,
+        expected_converge_point=None,
+        expected_end_marker=end,
+    )
+
+
+def feature_flow_case_id(case: FeatureFlowCase) -> str:
+    return (
+        f'{case.feature_name}'
+        f'{BRANCH_PATH_SEPARATOR}{branch_path_to_key(case.case_branch_path)}'
+    )
+
+
 # =============================================================================
 # Branch point discovery helpers
 # =============================================================================
@@ -1526,13 +1590,15 @@ def trace_feature_flow_cases_to_end(
         feature: FeatureMarkerInventory,
         start: FeatureMarkerRecord,
         end: FeatureMarkerRecord,
-) -> list[FeatureFlowCase]:
+) -> FeatureFlowTraceResult:
     cases = [
         initial_feature_flow_case(
             feature_name=feature.feature_name,
             start_eis=marker_exit_eis(start),
         )
     ]
+
+    unresolved_cases: list[UnresolvedFeatureFlowCase] = []
 
     branch_points = build_feature_branch_points(feature)
     converge_points = build_feature_converge_points(feature)
@@ -1544,7 +1610,21 @@ def trace_feature_flow_cases_to_end(
             end=end,
         )
 
-        return [completed_case] if completed_case is not None else []
+        if completed_case is None:
+            return FeatureFlowTraceResult(
+                completed_cases=[],
+                unresolved_cases=[
+                    unresolved_case_for_end_failure(
+                        cases[0],
+                        end=end,
+                    )
+                ],
+            )
+
+        return FeatureFlowTraceResult(
+            completed_cases=[completed_case],
+            unresolved_cases=[],
+        )
 
     for branch_point in branch_points:
         cases_after_converge: list[FeatureFlowCase] = []
@@ -1599,7 +1679,10 @@ def trace_feature_flow_cases_to_end(
         ]
 
         if not cases:
-            return []
+            return FeatureFlowTraceResult(
+                completed_cases=[],
+                unresolved_cases=unresolved_cases,
+            )
 
     completed_cases: list[FeatureFlowCase] = []
 
@@ -1621,6 +1704,13 @@ def trace_feature_flow_cases_to_end(
         )
 
         if applicable_converge_points and converge_result is None:
+            unresolved_cases.extend(
+                unresolved_case_for_converge_failure(
+                    case,
+                    converge_point=converge_point,
+                )
+                for converge_point in applicable_converge_points
+            )
             continue
 
         if converge_result is not None:
@@ -1638,17 +1728,29 @@ def trace_feature_flow_cases_to_end(
             end=end,
         )
 
-        if completed_case is not None:
-            completed_cases.append(completed_case)
+        if completed_case is None:
+            unresolved_cases.append(
+                unresolved_case_for_end_failure(
+                    case,
+                    end=end,
+                )
+            )
+            continue
 
-    return completed_cases
+        completed_cases.append(completed_case)
+
+    return FeatureFlowTraceResult(
+        completed_cases=completed_cases,
+        unresolved_cases=unresolved_cases,
+    )
 
 
 def trace_feature_flow_cases(
         cfg: nx.DiGraph,
         inventories: dict[str, FeatureMarkerInventory],
-) -> list[FeatureFlowCase]:
+) -> FeatureFlowTraceResult:
     completed_cases: list[FeatureFlowCase] = []
+    unresolved_cases: list[UnresolvedFeatureFlowCase] = []
 
     for feature in inventories.values():
         if not feature.starts:
@@ -1661,16 +1763,20 @@ def trace_feature_flow_cases(
         ]
 
         for end in ends:
-            completed_cases.extend(
-                trace_feature_flow_cases_to_end(
-                    cfg,
-                    feature=feature,
-                    start=start,
-                    end=end,
-                )
+            result = trace_feature_flow_cases_to_end(
+                cfg,
+                feature=feature,
+                start=start,
+                end=end,
             )
 
-    return completed_cases
+            completed_cases.extend(result.completed_cases)
+            unresolved_cases.extend(result.unresolved_cases)
+
+    return FeatureFlowTraceResult(
+        completed_cases=completed_cases,
+        unresolved_cases=unresolved_cases,
+    )
 
 
 # =============================================================================
@@ -1681,11 +1787,12 @@ def summarize_feature_flow_cases(
         cfg: nx.DiGraph,
         inventories: dict[str, FeatureMarkerInventory],
 ) -> None:
-    cases = trace_feature_flow_cases(
+    trace_result = trace_feature_flow_cases(
         cfg,
         inventories,
     )
 
+    cases = trace_result.completed_cases
     cases_by_feature: dict[str, list[FeatureFlowCase]] = {}
 
     for case in cases:
@@ -1701,6 +1808,18 @@ def summarize_feature_flow_cases(
             print(
                 f'  branch_path={case.case_branch_path} '
                 f'current_eis={case.current_eis}'
+            )
+
+    if trace_result.unresolved_cases:
+        print(f'Unresolved feature cases: {len(trace_result.unresolved_cases)}')
+
+        for unresolved_case in trace_result.unresolved_cases:
+            print(
+                f'  feature={unresolved_case.feature_name} '
+                f'branch_path={unresolved_case.case_branch_path} '
+                f'active_branch_path={unresolved_case.active_branch_path} '
+                f'reason={unresolved_case.reason.value} '
+                f'current_eis={unresolved_case.current_eis}'
             )
 
 
@@ -1833,10 +1952,32 @@ def collect_unique_segments(
     return segments
 
 
+def collect_segment_references(
+        cases: list[FeatureFlowCase],
+) -> dict[str, list[str]]:
+    references: dict[str, list[str]] = {}
+
+    for case in cases:
+        case_id = feature_flow_case_id(case)
+
+        for segment in case.segments:
+            segment_id = feature_path_segment_id(segment)
+            case_refs = references.setdefault(segment_id, [])
+
+            if case_id not in case_refs:
+                case_refs.append(case_id)
+
+    return references
+
+
 def feature_path_segment_to_dict(
         cfg: nx.DiGraph,
         segment: FeaturePathSegment,
+        *,
+        referenced_by: list[str] | None = None,
 ) -> dict[str, Any]:
+    references = referenced_by or []
+
     return {
         'feature_name': segment.feature_name,
         'segment_branch_path': branch_path_to_key(segment.segment_branch_path),
@@ -1846,6 +1987,8 @@ def feature_path_segment_to_dict(
         'disposition': segment.disposition.value,
         'disposition_reason': segment.disposition_reason.value,
         'path_length': len(segment.path),
+        'reference_count': len(references),
+        'referenced_by': references,
         'path': describe_path(cfg, segment.path),
     }
 
@@ -1872,6 +2015,56 @@ def feature_flow_case_to_dict(
             feature_path_segment_id(segment)
             for segment in case.segments
         ],
+    }
+
+
+def feature_converge_point_ref_to_dict(
+        converge_point: FeatureConvergePoint,
+) -> dict[str, Any]:
+    return {
+        'converge_point_id': converge_point.converge_point_id,
+        'marker_node_id': converge_point.marker_node_id,
+        'converge_ei_id': converge_point.converge_ei_id,
+        'source_branches': list(converge_point.source_branches),
+        'into_branch': converge_point.into_branch,
+    }
+
+
+def feature_end_marker_ref_to_dict(
+        end: FeatureMarkerRecord,
+) -> dict[str, Any]:
+    return {
+        'marker_name': end.marker_name,
+        'node_id': end.node_id,
+        'end_eis': marker_end_eis(end),
+    }
+
+
+def unresolved_feature_flow_case_to_dict(
+        case: UnresolvedFeatureFlowCase,
+) -> dict[str, Any]:
+    return {
+        'feature_name': case.feature_name,
+        'case_branch_path': branch_path_to_key(case.case_branch_path),
+        'active_branch_path': branch_path_to_key(case.active_branch_path),
+        'status': FeatureFlowCaseStatus.UNRESOLVED.value,
+        'reason': case.reason.value,
+        'current_eis': list(case.current_eis),
+        'segment_count': len(case.segments),
+        'segment_ids': [
+            feature_path_segment_id(segment)
+            for segment in case.segments
+        ],
+        'expected_converge_point': (
+            feature_converge_point_ref_to_dict(case.expected_converge_point)
+            if case.expected_converge_point is not None
+            else None
+        ),
+        'expected_end_marker': (
+            feature_end_marker_ref_to_dict(case.expected_end_marker)
+            if case.expected_end_marker is not None
+            else None
+        ),
     }
 
 
@@ -2006,20 +2199,32 @@ def write_feature_branch_points(
 
 def feature_flow_cases_to_dict(
         cfg: nx.DiGraph,
-        cases: list[FeatureFlowCase],
+        trace_result: FeatureFlowTraceResult,
 ) -> dict[str, Any]:
-    segments = collect_unique_segments(cases)
+    segments = collect_unique_segments(trace_result.completed_cases)
+    segment_references = collect_segment_references(
+        trace_result.completed_cases
+    )
 
     return {
-        'case_count': len(cases),
+        'case_count': len(trace_result.completed_cases),
+        'unresolved_case_count': len(trace_result.unresolved_cases),
         'segment_count': len(segments),
         'segments': {
-            segment_id: feature_path_segment_to_dict(cfg, segment)
+            segment_id: feature_path_segment_to_dict(
+                cfg,
+                segment,
+                referenced_by=segment_references.get(segment_id, []),
+            )
             for segment_id, segment in segments.items()
         },
         'cases': [
             feature_flow_case_to_dict(case)
-            for case in cases
+            for case in trace_result.completed_cases
+        ],
+        'unresolved_cases': [
+            unresolved_feature_flow_case_to_dict(case)
+            for case in trace_result.unresolved_cases
         ],
     }
 
@@ -2031,8 +2236,8 @@ def write_feature_flow_cases(
         output_path: Path,
 ) -> dict[str, Any]:
     cfg = load_cfg(cfg_path)
-    cases = trace_feature_flow_cases(cfg, inventories)
-    output = feature_flow_cases_to_dict(cfg, cases)
+    trace_result = trace_feature_flow_cases(cfg, inventories)
+    output = feature_flow_cases_to_dict(cfg, trace_result)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
