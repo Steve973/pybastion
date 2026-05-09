@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from typing_extensions import Self
@@ -1083,7 +1083,7 @@ class Branch:
 # Integration Points
 # =============================================================================
 
-class IntegrationType(str, Enum):
+class IntegrationType(StrEnum):
     """Type of integration point."""
     CALL = 'call'
     CONSTRUCT = 'construct'
@@ -1093,7 +1093,7 @@ class IntegrationType(str, Enum):
     OTHER = 'other'
 
 
-class IntegrationCategory(str, Enum):
+class IntegrationCategory(StrEnum):
     """Category of integration after classification."""
     INTERUNIT = 'interunit'
     STDLIB = 'stdlib'
@@ -1102,7 +1102,7 @@ class IntegrationCategory(str, Enum):
     UNKNOWN = 'unknown'
 
 
-class ResolutionKind(str, Enum):
+class ResolutionKind(StrEnum):
     EXACT = "exact"
     CONTRACT = "contract"
     NORMALIZED = "normalized"
@@ -1437,7 +1437,7 @@ class CallableEntry:
         return result
 
 
-class ExternalNodeType(Enum):
+class ExternalNodeType(StrEnum):
     """
     Type of external placeholder node (when category=EXTERNAL_NODE).
 
@@ -1446,10 +1446,10 @@ class ExternalNodeType(Enum):
     BOUNDARY: System boundary call (file I/O, network, database, etc.)
     UNKNOWN: Unresolved or unknown call type
     """
-    STDLIB = "stdlib"
-    EXTLIB = "extlib"
-    BOUNDARY = "boundary"
-    UNKNOWN = "unknown"
+    STDLIB = 'stdlib'
+    EXTLIB = 'extlib'
+    BOUNDARY = 'boundary'
+    UNKNOWN = 'unknown'
 
     @classmethod
     def from_integration_category(cls, category: str) -> Self:
@@ -1471,11 +1471,11 @@ class ExternalNodeType(Enum):
         return mapping.get(category, cls.UNKNOWN)
 
 
-class ExternalTargetType(Enum):
-    STDLIB = "EXTERNAL_STDLIB"
-    EXTLIB = "EXTERNAL_EXTLIB"
-    BOUNDARY = "EXTERNAL_BOUNDARY"
-    UNKNOWN = "EXTERNAL_UNKNOWN"
+class ExternalTargetType(StrEnum):
+    STDLIB = 'EXTERNAL_STDLIB'
+    EXTLIB = 'EXTERNAL_EXTLIB'
+    BOUNDARY = 'EXTERNAL_BOUNDARY'
+    UNKNOWN = 'EXTERNAL_UNKNOWN'
 
     @classmethod
     def from_category(cls, category: str) -> Self:
@@ -1490,23 +1490,23 @@ class ExternalTargetType(Enum):
         return mapping.get(category, cls.UNKNOWN)
 
 
-class CallNodeType(Enum):
+class CallNodeType(StrEnum):
     """
     Type of concrete call node (when category=CALL_NODE).
 
     LOCAL: Callable in the same module
     INTERUNIT: Callable in a different module within the same project
     """
-    LOCAL = "local"
-    INTERUNIT = "interunit"
+    LOCAL = 'local'
+    INTERUNIT = 'interunit'
 
 
-class NodeCategory(Enum):
+class NodeCategory(StrEnum):
     """
     High-level category of a CFG node.
 
     CALL_NODE: Concrete callable that can be traced into (local or interunit)
     EXTERNAL_NODE: Placeholder for external calls requiring fixtures/mocks
     """
-    CALL_NODE = "call_node"
-    EXTERNAL_NODE = "external_node"
+    CALL_NODE = 'call_node'
+    EXTERNAL_NODE = 'external_node'

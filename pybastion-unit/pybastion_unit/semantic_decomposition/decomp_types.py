@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import ast
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
+from pybastion_common.models import (
+    ConditionalTarget,
+    StatementOutcome,
+    DisruptiveOutcome
+)
 from typing_extensions import Self
-
-from pybastion_common.models import ConditionalTarget, StatementOutcome, DisruptiveOutcome
 
 
 @dataclass
@@ -56,7 +59,7 @@ class DecomposerResult:
         )
 
 
-class OwnerKind(str, Enum):
+class OwnerKind(StrEnum):
     IF = "if"
     MATCH = "match"
     LOOP = "loop"

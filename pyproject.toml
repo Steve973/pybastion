@@ -7,7 +7,7 @@ authors = [
 ]
 readme = "README.md"
 license = "MIT"
-requires-python = ">=3.10,<4.0"
+requires-python = ">=3.11,<4.0"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -17,7 +17,6 @@ classifiers = [
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -46,5 +45,5 @@ pybastion-unit = "pybastion_unit.cli:main"
 pybastion-integration = "pybastion_integration.cli:main"
 
 [build-system]
-requires = ["poetry-core>=2.2.1,<3.0.0"]
+requires = ["poetry-core>=2.4.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
