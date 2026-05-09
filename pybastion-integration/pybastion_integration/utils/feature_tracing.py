@@ -84,7 +84,26 @@ class FeatureFlowOutcomeKind(StrEnum):
     UNKNOWN = 'unknown'
 
 
-class FeaturePathSegmentReason(StrEnum):
+class FeaturePathSegmentDispositionReason(StrEnum):
+    EXACT_GRAPH_PATH = 'exact_graph_path'
+    REPAIRED_GRAPH_PATH = 'repaired_graph_path'
+    INTENTIONAL_SHARED_PATH = 'intentional_shared_path'
+    PENDING_BRANCH_UNIQUENESS_CHECK = 'pending_branch_uniqueness_check'
+    NO_GRAPH_PATH = 'no_graph_path'
+    INVALID_GRAPH_PATH = 'invalid_graph_path'
+    AMBIGUOUS_REPAIR_CANDIDATES = 'ambiguous_repair_candidates'
+    COLLAPSED_TO_UNRELATED_BRANCH = 'collapsed_to_unrelated_branch'
+
+
+class FeaturePathSegmentDisposition(StrEnum):
+    CANDIDATE = 'candidate'
+    REVIEW = 'review'
+    ACCEPTED = 'accepted'
+    REJECTED = 'rejected'
+    UNRESOLVED = 'unresolved'
+
+
+class FeaturePathSegmentRole(StrEnum):
     START_TO_END = 'start_to_end'
     START_TO_BRANCH = 'start_to_branch'
     BRANCH_TARGET = 'branch_target'
@@ -183,7 +202,9 @@ class FeaturePathSegment:
     start_ei: str
     end_ei: str
     path: list[str]
-    reason: FeaturePathSegmentReason
+    role: FeaturePathSegmentRole
+    disposition: FeaturePathSegmentDisposition
+    disposition_reason: FeaturePathSegmentDispositionReason
 
 
 @dataclass(frozen=True)
@@ -205,6 +226,7 @@ class FeatureBranchPoint:
     marker_node_id: str
     control_ei_id: str
     branch_markers: tuple[FeatureMarkerRecord, ...]
+
 
 # =============================================================================
 # Current exported flow path models
@@ -703,6 +725,186 @@ def shortest_path_between_any(
     return best
 
 
+class SegmentPathSearchMode(StrEnum):
+    FIRST = 'first'
+    SHORTEST = 'shortest'
+    ALL = 'all'
+    LIMITED = 'limited'
+
+
+def node_callable_name(
+        cfg: nx.DiGraph,
+        node_id: str,
+) -> str | None:
+    return cfg.nodes.get(node_id, {}).get('callable_name')
+
+
+def node_has_feature_marker(
+        cfg: nx.DiGraph,
+        node_id: str,
+) -> bool:
+    decorators = cfg.nodes.get(node_id, {}).get('decorators', []) or []
+
+    for decorator in decorators:
+        if not isinstance(decorator, dict):
+            continue
+
+        if decorator.get('name') in FEATURE_MARKER_NAMES:
+            return True
+
+    return False
+
+
+def marker_callables_for_path(
+        cfg: nx.DiGraph,
+        path: list[str],
+) -> set[str]:
+    result: set[str] = set()
+
+    for node_id in path:
+        if not node_has_feature_marker(cfg, node_id):
+            continue
+
+        callable_name = node_callable_name(cfg, node_id)
+        if callable_name is not None:
+            result.add(callable_name)
+
+    return result
+
+
+def is_navigation_valid_graph_path(
+        cfg: nx.DiGraph,
+        path: list[str],
+) -> bool:
+    if not path:
+        return False
+
+    if len(path) == 1:
+        return path[0] in cfg
+
+    if not all(
+            cfg.has_edge(source, target)
+            for source, target in zip(path, path[1:])
+    ):
+        return False
+
+    source_callable = node_callable_name(cfg, path[0])
+    target_callable = node_callable_name(cfg, path[-1])
+
+    if source_callable is None or target_callable is None:
+        return True
+
+    if source_callable != target_callable:
+        return True
+
+    marker_callables = marker_callables_for_path(cfg, path)
+    marker_callables.discard(source_callable)
+
+    return not marker_callables
+
+
+def find_valid_segment_paths(
+        cfg: nx.DiGraph,
+        *,
+        sources: list[str],
+        targets: list[str],
+        mode: SegmentPathSearchMode = SegmentPathSearchMode.SHORTEST,
+        max_paths: int | None = None,
+        cutoff: int | None = None,
+) -> list[list[str]]:
+    paths: list[list[str]] = []
+
+    for source in sources:
+        if source not in cfg:
+            continue
+
+        for target in targets:
+            if target not in cfg:
+                continue
+
+            if mode == SegmentPathSearchMode.SHORTEST:
+                path = shortest_path_or_none(
+                    cfg,
+                    source,
+                    target,
+                )
+
+                if path is not None and is_navigation_valid_graph_path(
+                        cfg,
+                        path,
+                ):
+                    paths.append(path)
+
+                continue
+
+            try:
+                candidate_paths = nx.all_simple_paths(
+                    cfg,
+                    source,
+                    target,
+                    cutoff=cutoff,
+                )
+            except nx.NetworkXNoPath:
+                continue
+            except nx.NodeNotFound:
+                continue
+
+            for path in candidate_paths:
+                if not is_navigation_valid_graph_path(cfg, path):
+                    continue
+
+                paths.append(path)
+
+                if mode == SegmentPathSearchMode.FIRST:
+                    return paths
+
+                if mode == SegmentPathSearchMode.LIMITED:
+                    if max_paths is not None and len(paths) >= max_paths:
+                        return paths
+
+    if mode == SegmentPathSearchMode.SHORTEST:
+        paths.sort(key=len)
+
+        if paths:
+            return [paths[0]]
+
+    return paths
+
+
+def has_valid_segment_path(
+        cfg: nx.DiGraph,
+        *,
+        source: str,
+        target: str,
+) -> bool:
+    return bool(
+        find_valid_segment_paths(
+            cfg,
+            sources=[source],
+            targets=[target],
+            mode=SegmentPathSearchMode.FIRST,
+            max_paths=1,
+        )
+    )
+
+
+def has_valid_segment_path_between_any(
+        cfg: nx.DiGraph,
+        *,
+        sources: list[str],
+        targets: list[str],
+) -> bool:
+    return bool(
+        find_valid_segment_paths(
+            cfg,
+            sources=sources,
+            targets=targets,
+            mode=SegmentPathSearchMode.FIRST,
+            max_paths=1,
+        )
+    )
+
+
 def trace_feature_path_segment(
         cfg: nx.DiGraph,
         *,
@@ -710,16 +912,21 @@ def trace_feature_path_segment(
         segment_branch_path: tuple[str, ...],
         start_eis: list[str],
         end_eis: list[str],
-        reason: FeaturePathSegmentReason,
+        role: FeaturePathSegmentRole,
+        disposition: FeaturePathSegmentDisposition,
+        disposition_reason: FeaturePathSegmentDispositionReason,
 ) -> FeaturePathSegment | None:
-    path = shortest_path_between_any(
+    paths = find_valid_segment_paths(
         cfg,
-        start_eis,
-        end_eis,
+        sources=start_eis,
+        targets=end_eis,
+        mode=SegmentPathSearchMode.SHORTEST,
     )
 
-    if path is None:
+    if not paths:
         return None
+
+    path = paths[0]
 
     return FeaturePathSegment(
         feature_name=feature_name,
@@ -727,7 +934,9 @@ def trace_feature_path_segment(
         start_ei=path[0],
         end_ei=path[-1],
         path=path,
-        reason=reason,
+        role=role,
+        disposition=disposition,
+        disposition_reason=disposition_reason,
     )
 
 
@@ -794,6 +1003,25 @@ def marker_end_eis(record: FeatureMarkerRecord) -> list[str]:
 # =============================================================================
 # Segment/case helpers
 # =============================================================================
+
+BRANCH_PATH_SEPARATOR = '::'
+
+
+def branch_path_to_key(branch_path: tuple[str, ...]) -> str:
+    return BRANCH_PATH_SEPARATOR.join(branch_path)
+
+
+def feature_path_segment_id(segment: FeaturePathSegment) -> str:
+    branch_path_key = branch_path_to_key(segment.segment_branch_path)
+
+    return (
+        f'{segment.feature_name}'
+        f'{BRANCH_PATH_SEPARATOR}{branch_path_key}'
+        f'{BRANCH_PATH_SEPARATOR}{segment.role.value}'
+        f'{BRANCH_PATH_SEPARATOR}{segment.start_ei}'
+        f'{BRANCH_PATH_SEPARATOR}{segment.end_ei}'
+    )
+
 
 def initial_feature_flow_case(
         *,
@@ -993,7 +1221,9 @@ def expand_case_at_branch_point_with_segments(
             segment_branch_path=case.active_branch_path,
             start_eis=list(case.current_eis),
             end_eis=selected_target_eis,
-            reason=FeaturePathSegmentReason.BRANCH_TARGET,
+            role=FeaturePathSegmentRole.BRANCH_TARGET,
+            disposition=FeaturePathSegmentDisposition.ACCEPTED,
+            disposition_reason=FeaturePathSegmentDispositionReason.EXACT_GRAPH_PATH,
         )
 
         if branch_target_segment is None:
@@ -1073,7 +1303,9 @@ def trace_case_to_branch_point(
         segment_branch_path=case.active_branch_path,
         start_eis=list(case.current_eis),
         end_eis=[branch_point.control_ei_id],
-        reason=FeaturePathSegmentReason.START_TO_BRANCH,
+        role=FeaturePathSegmentRole.START_TO_BRANCH,
+        disposition=FeaturePathSegmentDisposition.ACCEPTED,
+        disposition_reason=FeaturePathSegmentDispositionReason.EXACT_GRAPH_PATH,
     )
 
     if segment is None:
@@ -1094,11 +1326,14 @@ def trace_case_to_end(
 ) -> FeatureFlowCase | None:
     end_targets = marker_end_eis(end)
 
-    reason = (
-        FeaturePathSegmentReason.TO_CONDITIONAL_END
+    role = (
+        FeaturePathSegmentRole.TO_CONDITIONAL_END
         if end.marker_name == 'FeatureEndConditional'
-        else FeaturePathSegmentReason.TO_END
+        else FeaturePathSegmentRole.TO_END
     )
+
+    disposition = FeaturePathSegmentDisposition.ACCEPTED
+    disposition_reason = FeaturePathSegmentDispositionReason.EXACT_GRAPH_PATH
 
     end_kind = (
         FeatureFlowEndKind.FEATURE_END_CONDITIONAL
@@ -1118,7 +1353,9 @@ def trace_case_to_end(
         segment_branch_path=case.active_branch_path,
         start_eis=list(case.current_eis),
         end_eis=end_targets,
-        reason=reason,
+        role=role,
+        disposition=disposition,
+        disposition_reason=disposition_reason,
     )
 
     if segment is None:
@@ -1159,7 +1396,8 @@ def trace_feature_flow_cases_to_end(
         return [completed_case] if completed_case is not None else []
 
     for branch_point in branch_points:
-        cases_at_branch_point: list[FeatureFlowCase] = []
+        cases_reaching_branch_point: list[FeatureFlowCase] = []
+        cases_bypassing_branch_point: list[FeatureFlowCase] = []
 
         for case in cases:
             case_at_branch_point = trace_case_to_branch_point(
@@ -1168,14 +1406,22 @@ def trace_feature_flow_cases_to_end(
                 branch_point=branch_point,
             )
 
-            if case_at_branch_point is not None:
-                cases_at_branch_point.append(case_at_branch_point)
+            if case_at_branch_point is None:
+                cases_bypassing_branch_point.append(case)
+                continue
 
-        cases = expand_cases_at_branch_point_with_segments(
+            cases_reaching_branch_point.append(case_at_branch_point)
+
+        expanded_cases = expand_cases_at_branch_point_with_segments(
             cfg,
-            cases=cases_at_branch_point,
+            cases=cases_reaching_branch_point,
             branch_point=branch_point,
         )
+
+        cases = [
+            *cases_bypassing_branch_point,
+            *expanded_cases,
+        ]
 
         if not cases:
             return []
@@ -1562,16 +1808,57 @@ def describe_path_node(cfg: nx.DiGraph, node_id: str) -> dict[str, Any]:
     return result
 
 
-def feature_flow_case_to_dict(
+def describe_path(cfg: nx.DiGraph, path: list[str]) -> list[dict[str, Any]]:
+    return [
+        describe_path_node(cfg, node_id)
+        for node_id in path
+    ]
+
+
+def collect_unique_segments(
+        cases: list[FeatureFlowCase],
+) -> dict[str, FeaturePathSegment]:
+    segments: dict[str, FeaturePathSegment] = {}
+
+    for case in cases:
+        for segment in case.segments:
+            segment_id = feature_path_segment_id(segment)
+
+            existing = segments.get(segment_id)
+            if existing is not None:
+                continue
+
+            segments[segment_id] = segment
+
+    return segments
+
+
+def feature_path_segment_to_dict(
         cfg: nx.DiGraph,
+        segment: FeaturePathSegment,
+) -> dict[str, Any]:
+    return {
+        'feature_name': segment.feature_name,
+        'segment_branch_path': branch_path_to_key(segment.segment_branch_path),
+        'start_ei': segment.start_ei,
+        'end_ei': segment.end_ei,
+        'role': segment.role.value,
+        'disposition': segment.disposition.value,
+        'disposition_reason': segment.disposition_reason.value,
+        'path_length': len(segment.path),
+        'path': describe_path(cfg, segment.path),
+    }
+
+
+def feature_flow_case_to_dict(
         case: FeatureFlowCase,
 ) -> dict[str, Any]:
     assembled_path = assemble_case_path(case)
 
     return {
         'feature_name': case.feature_name,
-        'case_branch_path': list(case.case_branch_path),
-        'active_branch_path': list(case.active_branch_path),
+        'case_branch_path': branch_path_to_key(case.case_branch_path),
+        'active_branch_path': branch_path_to_key(case.active_branch_path),
         'status': case.status.value,
         'end_kind': case.end_kind.value if case.end_kind is not None else None,
         'outcome_kind': (
@@ -1581,26 +1868,11 @@ def feature_flow_case_to_dict(
         ),
         'segment_count': len(case.segments),
         'path_length': len(assembled_path),
-        'segments': [
-            {
-                'segment_branch_path': list(segment.segment_branch_path),
-                'start_ei': segment.start_ei,
-                'end_ei': segment.end_ei,
-                'reason': segment.reason.value,
-                'path_length': len(segment.path),
-                'path': describe_path(cfg, segment.path),
-            }
+        'segment_ids': [
+            feature_path_segment_id(segment)
             for segment in case.segments
         ],
-        'path': describe_path(cfg, assembled_path),
     }
-
-
-def describe_path(cfg: nx.DiGraph, path: list[str]) -> list[dict[str, Any]]:
-    return [
-        describe_path_node(cfg, node_id)
-        for node_id in path
-    ]
 
 
 # =============================================================================
@@ -1684,10 +1956,17 @@ def feature_flow_cases_to_dict(
         cfg: nx.DiGraph,
         cases: list[FeatureFlowCase],
 ) -> dict[str, Any]:
+    segments = collect_unique_segments(cases)
+
     return {
         'case_count': len(cases),
+        'segment_count': len(segments),
+        'segments': {
+            segment_id: feature_path_segment_to_dict(cfg, segment)
+            for segment_id, segment in segments.items()
+        },
         'cases': [
-            feature_flow_case_to_dict(cfg, case)
+            feature_flow_case_to_dict(case)
             for case in cases
         ],
     }
