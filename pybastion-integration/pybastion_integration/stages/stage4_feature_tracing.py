@@ -1970,6 +1970,46 @@ def collect_segment_references(
     return references
 
 
+def segment_reuse_summary(
+        segment_references: dict[str, list[str]],
+) -> dict[str, int]:
+    reference_counts = [
+        len(references)
+        for references in segment_references.values()
+    ]
+
+    shared_segment_count = sum(
+        1
+        for count in reference_counts
+        if count > 1
+    )
+
+    total_segment_references = sum(reference_counts)
+
+    return {
+        'shared_segments': shared_segment_count,
+        'total_segment_references': total_segment_references,
+        'max_segment_reference_count': max(reference_counts, default=0),
+    }
+
+
+def segment_role_summary(
+        segments: dict[str, FeaturePathSegment],
+) -> dict[str, int]:
+    summary: dict[str, int] = {}
+
+    for segment in segments.values():
+        role = segment.role.value
+        summary[role] = summary.get(role, 0) + 1
+
+    return dict(
+        sorted(
+            summary.items(),
+            key=lambda item: item[0],
+        )
+    )
+
+
 def feature_path_segment_to_dict(
         cfg: nx.DiGraph,
         segment: FeaturePathSegment,
@@ -1999,6 +2039,7 @@ def feature_flow_case_to_dict(
     assembled_path = assemble_case_path(case)
 
     return {
+        'case_id': feature_flow_case_id(case),
         'feature_name': case.feature_name,
         'case_branch_path': branch_path_to_key(case.case_branch_path),
         'active_branch_path': branch_path_to_key(case.active_branch_path),
@@ -2205,8 +2246,17 @@ def feature_flow_cases_to_dict(
     segment_references = collect_segment_references(
         trace_result.completed_cases
     )
+    reuse_summary = segment_reuse_summary(segment_references)
+    role_summary = segment_role_summary(segments)
 
     return {
+        'summary': {
+            'completed_cases': len(trace_result.completed_cases),
+            'unresolved_cases': len(trace_result.unresolved_cases),
+            'unique_segments': len(segments),
+            **reuse_summary,
+            'segments_by_role': role_summary,
+        },
         'case_count': len(trace_result.completed_cases),
         'unresolved_case_count': len(trace_result.unresolved_cases),
         'segment_count': len(segments),
