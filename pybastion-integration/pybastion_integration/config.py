@@ -227,14 +227,56 @@ def get_stage_output(stage: int) -> Path:
             )
         case 3:
             return get_spec_split_output_dir()
+        case 4:
+            return resolve_path(
+                _get_stage_value(
+                    "stage4_output",
+                    "stage4-feature-flow-cases.yaml",
+                ),
+                base=output_dir,
+            )
         case _:
             raise ValueError(f"Unsupported stage: {stage}")
 
 
 def get_stage_input(stage: int) -> Path:
-    if stage not in {2, 3}:
-        raise ValueError(f"Stage must be 2 or 3 (got {stage})")
+    if stage not in {2, 3, 4}:
+        raise ValueError(f"Stage must be 2, 3, or 4 (got {stage})")
+
+    if stage == 4:
+        return get_stage_output(1)
+
     return get_stage_output(stage - 1)
+
+
+def get_stage4_marker_inventory_output() -> Path:
+    return resolve_path(
+        _get_stage_value(
+            "stage4_marker_inventory_output",
+            "stage4-feature-marker-inventory.yaml",
+        ),
+        base=get_integration_output_dir(),
+    )
+
+
+def get_stage4_branch_points_output() -> Path:
+    return resolve_path(
+        _get_stage_value(
+            "stage4_branch_points_output",
+            "stage4-feature-branch-points.yaml",
+        ),
+        base=get_integration_output_dir(),
+    )
+
+
+def get_stage4_converge_points_output() -> Path:
+    return resolve_path(
+        _get_stage_value(
+            "stage4_converge_points_output",
+            "stage4-feature-converge-points.yaml",
+        ),
+        base=get_integration_output_dir(),
+    )
 
 
 # ============================================================================
@@ -360,6 +402,19 @@ def validate_config() -> list[str]:
             f"a YAML file: {stage1_output}"
         )
 
+    stage4_output = get_stage_output(4)
+    if stage4_output.suffix not in {".yaml", ".yml"}:
+        errors.append(
+            "stage4_output does not look like a YAML file: "
+            f"{stage4_output}"
+        )
+
+    if get_stage1_format() != "pickle":
+        errors.append(
+            "Stage 4 currently requires stages.stage1_format = 'pickle' "
+            "because feature flow tracing loads the EI CFG pickle."
+        )
+
     return errors
 
 
@@ -374,6 +429,10 @@ def print_config_summary() -> None:
     print(f"  Stage 1 format:       {get_stage1_format()}")
     print(f"  Stage 2 output:       {get_stage_output(2)}")
     print(f"  Stage 3 output dir:   {get_stage_output(3)}")
+    print(f"  Stage 4 output:       {get_stage_output(4)}")
+    print(f"  Stage 4 inventory:    {get_stage4_marker_inventory_output()}")
+    print(f"  Stage 4 branches:     {get_stage4_branch_points_output()}")
+    print(f"  Stage 4 converges:    {get_stage4_converge_points_output()}")
     print(f"  Graph checker:        {graph_checker_enabled()}")
     print(f"  Graph checker script: {get_graph_checker_script()}")
     print(f"  Graph check report:   {get_graph_checker_report()}")

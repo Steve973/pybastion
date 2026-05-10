@@ -2,12 +2,13 @@
 """
 Integration analysis pipeline driver.
 
-Runs the current three-stage pybastion integration analysis pipeline:
+Runs the current four-stage pybastion integration analysis pipeline:
 
   Stage 1: Build the EI-level call graph from inventory files
   Optional: Check the inventory graph produced by Stage 1
   Stage 2: Generate integration seam test specifications
   Stage 3: Split integration seam specs by source-unit -> target-unit pair
+  Stage 4: Trace feature-flow cases from feature markers and the EI CFG
 """
 
 from __future__ import annotations
@@ -22,12 +23,13 @@ from pybastion_integration import config
 
 TOOL_ROOT = Path(__file__).resolve().parent
 STAGES_DIR = TOOL_ROOT / "stages"
-ALL_STAGE_NUMS = [1, 2, 3]
+ALL_STAGE_NUMS = [1, 2, 3, 4]
 
 STAGE_NAMES = {
     1: "Build EI call graph",
     2: "Generate integration seam test specs",
     3: "Split integration seam test specs",
+    4: "Trace feature-flow cases",
 }
 
 
@@ -45,6 +47,20 @@ def apply_cli_overrides(args: argparse.Namespace) -> None:
     config.set_graph_checker_override("report", args.graph_checker_report)
     config.set_graph_checker_override("summary", args.checker_summary)
 
+    config.set_stage_override("stage4_output", args.stage4_output)
+    config.set_stage_override(
+        "stage4_marker_inventory_output",
+        args.stage4_marker_inventory_output,
+    )
+    config.set_stage_override(
+        "stage4_branch_points_output",
+        args.stage4_branch_points_output,
+    )
+    config.set_stage_override(
+        "stage4_converge_points_output",
+        args.stage4_converge_points_output,
+    )
+
 
 def build_paths() -> dict[str, Path]:
     return {
@@ -53,6 +69,16 @@ def build_paths() -> dict[str, Path]:
         "output_dir": config.get_integration_output_dir(),
         "stage1_output": config.get_stage_output(1),
         "stage2_output": config.get_stage_output(2),
+        "stage4_output": config.get_stage_output(4),
+        "stage4_marker_inventory_output": (
+            config.get_stage4_marker_inventory_output()
+        ),
+        "stage4_branch_points_output": (
+            config.get_stage4_branch_points_output()
+        ),
+        "stage4_converge_points_output": (
+            config.get_stage4_converge_points_output()
+        ),
         "spec_split_output_dir": config.get_spec_split_output_dir(),
         "graph_check_report": config.get_graph_checker_report(),
         "graph_checker_script": config.get_graph_checker_script(),
@@ -71,6 +97,7 @@ def build_stage_cmd(
         1: STAGES_DIR / "stage1_build_call_graph.py",
         2: STAGES_DIR / "stage2_generate_test_specs.py",
         3: STAGES_DIR / "stage3_split_specs.py",
+        4: STAGES_DIR / "stage4_trace_feature_flows.py",
     }
 
     cmd = [sys.executable, str(stage_scripts[stage_num])]
@@ -95,6 +122,17 @@ def build_stage_cmd(
                 "--target-root", str(target_root),
                 "--input", str(paths["stage2_output"]),
                 "--output-dir", str(paths["spec_split_output_dir"]),
+            ]
+        case 4:
+            cmd += [
+                "--inventory-root", str(paths["inventories_root"]),
+                "--output", str(paths["stage4_marker_inventory_output"]),
+                "--cfg", str(paths["stage1_output"]),
+                "--branch-points-output",
+                str(paths["stage4_branch_points_output"]),
+                "--converge-points-output",
+                str(paths["stage4_converge_points_output"]),
+                "--case-output", str(paths["stage4_output"]),
             ]
         case _:
             raise ValueError(f"Unsupported stage: {stage_num}")
@@ -213,6 +251,16 @@ def clean_outputs(
                     print(f"  Removing: {path}")
                 path.unlink()
 
+    if 4 in stages_to_run:
+        files_to_remove.extend(
+            [
+                paths["stage4_output"],
+                paths["stage4_marker_inventory_output"],
+                paths["stage4_branch_points_output"],
+                paths["stage4_converge_points_output"],
+            ]
+        )
+
     print("✓ Selected outputs cleaned")
 
 
@@ -236,6 +284,16 @@ def validate_prerequisites(
 
     if 3 in stages_to_run and 2 not in stages_to_run and not paths["stage2_output"].exists():
         errors.append(f"Stage 3 input not found: {paths['stage2_output']}")
+
+    if 4 in stages_to_run:
+        if config.get_stage1_format() != "pickle":
+            errors.append(
+                "Stage 4 currently requires --graph-format pickle / "
+                "stages.stage1_format = 'pickle'."
+            )
+
+        if 1 not in stages_to_run and not paths["stage1_output"].exists():
+            errors.append(f"Stage 4 CFG input not found: {paths['stage1_output']}")
 
     if check_graph and not paths["graph_checker_script"].exists():
         errors.append(f"Graph checker script not found: {paths['graph_checker_script']}")
@@ -311,6 +369,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--stage2-output",
         default=None,
         help="Override stages.stage2_output. Relative values resolve against integration_output_dir.",
+    )
+    parser.add_argument(
+        "--stage4-output",
+        default=None,
+        help=(
+            "Override stages.stage4_output. Relative values resolve against "
+            "integration_output_dir."
+        ),
+    )
+    parser.add_argument(
+        "--stage4-marker-inventory-output",
+        default=None,
+        help=(
+            "Override stages.stage4_marker_inventory_output. Relative values "
+            "resolve against integration_output_dir."
+        ),
+    )
+    parser.add_argument(
+        "--stage4-branch-points-output",
+        default=None,
+        help=(
+            "Override stages.stage4_branch_points_output. Relative values "
+            "resolve against integration_output_dir."
+        ),
+    )
+    parser.add_argument(
+        "--stage4-converge-points-output",
+        default=None,
+        help=(
+            "Override stages.stage4_converge_points_output. Relative values "
+            "resolve against integration_output_dir."
+        ),
     )
     parser.add_argument(
         "--start-from",
@@ -422,6 +512,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Inventories root: {paths['inventories_root']}")
         print(f"Integration output dir: {paths['output_dir']}")
         print(f"Split specs dir: {paths['spec_split_output_dir']}")
+        print(f"Feature flow cases: {paths['stage4_output']}")
+        print(f"Feature marker inventory: {paths['stage4_marker_inventory_output']}")
+        print(f"Feature branch points: {paths['stage4_branch_points_output']}")
+        print(f"Feature converge points: {paths['stage4_converge_points_output']}")
         print(f"Running stages: {stages_to_run}")
         print(f"Graph format: {graph_format}")
         print(f"Graph checker enabled: {check_graph}")
@@ -479,6 +573,7 @@ def main(argv: list[str] | None = None) -> int:
             1: paths["stage1_output"],
             2: paths["stage2_output"],
             3: str(paths["spec_split_output_dir"] / "*.yaml"),
+            4: paths["stage4_output"],
         }[final_stage]
         print(f"\nFinal output: {final_output}")
 

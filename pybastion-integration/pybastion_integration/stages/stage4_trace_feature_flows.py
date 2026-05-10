@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import pickle
+from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -218,6 +219,7 @@ class FeatureFlowCase:
     status: FeatureFlowCaseStatus = FeatureFlowCaseStatus.ACTIVE
     end_kind: FeatureFlowEndKind | None = None
     outcome_kind: FeatureFlowOutcomeKind | None = None
+    end_marker_node_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -806,12 +808,16 @@ def find_valid_segment_paths(
         max_paths: int | None = None,
         cutoff: int | None = None,
         forbidden_nodes: set[str] | None = None,
+        max_shortest_candidates: int = 25,
 ) -> list[list[str]]:
     paths: list[list[str]] = []
     forbidden_nodes = forbidden_nodes or set()
     target_set = set(targets)
 
     def is_allowed_path(path: list[str]) -> bool:
+        if cutoff is not None and len(path) > cutoff:
+            return False
+
         blocked_nodes = forbidden_nodes - target_set
         interior_nodes = set(path[1:-1])
 
@@ -819,6 +825,28 @@ def find_valid_segment_paths(
             return False
 
         return is_navigation_valid_graph_path(cfg, path)
+
+    def iter_shortest_candidate_paths(
+            source: str,
+            target: str,
+    ) -> Iterable[list[str]]:
+        try:
+            candidate_paths = nx.shortest_simple_paths(
+                cfg,
+                source,
+                target,
+            )
+
+            for index, candidate_path in enumerate(candidate_paths):
+                if index >= max_shortest_candidates:
+                    break
+
+                yield candidate_path
+
+        except nx.NetworkXNoPath:
+            return
+        except nx.NodeNotFound:
+            return
 
     for source in sources:
         if source not in cfg:
@@ -829,28 +857,10 @@ def find_valid_segment_paths(
                 continue
 
             if mode == SegmentPathSearchMode.SHORTEST:
-                # Shortest path may be invalid because it crosses forbidden
-                # sibling branch nodes. In that case, fall through to bounded
-                # simple-path search so a slightly longer valid path can still
-                # be selected.
-                path = shortest_path_or_none(
-                    cfg,
-                    source,
-                    target,
-                )
-
-                if path is not None and is_allowed_path(path):
-                    paths.append(path)
-                    continue
-
-                candidate_paths = nx.all_simple_paths(
-                    cfg,
-                    source,
-                    target,
-                    cutoff=cutoff or 250,
-                )
-
-                for candidate_path in candidate_paths:
+                for candidate_path in iter_shortest_candidate_paths(
+                        source,
+                        target,
+                ):
                     if not is_allowed_path(candidate_path):
                         continue
 
@@ -1009,6 +1019,7 @@ def append_segment_to_case(
         status=case.status,
         end_kind=case.end_kind,
         outcome_kind=case.outcome_kind,
+        end_marker_node_id=case.end_marker_node_id,
     )
 
 
@@ -1019,6 +1030,7 @@ def complete_feature_flow_case(
         outcome_kind: FeatureFlowOutcomeKind,
         current_eis: list[str],
         segment: FeaturePathSegment,
+        end_marker_node_id: str,
 ) -> FeatureFlowCase:
     return FeatureFlowCase(
         feature_name=case.feature_name,
@@ -1029,6 +1041,7 @@ def complete_feature_flow_case(
         status=FeatureFlowCaseStatus.COMPLETED,
         end_kind=end_kind,
         outcome_kind=outcome_kind,
+        end_marker_node_id=end_marker_node_id,
     )
 
 
@@ -1076,9 +1089,47 @@ def unresolved_case_for_end_failure(
 
 
 def feature_flow_case_id(case: FeatureFlowCase) -> str:
+    branch_path_key = branch_path_to_key(case.case_branch_path)
+
+    if case.end_marker_node_id is None:
+        return (
+            f'{case.feature_name}'
+            f'{BRANCH_PATH_SEPARATOR}{branch_path_key}'
+        )
+
     return (
         f'{case.feature_name}'
-        f'{BRANCH_PATH_SEPARATOR}{branch_path_to_key(case.case_branch_path)}'
+        f'{BRANCH_PATH_SEPARATOR}{branch_path_key}'
+        f'{BRANCH_PATH_SEPARATOR}end'
+        f'{BRANCH_PATH_SEPARATOR}{case.end_marker_node_id}'
+    )
+
+
+def unresolved_feature_flow_case_id(
+        case: UnresolvedFeatureFlowCase,
+) -> str:
+    branch_path_key = branch_path_to_key(case.case_branch_path)
+
+    if case.expected_converge_point is not None:
+        return (
+            f'{case.feature_name}'
+            f'{BRANCH_PATH_SEPARATOR}{branch_path_key}'
+            f'{BRANCH_PATH_SEPARATOR}converge'
+            f'{BRANCH_PATH_SEPARATOR}{case.expected_converge_point.marker_node_id}'
+        )
+
+    if case.expected_end_marker is not None:
+        return (
+            f'{case.feature_name}'
+            f'{BRANCH_PATH_SEPARATOR}{branch_path_key}'
+            f'{BRANCH_PATH_SEPARATOR}end'
+            f'{BRANCH_PATH_SEPARATOR}{case.expected_end_marker.node_id}'
+        )
+
+    return (
+        f'{case.feature_name}'
+        f'{BRANCH_PATH_SEPARATOR}{branch_path_key}'
+        f'{BRANCH_PATH_SEPARATOR}unresolved'
     )
 
 
@@ -1581,6 +1632,7 @@ def trace_case_to_end(
         outcome_kind=outcome_kind,
         current_eis=[segment.end_ei],
         segment=segment,
+        end_marker_node_id=end.node_id,
     )
 
 
@@ -1748,6 +1800,8 @@ def trace_feature_flow_cases_to_end(
 def trace_feature_flow_cases(
         cfg: nx.DiGraph,
         inventories: dict[str, FeatureMarkerInventory],
+        *,
+        verbose: bool = False,
 ) -> FeatureFlowTraceResult:
     completed_cases: list[FeatureFlowCase] = []
     unresolved_cases: list[UnresolvedFeatureFlowCase] = []
@@ -1761,6 +1815,20 @@ def trace_feature_flow_cases(
             *feature.ends,
             *feature.conditional_ends,
         ]
+
+        if verbose:
+            branch_points = build_feature_branch_points(feature)
+            converge_points = build_feature_converge_points(feature)
+
+            print(
+                f'Tracing feature {feature.feature_name}: '
+                f'starts={len(feature.starts)} '
+                f'branches={len(feature.branches)} '
+                f'branch_points={len(branch_points)} '
+                f'converges={len(feature.converges)} '
+                f'converge_points={len(converge_points)} '
+                f'ends={len(ends)}'
+            )
 
         for end in ends:
             result = trace_feature_flow_cases_to_end(
@@ -2050,6 +2118,7 @@ def feature_flow_case_to_dict(
             if case.outcome_kind is not None
             else None
         ),
+        'end_marker_node_id': case.end_marker_node_id,
         'segment_count': len(case.segments),
         'path_length': len(assembled_path),
         'segment_ids': [
@@ -2085,6 +2154,7 @@ def unresolved_feature_flow_case_to_dict(
         case: UnresolvedFeatureFlowCase,
 ) -> dict[str, Any]:
     return {
+        'case_id': unresolved_feature_flow_case_id(case),
         'feature_name': case.feature_name,
         'case_branch_path': branch_path_to_key(case.case_branch_path),
         'active_branch_path': branch_path_to_key(case.active_branch_path),
@@ -2284,9 +2354,14 @@ def write_feature_flow_cases(
         cfg_path: Path,
         inventories: dict[str, FeatureMarkerInventory],
         output_path: Path,
+        verbose: bool = False,
 ) -> dict[str, Any]:
     cfg = load_cfg(cfg_path)
-    trace_result = trace_feature_flow_cases(cfg, inventories)
+    trace_result = trace_feature_flow_cases(
+        cfg,
+        inventories,
+        verbose=verbose,
+    )
     output = feature_flow_cases_to_dict(cfg, trace_result)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -2347,6 +2422,12 @@ def main() -> int:
         '--converge-points-output',
         type=Path,
         help='Optional feature converge point topology YAML output path.',
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Verbose output.",
     )
 
     args = parser.parse_args()
@@ -2419,6 +2500,7 @@ def main() -> int:
             cfg_path=args.cfg,
             inventories=inventories,
             output_path=args.case_output,
+            verbose=args.verbose,
         )
 
         print(f'Feature flow cases written to {args.case_output}')
