@@ -116,38 +116,6 @@ def _is_extlib_target(target: str) -> bool:
     return root_name in COMMON_EXTLIB_MODULES
 
 
-def _is_internal_self_target(
-        target: str,
-        callable_fqn: str,
-        callable_inventory: dict[str, str],
-) -> bool:
-    if not target.startswith("self."):
-        return False
-
-    parts = target.split(".")
-    if len(parts) < 2:
-        return False
-
-    owner_class_fqn = callable_fqn.rsplit(".", 1)[0] if "." in callable_fqn else None
-    if not owner_class_fqn:
-        return False
-
-    first_attr = parts[1]
-
-    if len(parts) == 2 and first_attr.startswith("_"):
-        return True
-
-    if len(parts) == 2:
-        candidate = f"{owner_class_fqn}.{first_attr}"
-        if candidate in callable_inventory:
-            return True
-
-    if len(parts) >= 3:
-        return False
-
-    return False
-
-
 def _is_collapsible_operation_target(
         resolved_target: str | None,
         collapsible_operation_fqns: set[str],

@@ -315,6 +315,16 @@ def operation_target_for_branch(branch: dict[str, Any]) -> str | None:
     return constraint.get("operation_target")
 
 
+def resolved_target_for_branch(branch: dict[str, Any]) -> str | None:
+    constraint = branch.get("constraint") or {}
+    resolved_target = constraint.get("resolved_target")
+
+    if resolved_target:
+        return str(resolved_target)
+
+    return None
+
+
 def compute_success_exit_eis(context: CallableContext) -> list[str]:
     exits: list[str] = []
     for branch in context.branches:
@@ -513,15 +523,16 @@ def add_call_and_return_edges(
         ei_id = branch["id"]
         integration_candidates = context.integration_by_ei.get(ei_id, [])
         operation_target = operation_target_for_branch(branch)
+        resolved_target = resolved_target_for_branch(branch)
 
-        if not integration_candidates and not operation_target:
+        if not integration_candidates and not operation_target and not resolved_target:
             continue
 
         return_targets = inventory_successor_targets(branch)
 
         if not integration_candidates:
             resolved_callable_id, resolved_target_repr = resolve_project_callable_target(
-                target=None,
+                target=resolved_target,
                 operation_target=operation_target,
                 context=context,
                 fqn_to_callable_id=inventory_index.fqn_to_callable_id,

@@ -768,35 +768,36 @@ def marker_callables_for_path(
     return result
 
 
+def graph_path_rejection_reason(
+        cfg: nx.DiGraph,
+        path: list[str],
+) -> str | None:
+    if not path:
+        return 'empty_path'
+
+    if len(path) == 1:
+        if path[0] not in cfg:
+            return 'single_node_missing_from_graph'
+
+        return None
+
+    missing_edges = [
+        (source, target)
+        for source, target in zip(path, path[1:])
+        if not cfg.has_edge(source, target)
+    ]
+
+    if missing_edges:
+        return f'missing_edges={missing_edges}'
+
+    return None
+
+
 def is_navigation_valid_graph_path(
         cfg: nx.DiGraph,
         path: list[str],
 ) -> bool:
-    if not path:
-        return False
-
-    if len(path) == 1:
-        return path[0] in cfg
-
-    if not all(
-            cfg.has_edge(source, target)
-            for source, target in zip(path, path[1:])
-    ):
-        return False
-
-    source_callable = node_callable_name(cfg, path[0])
-    target_callable = node_callable_name(cfg, path[-1])
-
-    if source_callable is None or target_callable is None:
-        return True
-
-    if source_callable != target_callable:
-        return True
-
-    marker_callables = marker_callables_for_path(cfg, path)
-    marker_callables.discard(source_callable)
-
-    return not marker_callables
+    return graph_path_rejection_reason(cfg, path) is None
 
 
 def find_valid_segment_paths(
@@ -1540,6 +1541,109 @@ def expand_cases_at_branch_point_with_segments(
 # Segment-based feature flow tracing
 # =============================================================================
 
+def debug_print_end_path_failure(
+        cfg: nx.DiGraph,
+        *,
+        case: FeatureFlowCase,
+        end: FeatureMarkerRecord,
+        max_candidates: int = 10,
+) -> None:
+    end_targets = marker_end_eis(end)
+
+    print()
+    print('=== DEBUG END PATH FAILURE ===')
+    print(f'feature={case.feature_name}')
+    print(f'case_branch_path={case.case_branch_path}')
+    print(f'active_branch_path={case.active_branch_path}')
+    print(f'current_eis={case.current_eis}')
+    print(f'end_marker_node_id={end.node_id}')
+    print(f'end_marker_name={end.marker_name}')
+    print(f'end_targets={end_targets}')
+
+    print()
+    print('source nodes:')
+    for source in case.current_eis:
+        node_data = cfg.nodes.get(source, {})
+        print(
+            f'  {source} | '
+            f'callable={node_data.get("callable_name")} | '
+            f'description={node_data.get("description") or node_data.get("condition") or node_data.get("stmt_type")}'
+        )
+
+    print()
+    print('target nodes:')
+    for target in end_targets:
+        node_data = cfg.nodes.get(target, {})
+        print(
+            f'  {target} | '
+            f'callable={node_data.get("callable_name")} | '
+            f'description={node_data.get("description") or node_data.get("condition") or node_data.get("stmt_type")}'
+        )
+
+    print()
+    print('candidate paths:')
+
+    printed = 0
+
+    for source in case.current_eis:
+        for target in end_targets:
+            if source not in cfg:
+                print(f'  source missing from graph: {source}')
+                continue
+
+            if target not in cfg:
+                print(f'  target missing from graph: {target}')
+                continue
+
+            try:
+                candidate_paths = nx.shortest_simple_paths(
+                    cfg,
+                    source,
+                    target,
+                )
+
+                for candidate_path in candidate_paths:
+                    printed += 1
+
+                    rejection_reason = graph_path_rejection_reason(
+                        cfg,
+                        candidate_path,
+                    )
+
+                    print()
+                    print(
+                        f'  path {printed}: '
+                        f'source={source} target={target} '
+                        f'length={len(candidate_path)} '
+                        f'valid={rejection_reason is None} '
+                        f'reason={rejection_reason}'
+                    )
+
+                    for node_id in candidate_path:
+                        node_data = cfg.nodes.get(node_id, {})
+                        print(
+                            f'    {node_id} | '
+                            f'callable={node_data.get("callable_name")} | '
+                            f'description={node_data.get("description") or node_data.get("condition") or node_data.get("stmt_type")}'
+                        )
+
+                    if printed >= max_candidates:
+                        print('=== END DEBUG END PATH FAILURE ===')
+                        print()
+                        return
+
+            except nx.NetworkXNoPath:
+                print(f'  no path: {source} -> {target}')
+            except nx.NodeNotFound as exc:
+                print(f'  node not found: {exc}')
+
+    if printed == 0:
+        print('  <no candidate paths found>')
+
+    print('=== END DEBUG END PATH FAILURE ===')
+    print()
+
+
 def trace_case_to_branch_point(
         cfg: nx.DiGraph,
         *,
@@ -1628,12 +1732,36 @@ def trace_case_to_end(
 
     return complete_feature_flow_case(
         case,
+        end_marker_node_id=end.node_id,
         end_kind=end_kind,
         outcome_kind=outcome_kind,
         current_eis=[segment.end_ei],
         segment=segment,
-        end_marker_node_id=end.node_id,
     )
+
+
+def trace_case_to_end_before_branch_point(
+        cfg: nx.DiGraph,
+        *,
+        case: FeatureFlowCase,
+        end: FeatureMarkerRecord,
+        branch_point: FeatureBranchPoint,
+) -> FeatureFlowCase | None:
+    forbidden_nodes = {
+        branch_point.control_ei_id,
+        branch_point.marker_node_id,
+    }
+
+    return trace_case_to_end(
+        cfg,
+        case=case,
+        end=end,
+        forbidden_nodes=forbidden_nodes,
+    )
+
+
+def marker_start_eis(record: FeatureMarkerRecord) -> list[str]:
+    return [record.node_id]
 
 
 def trace_feature_flow_cases_to_end(
@@ -1642,18 +1770,20 @@ def trace_feature_flow_cases_to_end(
         feature: FeatureMarkerInventory,
         start: FeatureMarkerRecord,
         end: FeatureMarkerRecord,
+        verbose: bool = False,
 ) -> FeatureFlowTraceResult:
     cases = [
         initial_feature_flow_case(
             feature_name=feature.feature_name,
-            start_eis=marker_exit_eis(start),
+            start_eis=marker_start_eis(start),
         )
     ]
 
-    unresolved_cases: list[UnresolvedFeatureFlowCase] = []
-
     branch_points = build_feature_branch_points(feature)
     converge_points = build_feature_converge_points(feature)
+
+    completed_cases: list[FeatureFlowCase] = []
+    unresolved_cases: list[UnresolvedFeatureFlowCase] = []
 
     if not branch_points:
         completed_case = trace_case_to_end(
@@ -1662,20 +1792,27 @@ def trace_feature_flow_cases_to_end(
             end=end,
         )
 
-        if completed_case is None:
+        if completed_case is not None:
             return FeatureFlowTraceResult(
-                completed_cases=[],
-                unresolved_cases=[
-                    unresolved_case_for_end_failure(
-                        cases[0],
-                        end=end,
-                    )
-                ],
+                completed_cases=[completed_case],
+                unresolved_cases=[],
+            )
+
+        if verbose:
+            debug_print_end_path_failure(
+                cfg,
+                case=cases[0],
+                end=end,
             )
 
         return FeatureFlowTraceResult(
-            completed_cases=[completed_case],
-            unresolved_cases=[],
+            completed_cases=[],
+            unresolved_cases=[
+                unresolved_case_for_end_failure(
+                    cases[0],
+                    end=end,
+                )
+            ],
         )
 
     for branch_point in branch_points:
@@ -1703,10 +1840,31 @@ def trace_feature_flow_cases_to_end(
 
             cases_after_converge.append(converged_case)
 
-        cases_reaching_branch_point: list[FeatureFlowCase] = []
-        cases_bypassing_branch_point: list[FeatureFlowCase] = []
+        cases_still_active: list[FeatureFlowCase] = []
 
         for case in cases_after_converge:
+            completed_case = trace_case_to_end_before_branch_point(
+                cfg,
+                case=case,
+                end=end,
+                branch_point=branch_point,
+            )
+
+            if completed_case is not None:
+                completed_cases.append(completed_case)
+                continue
+
+            cases_still_active.append(case)
+
+        if not cases_still_active:
+            return FeatureFlowTraceResult(
+                completed_cases=completed_cases,
+                unresolved_cases=[],
+            )
+
+        cases_reaching_branch_point: list[FeatureFlowCase] = []
+
+        for case in cases_still_active:
             case_at_branch_point = trace_case_to_branch_point(
                 cfg,
                 case=case,
@@ -1714,7 +1872,30 @@ def trace_feature_flow_cases_to_end(
             )
 
             if case_at_branch_point is None:
-                cases_bypassing_branch_point.append(case)
+                completed_case = trace_case_to_end(
+                    cfg,
+                    case=case,
+                    end=end,
+                )
+
+                if completed_case is not None:
+                    completed_cases.append(completed_case)
+                    continue
+
+                unresolved_cases.append(
+                    unresolved_case_for_end_failure(
+                        case,
+                        end=end,
+                    )
+                )
+
+                if verbose:
+                    debug_print_end_path_failure(
+                        cfg,
+                        case=case,
+                        end=end,
+                    )
+
                 continue
 
             cases_reaching_branch_point.append(case_at_branch_point)
@@ -1725,71 +1906,135 @@ def trace_feature_flow_cases_to_end(
             branch_point=branch_point,
         )
 
-        cases = [
-            *cases_bypassing_branch_point,
-            *expanded_cases,
-        ]
+        cases = expanded_cases
 
         if not cases:
             return FeatureFlowTraceResult(
-                completed_cases=[],
-                unresolved_cases=unresolved_cases,
+                completed_cases=completed_cases,
+                unresolved_cases=[],
             )
 
-    completed_cases: list[FeatureFlowCase] = []
+    for branch_point_index, branch_point in enumerate(branch_points):
+        cases_after_converge: list[FeatureFlowCase] = []
 
-    for case in cases:
-        applicable_converge_points = [
-            converge_point
-            for converge_point in converge_points
-            if converge_applies_to_case(
-                converge_point,
-                case,
+        for case in cases:
+            converge_result = trace_nearest_converge_point_for_case(
+                cfg,
+                case=case,
+                converge_points=converge_points,
+                branch_points=branch_points,
             )
-        ]
 
-        converge_result = trace_nearest_converge_point_for_case(
-            cfg,
-            case=case,
-            converge_points=applicable_converge_points,
-            branch_points=branch_points,
-        )
+            if converge_result is None:
+                cases_after_converge.append(case)
+                continue
 
-        if applicable_converge_points and converge_result is None:
-            unresolved_cases.extend(
-                unresolved_case_for_converge_failure(
-                    case,
-                    converge_point=converge_point,
-                )
-                for converge_point in applicable_converge_points
-            )
-            continue
-
-        if converge_result is not None:
             converge_point, converge_segment = converge_result
 
-            case = trace_case_to_converge_point(
+            converged_case = trace_case_to_converge_point(
                 case=case,
                 converge_point=converge_point,
                 segment=converge_segment,
             )
 
-        completed_case = trace_case_to_end(
-            cfg,
-            case=case,
-            end=end,
-        )
+            cases_after_converge.append(converged_case)
 
-        if completed_case is None:
-            unresolved_cases.append(
-                unresolved_case_for_end_failure(
-                    case,
+        cases_still_active: list[FeatureFlowCase] = []
+
+        for case in cases_after_converge:
+            completed_case = trace_case_to_end_before_branch_point(
+                cfg,
+                case=case,
+                end=end,
+                branch_point=branch_point,
+            )
+
+            if completed_case is not None:
+                completed_cases.append(completed_case)
+                continue
+
+            cases_still_active.append(case)
+
+        if not cases_still_active:
+            return FeatureFlowTraceResult(
+                completed_cases=completed_cases,
+                unresolved_cases=unresolved_cases,
+            )
+
+        cases_reaching_branch_point: list[FeatureFlowCase] = []
+
+        for case in cases_still_active:
+            case_at_branch_point = trace_case_to_branch_point(
+                cfg,
+                case=case,
+                branch_point=branch_point,
+            )
+
+            if case_at_branch_point is None:
+                completed_case = trace_case_to_end(
+                    cfg,
+                    case=case,
                     end=end,
                 )
-            )
-            continue
 
-        completed_cases.append(completed_case)
+                if completed_case is not None:
+                    completed_cases.append(completed_case)
+                    continue
+
+                unresolved_cases.append(
+                    unresolved_case_for_end_failure(
+                        case,
+                        end=end,
+                    )
+                )
+
+                if verbose:
+                    debug_print_end_path_failure(
+                        cfg,
+                        case=case,
+                        end=end,
+                    )
+
+                continue
+
+            cases_reaching_branch_point.append(case_at_branch_point)
+
+        expanded_cases = expand_cases_at_branch_point_with_segments(
+            cfg,
+            cases=cases_reaching_branch_point,
+            branch_point=branch_point,
+        )
+
+        next_branch_point = (
+            branch_points[branch_point_index + 1]
+            if branch_point_index + 1 < len(branch_points)
+            else None
+        )
+
+        if next_branch_point is None:
+            cases = expanded_cases
+        else:
+            cases = []
+
+            for case in expanded_cases:
+                completed_case = trace_case_to_end_before_branch_point(
+                    cfg,
+                    case=case,
+                    end=end,
+                    branch_point=next_branch_point,
+                )
+
+                if completed_case is not None:
+                    completed_cases.append(completed_case)
+                    continue
+
+                cases.append(case)
+
+        if not cases:
+            return FeatureFlowTraceResult(
+                completed_cases=completed_cases,
+                unresolved_cases=unresolved_cases,
+            )
 
     return FeatureFlowTraceResult(
         completed_cases=completed_cases,
@@ -1836,6 +2081,7 @@ def trace_feature_flow_cases(
                 feature=feature,
                 start=start,
                 end=end,
+                verbose=verbose,
             )
 
             completed_cases.extend(result.completed_cases)

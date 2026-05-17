@@ -755,6 +755,67 @@ class AstAnalyzer:
     def _extract_type_ref(self, annotation: ast.expr | None) -> TypeRef | None:
         return TypeRef.from_annotation_ast(annotation)
 
+    def _is_local_operation_call(
+            self,
+            *,
+            raw_target: str,
+            resolved_target: str,
+            callable_fqn: str,
+    ) -> bool:
+        if self._is_local_operation_target(
+                target=raw_target,
+                callable_fqn=callable_fqn,
+        ):
+            return True
+
+        if resolved_target == callable_fqn:
+            return True
+
+        if resolved_target not in self.callable_inventory:
+            return False
+
+        return resolved_target.startswith(f'{self.unit_fqn}.')
+
+    def resolve_local_operation_calls(
+            self,
+            *,
+            branches: list[Branch],
+            callable_fqn: str,
+            known_types: dict[str, TypeRef],
+    ) -> None:
+        for branch in branches:
+            constraint = branch.constraint
+            if constraint is None:
+                continue
+
+            if constraint.constraint_type != 'operation':
+                continue
+
+            operation_target = (constraint.operation_target or '').strip()
+            if not operation_target:
+                continue
+
+            resolution = self._resolve_target_details(
+                operation_target,
+                known_types,
+                callable_fqn=callable_fqn,
+            )
+
+            resolved_target = resolution.resolved_target
+            if not resolved_target:
+                continue
+
+            if not self._is_local_operation_call(
+                    raw_target=operation_target,
+                    resolved_target=resolved_target,
+                    callable_fqn=callable_fqn,
+            ):
+                continue
+
+            constraint.original_target = operation_target
+            constraint.resolved_target = resolved_target
+            constraint.resolution_kind = resolution.resolution_kind
+
     def find_integration_candidates(
             self,
             *,
@@ -807,6 +868,38 @@ class AstAnalyzer:
         if len(parts) < 2:
             return None
         return ".".join(parts[:-1]) if parts[-2][:1].isupper() else None
+
+    def _is_local_operation_target(
+            self,
+            *,
+            target: str,
+            callable_fqn: str,
+    ) -> bool:
+        if not target.startswith("self."):
+            return False
+
+        parts = target.split(".")
+        if len(parts) < 2:
+            return False
+
+        owner_class_fqn = callable_fqn.rsplit(".", 1)[0] if "." in callable_fqn else None
+        if not owner_class_fqn:
+            return False
+
+        first_attr = parts[1]
+
+        if len(parts) == 2 and first_attr.startswith("_"):
+            return True
+
+        if len(parts) == 2:
+            candidate = f"{owner_class_fqn}.{first_attr}"
+            if candidate in self.callable_inventory:
+                return True
+
+        if len(parts) >= 3:
+            return False
+
+        return False
 
     def _resolve_target_details(
             self,
@@ -1143,6 +1236,97 @@ def merge_stage2(
         ainfo["total_eis"] = stage2_item.get("total_eis", len(stage2_item.get("branches", [])))
 
 
+def enrich_branch_constraints_with_local_operation_targets(
+        *,
+        branches_payload: list[dict[str, Any]],
+        analyzer: AstAnalyzer,
+        callable_fqn: str,
+        known_types: dict[str, TypeRef],
+) -> None:
+    for branch in branches_payload:
+        constraint = branch.get("constraint") or {}
+
+        if constraint.get("constraint_type") != "operation":
+            continue
+
+        operation_target = str(
+            constraint.get("operation_target") or ""
+        ).strip()
+
+        if not operation_target:
+            continue
+
+        if not analyzer._is_local_operation_target(
+                target=operation_target,
+                callable_fqn=callable_fqn,
+        ):
+            continue
+
+        resolution = analyzer._resolve_target_details(
+            operation_target,
+            known_types,
+            callable_fqn=callable_fqn,
+        )
+
+        constraint["original_target"] = resolution.original_target
+        constraint["resolved_target"] = resolution.resolved_target
+        constraint["resolution_kind"] = resolution.resolution_kind
+
+        if resolution.resolved_receiver_type:
+            constraint["resolved_receiver_type"] = (
+                resolution.resolved_receiver_type
+            )
+
+        if resolution.resolution_basis:
+            constraint["resolution_basis"] = resolution.resolution_basis
+
+        if resolution.candidate_targets:
+            constraint["candidate_targets"] = resolution.candidate_targets
+
+
+def enrich_branch_constraints_with_integration_targets(
+        branches_payload: list[dict[str, Any]],
+        integration_candidates: list[dict[str, Any]],
+) -> None:
+    candidates_by_ei = {
+        candidate.get("ei_id"): candidate
+        for candidate in integration_candidates
+        if candidate.get("ei_id")
+    }
+
+    for branch in branches_payload:
+        branch_id = branch.get("id")
+        candidate = candidates_by_ei.get(branch_id)
+        if candidate is None:
+            continue
+
+        constraint = branch.get("constraint")
+        if not constraint:
+            continue
+
+        resolved_target = candidate.get("resolved_target")
+        if resolved_target:
+            constraint["resolved_target"] = resolved_target
+
+        original_target = candidate.get("target")
+        if original_target:
+            constraint["original_target"] = original_target
+
+        resolution_kind = candidate.get("resolution_kind")
+        if resolution_kind:
+            constraint["resolution_kind"] = resolution_kind
+
+        classification = candidate.get("classification") or {}
+
+        resolved_receiver_type = classification.get("resolved_receiver_type")
+        if resolved_receiver_type:
+            constraint["resolved_receiver_type"] = resolved_receiver_type
+
+        candidate_targets = classification.get("candidate_targets")
+        if candidate_targets:
+            constraint["candidate_targets"] = candidate_targets
+
+
 def count_all_entries(entries: list[dict[str, Any]]) -> int:
     total = 0
     for entry in entries:
@@ -1271,14 +1455,29 @@ def process_unit(
             **local_types
         }
 
-        if entry.fully_qualified_name == "project_resolution_engine.internal.util.multiformat.MultiformatSerializableMixin.flat_summary":
-            print("KNOWN TYPES FOR", entry.fully_qualified_name)
-            for name, type_ref in sorted(merged_known_types.items()):
-                print(" ", name, "->", type_ref.to_dict())
+        analyzer.resolve_local_operation_calls(
+            branches=branches,
+            callable_fqn=entry.fully_qualified_name,
+            known_types=merged_known_types,
+        )
 
-        ainfo["integration_candidates"] = analyzer.find_integration_candidates(
+        integration_candidates = analyzer.find_integration_candidates(
             branches=branches,
             callable_id=payload["id"],
+            callable_fqn=entry.fully_qualified_name,
+            known_types=merged_known_types,
+        )
+
+        ainfo["integration_candidates"] = integration_candidates
+
+        enrich_branch_constraints_with_integration_targets(
+            branches_payload=ainfo["branches"],
+            integration_candidates=integration_candidates,
+        )
+
+        enrich_branch_constraints_with_local_operation_targets(
+            branches_payload=ainfo["branches"],
+            analyzer=analyzer,
             callable_fqn=entry.fully_qualified_name,
             known_types=merged_known_types,
         )
