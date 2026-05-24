@@ -87,6 +87,7 @@ class ControlRouteKind(StrEnum):
     UNHANDLED_EXCEPTION = "unhandled_exception"
     POST_EXECUTION_ENTRY = "post_execution_entry"
     RESUME_PRIOR_OUTCOME = "resume_prior_outcome"
+    FUNCTION_RETURN = "function_return"
     TERMINAL = "terminal"
     OTHER = "other"
 

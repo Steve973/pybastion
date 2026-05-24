@@ -72,6 +72,28 @@ def _run_feature_flow_analysis() -> Path:
     return candidates[0]
 
 
+def _route_by_kind(entry: dict[str, Any], kind: str) -> list[dict[str, Any]]:
+    return [route for route in _routes(entry) if route.get("kind") == kind]
+
+
+def _owner_for_region_kind(
+    entry: dict[str, Any], kind: str, source_construct: str
+) -> str:
+    matches = [
+        region["owner_id"]
+        for region in _regions(entry)
+        if region.get("kind") == kind
+        and region.get("source_construct") == source_construct
+    ]
+
+    assert len(matches) == 1, (
+        f"expected one {kind!r} region for {source_construct!r}, "
+        f"found {len(matches)}"
+    )
+
+    return matches[0]
+
+
 @pytest.fixture(scope="session")
 def inventory() -> dict[str, Any]:
     inventory_path = _run_feature_flow_analysis()
@@ -230,3 +252,32 @@ def test_if_partial_disruption_probe_keeps_outer_completion_but_drops_nested_com
         nested_owner_id,
         ":condition_false_fallthrough",
     )
+
+
+def test_loop_direct_disruptions_emit_continue_and_break_routes(
+    inventory: dict[str, Any],
+) -> None:
+    entry = _entry_by_name(inventory, "fixture_loop_direct_disruptions")
+
+    for_owner_id = _owner_for_region_kind(entry, "condition", "for")
+    while_owner_id = _owner_for_region_kind(entry, "condition", "while")
+
+    continue_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == for_owner_id
+        and route.get("kind") == "loop_continue"
+    ]
+    break_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == while_owner_id and route.get("kind") == "loop_break"
+    ]
+
+    assert len(continue_routes) == 1
+    assert continue_routes[0].get("exit_kind") == "continue"
+    assert continue_routes[0].get("target_region_id") == f"{for_owner_id}:iterator"
+
+    assert len(break_routes) == 1
+    assert break_routes[0].get("exit_kind") == "break"
+    assert break_routes[0].get("target_line") == entry["line_end"]

@@ -319,3 +319,17 @@ def fixture_if_partial_disruption_probe(value: int) -> int:
         total += 1
 
     return total
+
+
+def fixture_loop_direct_disruptions(items: list[int]) -> int:
+    total = 0
+
+    for item in items:
+        total += item
+        continue
+
+    while total < 10:
+        total += 1
+        break
+
+    return total
