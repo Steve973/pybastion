@@ -392,3 +392,243 @@ def test_loop_direct_return_raise_emit_disruptive_body_routes(
     assert raise_routes[0].get("source_region_id", "").startswith("while:")
     assert raise_routes[0].get("source_region_id", "").endswith(":loop_body")
     assert raise_routes[0].get("exit_kind") == "raise"
+
+
+def test_nested_if_return_raise_uses_nested_if_region_as_source(
+    inventory: dict[str, Any],
+) -> None:
+    entry = _entry_by_name(inventory, "fixture_nested_if_return_raise")
+
+    outer_owner_id = _condition_owner(entry, "value > 0")
+    nested_return_owner_id = _condition_owner(entry, "value == 10")
+    nested_raise_owner_id = _condition_owner(entry, "value < -10")
+
+    return_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == nested_return_owner_id
+        and route.get("kind") == "function_return"
+        and route.get("source_region_id") == f"{nested_return_owner_id}:true_body"
+    ]
+
+    raise_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == nested_raise_owner_id
+        and route.get("kind") == "raise"
+        and route.get("source_region_id") == f"{nested_raise_owner_id}:true_body"
+    ]
+
+    assert len(return_routes) == 1
+    assert return_routes[0].get("exit_kind") == "return"
+
+    assert len(raise_routes) == 1
+    assert raise_routes[0].get("exit_kind") == "raise"
+
+    outer_completion = _assert_owner_has_route_suffix(
+        entry,
+        outer_owner_id,
+        ":true_body_completion",
+    )
+    _assert_owner_lacks_route_suffix(
+        entry,
+        nested_return_owner_id,
+        ":true_body_completion",
+    )
+    _assert_owner_lacks_route_suffix(
+        entry,
+        nested_raise_owner_id,
+        ":true_body_completion",
+    )
+
+    assert outer_completion.get("target_line") is not None
+
+
+def test_nested_match_loop_disruptions_use_match_case_region_as_source(
+    inventory: dict[str, Any],
+) -> None:
+    entry = _entry_by_name(inventory, "fixture_mixed_control")
+
+    loop_owner_id = _owner_for_region_kind(entry, "condition", "for")
+
+    continue_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == loop_owner_id
+        and route.get("kind") == "loop_continue"
+        and route.get("source_region_id", "").startswith("match:")
+        and route.get("source_region_id", "").endswith(":case_body:1")
+    ]
+
+    break_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == loop_owner_id
+        and route.get("kind") == "loop_break"
+        and route.get("source_region_id", "").startswith("match:")
+        and route.get("source_region_id", "").endswith(":case_body:2")
+    ]
+
+    assert len(continue_routes) == 1
+    assert continue_routes[0].get("exit_kind") == "continue"
+    assert continue_routes[0].get("target_region_id") == f"{loop_owner_id}:iterator"
+
+    assert len(break_routes) == 1
+    assert break_routes[0].get("exit_kind") == "break"
+
+
+def test_nested_try_loop_disruptions_use_nested_and_handler_regions_as_source(
+    inventory: dict[str, Any],
+) -> None:
+    entry = _entry_by_name(inventory, "fixture_try_loop_disruptions")
+
+    loop_owner_id = _owner_for_region_kind(entry, "condition", "for")
+
+    loop_continue_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == loop_owner_id
+        and route.get("kind") == "loop_continue"
+    ]
+    loop_break_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == loop_owner_id and route.get("kind") == "loop_break"
+    ]
+
+    nested_if_continue_routes = [
+        route
+        for route in loop_continue_routes
+        if str(route.get("source_region_id", "")).startswith("if:")
+        and str(route.get("source_region_id", "")).endswith(":true_body")
+    ]
+
+    handler_continue_routes = [
+        route
+        for route in loop_continue_routes
+        if ":exception_handler:" in str(route.get("source_region_id", ""))
+    ]
+
+    nested_if_break_routes = [
+        route
+        for route in loop_break_routes
+        if str(route.get("source_region_id", "")).startswith("if:")
+        and str(route.get("source_region_id", "")).endswith(":true_body")
+    ]
+
+    assert len(nested_if_continue_routes) == 1
+    assert nested_if_continue_routes[0].get("exit_kind") == "continue"
+    assert nested_if_continue_routes[0].get("target_region_id") == (
+        f"{loop_owner_id}:iterator"
+    )
+
+    assert len(nested_if_break_routes) == 1
+    assert nested_if_break_routes[0].get("exit_kind") == "break"
+
+    assert len(handler_continue_routes) == 1
+    assert handler_continue_routes[0].get("exit_kind") == "continue"
+    assert handler_continue_routes[0].get("target_region_id") == (
+        f"{loop_owner_id}:iterator"
+    )
+
+
+def test_nested_with_loop_disruptions_use_nested_if_regions_as_source(
+    inventory: dict[str, Any],
+) -> None:
+    entry = _entry_by_name(inventory, "fixture_with_loop_disruptions")
+
+    loop_owner_id = _owner_for_region_kind(entry, "condition", "for")
+
+    loop_continue_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == loop_owner_id
+        and route.get("kind") == "loop_continue"
+    ]
+    loop_break_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == loop_owner_id and route.get("kind") == "loop_break"
+    ]
+
+    nested_if_continue_routes = [
+        route
+        for route in loop_continue_routes
+        if str(route.get("source_region_id", "")).startswith("if:")
+        and str(route.get("source_region_id", "")).endswith(":true_body")
+    ]
+
+    nested_if_break_routes = [
+        route
+        for route in loop_break_routes
+        if str(route.get("source_region_id", "")).startswith("if:")
+        and str(route.get("source_region_id", "")).endswith(":true_body")
+    ]
+
+    with_policies = [
+        policy
+        for policy in _policies(entry)
+        if policy.get("mechanism_kind") == "context_manager_exit"
+    ]
+
+    assert len(nested_if_continue_routes) == 1
+    assert nested_if_continue_routes[0].get("exit_kind") == "continue"
+    assert nested_if_continue_routes[0].get("target_region_id") == (
+        f"{loop_owner_id}:iterator"
+    )
+
+    assert len(nested_if_break_routes) == 1
+    assert nested_if_break_routes[0].get("exit_kind") == "break"
+
+    assert len(with_policies) == 1
+    assert "continue" in with_policies[0].get("applies_to", [])
+    assert "break" in with_policies[0].get("applies_to", [])
+
+
+def test_nested_loop_transfers_bind_to_inner_loop_not_outer_loop(
+    inventory: dict[str, Any],
+) -> None:
+    entry = _entry_by_name(inventory, "fixture_nested_loop_transfer_binding")
+
+    loop_owner_ids = [
+        region["owner_id"]
+        for region in _regions(entry)
+        if region.get("kind") == "condition" and region.get("source_construct") == "for"
+    ]
+
+    assert len(loop_owner_ids) == 2
+
+    outer_loop_owner_id = loop_owner_ids[0]
+    inner_loop_owner_id = loop_owner_ids[1]
+
+    outer_transfer_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == outer_loop_owner_id
+        and route.get("kind") in {"loop_continue", "loop_break"}
+    ]
+
+    inner_continue_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == inner_loop_owner_id
+        and route.get("kind") == "loop_continue"
+    ]
+
+    inner_break_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == inner_loop_owner_id
+        and route.get("kind") == "loop_break"
+    ]
+
+    assert outer_transfer_routes == []
+
+    assert len(inner_continue_routes) == 1
+    assert inner_continue_routes[0].get("exit_kind") == "continue"
+    assert inner_continue_routes[0].get("target_region_id") == (
+        f"{inner_loop_owner_id}:iterator"
+    )
+
+    assert len(inner_break_routes) == 1
+    assert inner_break_routes[0].get("exit_kind") == "break"

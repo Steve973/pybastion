@@ -155,6 +155,193 @@ def _nested_if_loop_disruptive_exit_routes(
     return routes
 
 
+def _nested_match_loop_disruptive_exit_routes(
+    *,
+    owner_id: str,
+    body: list[ast.stmt],
+    decision_region_id: str,
+    decision_line: int,
+    loop_exit_line: int | None,
+) -> list[ControlRoute]:
+    routes: list[ControlRoute] = []
+
+    for child in body:
+        if not isinstance(child, ast.Match):
+            continue
+
+        match_owner_id = _match_control_id(child)
+
+        for index, case in enumerate(child.cases, start=1):
+            case_region_id = _region_id(match_owner_id, f"case_body:{index}")
+
+            routes.extend(
+                _direct_loop_disruptive_exit_routes(
+                    owner_id=owner_id,
+                    source_region_id=case_region_id,
+                    body=case.body,
+                    decision_region_id=decision_region_id,
+                    decision_line=decision_line,
+                    loop_exit_line=loop_exit_line,
+                )
+            )
+
+    return routes
+
+
+def _nested_try_loop_disruptive_exit_routes(
+    *,
+    owner_id: str,
+    body: list[ast.stmt],
+    decision_region_id: str,
+    decision_line: int,
+    loop_exit_line: int | None,
+) -> list[ControlRoute]:
+    routes: list[ControlRoute] = []
+
+    for child in body:
+        if not isinstance(child, ast.Try):
+            continue
+
+        try_owner_id = _try_control_id(child)
+        protected_region_id = _region_id(try_owner_id, "protected_body")
+
+        routes.extend(
+            _direct_loop_disruptive_exit_routes(
+                owner_id=owner_id,
+                source_region_id=protected_region_id,
+                body=child.body,
+                decision_region_id=decision_region_id,
+                decision_line=decision_line,
+                loop_exit_line=loop_exit_line,
+            )
+        )
+
+        routes.extend(
+            _nested_if_loop_disruptive_exit_routes(
+                owner_id=owner_id,
+                body=child.body,
+                decision_region_id=decision_region_id,
+                decision_line=decision_line,
+                loop_exit_line=loop_exit_line,
+            )
+        )
+
+        routes.extend(
+            _nested_match_loop_disruptive_exit_routes(
+                owner_id=owner_id,
+                body=child.body,
+                decision_region_id=decision_region_id,
+                decision_line=decision_line,
+                loop_exit_line=loop_exit_line,
+            )
+        )
+
+        for index, handler in enumerate(child.handlers):
+            handler_region_id = _region_id(try_owner_id, f"exception_handler:{index}")
+
+            routes.extend(
+                _direct_loop_disruptive_exit_routes(
+                    owner_id=owner_id,
+                    source_region_id=handler_region_id,
+                    body=handler.body,
+                    decision_region_id=decision_region_id,
+                    decision_line=decision_line,
+                    loop_exit_line=loop_exit_line,
+                )
+            )
+
+        if child.orelse:
+            else_region_id = _region_id(try_owner_id, "success_continuation")
+
+            routes.extend(
+                _direct_loop_disruptive_exit_routes(
+                    owner_id=owner_id,
+                    source_region_id=else_region_id,
+                    body=child.orelse,
+                    decision_region_id=decision_region_id,
+                    decision_line=decision_line,
+                    loop_exit_line=loop_exit_line,
+                )
+            )
+
+        if child.finalbody:
+            finally_region_id = _region_id(try_owner_id, "post_execution")
+
+            routes.extend(
+                _direct_loop_disruptive_exit_routes(
+                    owner_id=owner_id,
+                    source_region_id=finally_region_id,
+                    body=child.finalbody,
+                    decision_region_id=decision_region_id,
+                    decision_line=decision_line,
+                    loop_exit_line=loop_exit_line,
+                )
+            )
+
+    return routes
+
+
+def _nested_with_loop_disruptive_exit_routes(
+    *,
+    owner_id: str,
+    body: list[ast.stmt],
+    decision_region_id: str,
+    decision_line: int,
+    loop_exit_line: int | None,
+) -> list[ControlRoute]:
+    routes: list[ControlRoute] = []
+
+    for child in body:
+        if not isinstance(child, (ast.With, ast.AsyncWith)):
+            continue
+
+        with_owner_id = _with_control_id(child)
+        body_region_id = _region_id(with_owner_id, "body")
+
+        routes.extend(
+            _direct_loop_disruptive_exit_routes(
+                owner_id=owner_id,
+                source_region_id=body_region_id,
+                body=child.body,
+                decision_region_id=decision_region_id,
+                decision_line=decision_line,
+                loop_exit_line=loop_exit_line,
+            )
+        )
+
+        routes.extend(
+            _nested_if_loop_disruptive_exit_routes(
+                owner_id=owner_id,
+                body=child.body,
+                decision_region_id=decision_region_id,
+                decision_line=decision_line,
+                loop_exit_line=loop_exit_line,
+            )
+        )
+
+        routes.extend(
+            _nested_match_loop_disruptive_exit_routes(
+                owner_id=owner_id,
+                body=child.body,
+                decision_region_id=decision_region_id,
+                decision_line=decision_line,
+                loop_exit_line=loop_exit_line,
+            )
+        )
+
+        routes.extend(
+            _nested_try_loop_disruptive_exit_routes(
+                owner_id=owner_id,
+                body=child.body,
+                decision_region_id=decision_region_id,
+                decision_line=decision_line,
+                loop_exit_line=loop_exit_line,
+            )
+        )
+
+    return routes
+
+
 def _build_if_conditional_targets(
     test: ast.AST,
     *,
@@ -893,6 +1080,36 @@ class ForDecomposer(ControlOwnerDecomposer):
         )
 
         routes.extend(
+            _nested_match_loop_disruptive_exit_routes(
+                owner_id=owner_id,
+                body=stmt.body,
+                decision_region_id=condition_region_id,
+                decision_line=stmt.lineno,
+                loop_exit_line=continuation_target,
+            )
+        )
+
+        routes.extend(
+            _nested_try_loop_disruptive_exit_routes(
+                owner_id=owner_id,
+                body=stmt.body,
+                decision_region_id=condition_region_id,
+                decision_line=stmt.lineno,
+                loop_exit_line=continuation_target,
+            )
+        )
+
+        routes.extend(
+            _nested_with_loop_disruptive_exit_routes(
+                owner_id=owner_id,
+                body=stmt.body,
+                decision_region_id=condition_region_id,
+                decision_line=stmt.lineno,
+                loop_exit_line=continuation_target,
+            )
+        )
+
+        routes.extend(
             _direct_region_disruptive_exit_routes(
                 owner_id=owner_id,
                 source_region_id=body_region_id,
@@ -1134,6 +1351,36 @@ class WhileDecomposer(ControlOwnerDecomposer):
 
         routes.extend(
             _nested_if_loop_disruptive_exit_routes(
+                owner_id=owner_id,
+                body=stmt.body,
+                decision_region_id=condition_region_id,
+                decision_line=stmt.lineno,
+                loop_exit_line=continuation_target,
+            )
+        )
+
+        routes.extend(
+            _nested_match_loop_disruptive_exit_routes(
+                owner_id=owner_id,
+                body=stmt.body,
+                decision_region_id=condition_region_id,
+                decision_line=stmt.lineno,
+                loop_exit_line=continuation_target,
+            )
+        )
+
+        routes.extend(
+            _nested_try_loop_disruptive_exit_routes(
+                owner_id=owner_id,
+                body=stmt.body,
+                decision_region_id=condition_region_id,
+                decision_line=stmt.lineno,
+                loop_exit_line=continuation_target,
+            )
+        )
+
+        routes.extend(
+            _nested_with_loop_disruptive_exit_routes(
                 owner_id=owner_id,
                 body=stmt.body,
                 decision_region_id=condition_region_id,

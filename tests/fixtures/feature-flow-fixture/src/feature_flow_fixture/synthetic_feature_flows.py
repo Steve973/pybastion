@@ -355,8 +355,65 @@ def fixture_loop_direct_return_raise(items: list[int]) -> int:
         if item < 0:
             break
         return item
-
     while True:
         raise RuntimeError("no usable item")
-
     return -1
+
+
+def fixture_nested_if_return_raise(value: int) -> int:
+    total = 0
+    if value > 0:
+        if value == 10:
+            return 10
+        total += 1
+    if value < -10:
+        raise ValueError("too negative")
+    return total
+
+
+def fixture_try_loop_disruptions(values: list[str]) -> int:
+    total = 0
+    for value in values:
+        try:
+            if value == "skip":
+                continue
+            if value == "stop":
+                break
+            total += int(value)
+        except ValueError:
+            continue
+    return total
+
+
+def fixture_with_loop_disruptions(values: list[str], path) -> int:
+    total = 0
+
+    for value in values:
+        with path.open("r") as handle:
+            handle.read()
+
+            if value == "skip":
+                continue
+
+            if value == "stop":
+                break
+
+            total += 1
+
+    return total
+
+
+def fixture_nested_loop_transfer_binding(values: list[list[int]]) -> int:
+    total = 0
+
+    for row in values:
+        for item in row:
+            if item < 0:
+                continue
+            if item == 0:
+                break
+            total += item
+
+        total += 100
+
+    return total
