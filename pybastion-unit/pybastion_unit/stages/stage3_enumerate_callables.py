@@ -21,7 +21,7 @@ from typing import Any
 import yaml
 
 from pybastion_common.models import (
-    Branch,
+    ExecutionItem,
     CallableAnalysisInfo,
     CallableEntry,
     CallableHierarchyInfo,
@@ -45,7 +45,7 @@ from pybastion_unit.helpers.decorator_processing import (
 )
 from pybastion_unit.helpers.integration_analysis import (
     build_integration_entries,
-    default_signature
+    default_signature,
 )
 from pybastion_unit.helpers.type_indexing import (
     build_module_index,
@@ -76,9 +76,11 @@ class TargetResolution:
 # ============================================================================
 
 
-def load_class_field_registry(filepath: Path) -> dict[str, dict[str, TypeRef]]:
+def load_class_field_registry(filepath: Path) -> dict[str, dict[str, TypeRef | None]]:
     payload = json.loads(filepath.read_text(encoding="utf-8"))
-    raw_registry: dict[str, dict[str, dict[str, Any]]] = payload.get("class_field_registry", {}) or {}
+    raw_registry: dict[str, dict[str, dict[str, Any]]] = (
+        payload.get("class_field_registry", {}) or {}
+    )
 
     return {
         class_fqn: {
@@ -100,8 +102,13 @@ def load_project_index(filepath: Path) -> ProjectIndex:
                 filepath=unit_payload["filepath"],
                 language=unit_payload["language"],
                 source_hash=unit_payload["source_hash"],
-                entries=[UnitIndexEntry(**entry) for entry in unit_payload.get("entries", [])],
-                bindings=[UnitBindingEntry(**entry) for entry in unit_payload.get("bindings", [])],
+                entries=[
+                    UnitIndexEntry(**entry) for entry in unit_payload.get("entries", [])
+                ],
+                bindings=[
+                    UnitBindingEntry(**entry)
+                    for entry in unit_payload.get("bindings", [])
+                ],
             )
         )
     return ProjectIndex(source_root=payload["source_root"], units=units)
@@ -119,7 +126,9 @@ def load_stage2_yaml(filepath: Path | None) -> dict[str, Any]:
     return payload or {}
 
 
-def build_stage2_lookup(stage2_payload: dict[str, Any]) -> dict[tuple[str, int, int], dict[str, Any]]:
+def build_stage2_lookup(
+    stage2_payload: dict[str, Any],
+) -> dict[tuple[str, int, int], dict[str, Any]]:
     lookup: dict[tuple[str, int, int], dict[str, Any]] = {}
     for item in stage2_payload.get("functions", []) or []:
         key = (item.get("name", ""), item.get("line_start", 0), item.get("line_end", 0))
@@ -145,7 +154,9 @@ def collect_project_contract_classes(project_index: ProjectIndex) -> set[str]:
             if entry.kind not in CLASS_ENTRY_KINDS:
                 continue
 
-            node = ast_index.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+            node = ast_index.nodes_by_fqn_and_line.get(
+                (entry.fully_qualified_name, entry.lineno)
+            )
             if not isinstance(node, ast.ClassDef):
                 continue
 
@@ -153,8 +164,9 @@ def collect_project_contract_classes(project_index: ProjectIndex) -> set[str]:
 
             if not class_is_contract:
                 for child in node.body:
-                    if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and has_abstractmethod_decorator(
-                            child):
+                    if isinstance(
+                        child, (ast.FunctionDef, ast.AsyncFunctionDef)
+                    ) and has_abstractmethod_decorator(child):
                         class_is_contract = True
                         break
 
@@ -195,10 +207,10 @@ def _strip_generic_suffix(type_name: str) -> str:
 
 
 def resolve_base_class_fqn(
-        base_expr: ast.expr,
-        unit_fqn: str,
-        import_map: dict[str, str],
-        callable_inventory: dict[str, str],
+    base_expr: ast.expr,
+    unit_fqn: str,
+    import_map: dict[str, str],
+    callable_inventory: dict[str, str],
 ) -> str:
     raw = ast.unparse(base_expr).strip()
     lookup = _strip_generic_suffix(_base_expr_lookup_name(base_expr))
@@ -253,28 +265,30 @@ def is_constructor_entry(entry: dict[str, Any]) -> bool:
 
 def is_implicit_default_constructor_entry(entry: dict[str, Any]) -> bool:
     return (
-            entry.get("kind") == "method"
-            and entry.get("name") == "__init__"
-            and entry.get("synthetic", False)
-            and entry.get("implicit", False)
-            and entry.get("implicit_kind") == "default_constructor"
+        entry.get("kind") == "method"
+        and entry.get("name") == "__init__"
+        and entry.get("synthetic", False)
+        and entry.get("implicit", False)
+        and entry.get("implicit_kind") == "default_constructor"
     )
 
 
-def mark_contract_methods(entries: list[dict[str, Any]], in_contract_class: bool = False) -> None:
+def mark_contract_methods(
+    entries: list[dict[str, Any]], in_contract_class: bool = False
+) -> None:
     for entry in entries:
         hinfo = hierarchy_info(entry)
 
         entry_is_contract_class = (
-                in_contract_class
-                or bool(hinfo.get("is_abstract", False))
-                or bool(hinfo.get("contract_base_classes", []))
+            in_contract_class
+            or bool(hinfo.get("is_abstract", False))
+            or bool(hinfo.get("contract_base_classes", []))
         )
 
         if (
-                entry.get("kind") == "method"
-                and entry_is_contract_class
-                and not is_constructor_entry(entry)
+            entry.get("kind") == "method"
+            and entry_is_contract_class
+            and not is_constructor_entry(entry)
         ):
             hinfo["is_contract_method"] = True
 
@@ -283,7 +297,9 @@ def mark_contract_methods(entries: list[dict[str, Any]], in_contract_class: bool
             mark_contract_methods(children, entry_is_contract_class)
 
 
-def is_non_executable_callable_body(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+def is_non_executable_callable_body(
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> bool:
     """
     Return True for declarative/contract callables that should not participate
     in executable flow graphs.
@@ -297,10 +313,10 @@ def is_non_executable_callable_body(node: ast.FunctionDef | ast.AsyncFunctionDef
     body = list(node.body)
 
     if (
-            body
-            and isinstance(body[0], ast.Expr)
-            and isinstance(body[0].value, ast.Constant)
-            and isinstance(body[0].value.value, str)
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
     ):
         body = body[1:]
 
@@ -313,9 +329,9 @@ def is_non_executable_callable_body(node: ast.FunctionDef | ast.AsyncFunctionDef
         return True
 
     if (
-            isinstance(stmt, ast.Expr)
-            and isinstance(stmt.value, ast.Constant)
-            and stmt.value.value is Ellipsis
+        isinstance(stmt, ast.Expr)
+        and isinstance(stmt.value, ast.Constant)
+        and stmt.value.value is Ellipsis
     ):
         return True
 
@@ -334,9 +350,9 @@ def is_non_executable_callable_body(node: ast.FunctionDef | ast.AsyncFunctionDef
 
 
 def annotate_method_owners(
-        entries: list[dict[str, Any]],
-        unit_fqn: str,
-        ancestors: list[str] | None = None,
+    entries: list[dict[str, Any]],
+    unit_fqn: str,
+    ancestors: list[str] | None = None,
 ) -> None:
     if ancestors is None:
         ancestors = []
@@ -358,9 +374,9 @@ def annotate_method_owners(
 
 
 def annotate_entry_fqns(
-        entries: list[dict[str, Any]],
-        unit_fqn: str,
-        ancestors: list[str] | None = None,
+    entries: list[dict[str, Any]],
+    unit_fqn: str,
+    ancestors: list[str] | None = None,
 ) -> None:
     if ancestors is None:
         ancestors = []
@@ -380,7 +396,7 @@ def annotate_entry_fqns(
 
 
 def collect_project_collapsible_operation_fqns(
-        project_index: ProjectIndex,
+    project_index: ProjectIndex,
 ) -> set[str]:
     result: set[str] = set()
 
@@ -417,18 +433,18 @@ def collect_project_collapsible_operation_fqns(
 
 class AstAnalyzer:
     def __init__(
-            self,
-            *,
-            source_lines: list[str],
-            unit_id: str,
-            unit_fqn: str,
-            callable_inventory: dict[str, str],
-            project_fqns: set[str],
-            import_map: dict[str, str],
-            local_return_types: dict[str, TypeRef],
-            field_types_by_class: dict[str, dict[str, TypeRef]],
-            project_contract_classes: set[str],
-            collapsible_operation_fqns: set[str],
+        self,
+        *,
+        source_lines: list[str],
+        unit_id: str,
+        unit_fqn: str,
+        callable_inventory: dict[str, str],
+        project_fqns: set[str],
+        import_map: dict[str, str],
+        local_return_types: dict[str, TypeRef],
+        field_types_by_class: dict[str, dict[str, TypeRef]],
+        project_contract_classes: set[str],
+        collapsible_operation_fqns: set[str],
     ):
         self.source_lines = source_lines
         self.unit_id = unit_id
@@ -459,7 +475,9 @@ class AstAnalyzer:
             "line_end": entry.end_lineno,
         }
 
-    def _analyze_class(self, entry: UnitIndexEntry, node: ast.ClassDef) -> dict[str, Any]:
+    def _analyze_class(
+        self, entry: UnitIndexEntry, node: ast.ClassDef
+    ) -> dict[str, Any]:
         kind = "enum" if is_enum_class(node) else "class"
 
         raw_bases = [ast.unparse(base) for base in node.bases]
@@ -473,7 +491,8 @@ class AstAnalyzer:
             for base in node.bases
         ]
         contract_bases = [
-            base for base in resolved_bases
+            base
+            for base in resolved_bases
             if is_contract_base_name(base) or base in self.project_contract_classes
         ]
 
@@ -494,8 +513,12 @@ class AstAnalyzer:
             ),
         ).to_dict()
 
-    def _analyze_callable(self, entry: UnitIndexEntry, node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, Any]:
-        decorators = self._extract_decorators(node.decorator_list) + extract_callable_decorators(
+    def _analyze_callable(
+        self, entry: UnitIndexEntry, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> dict[str, Any]:
+        decorators = self._extract_decorators(
+            node.decorator_list
+        ) + extract_callable_decorators(
             node,
             self.source_lines,
         )
@@ -536,8 +559,8 @@ class AstAnalyzer:
         return payload
 
     def build_callable_local_type_map(
-            self,
-            node: ast.FunctionDef | ast.AsyncFunctionDef,
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
     ) -> dict[str, TypeRef]:
         local_types: dict[str, TypeRef] = {}
 
@@ -569,7 +592,10 @@ class AstAnalyzer:
                 func = expr.func
                 if isinstance(func, ast.Name) and func.id in self.local_return_types:
                     return self.local_return_types[func.id]
-                if isinstance(func, ast.Attribute) and func.attr in self.local_return_types:
+                if (
+                    isinstance(func, ast.Attribute)
+                    and func.attr in self.local_return_types
+                ):
                     return self.local_return_types[func.attr]
 
             return None
@@ -578,7 +604,10 @@ class AstAnalyzer:
             if type_ref.name in {"tuple", "Tuple"}:
                 return list(type_ref.args)
 
-            if type_ref.name in {"list", "List", "set", "Set", "Sequence", "Iterable"} and len(type_ref.args) == 1:
+            if (
+                type_ref.name in {"list", "List", "set", "Set", "Sequence", "Iterable"}
+                and len(type_ref.args) == 1
+            ):
                 inner = type_ref.args[0]
                 if inner.name in {"tuple", "Tuple"}:
                     return list(inner.args)
@@ -590,10 +619,17 @@ class AstAnalyzer:
             if iter_type is None:
                 return None
 
-            if iter_type.name in {"list", "List", "set", "Set", "Iterable", "Iterator", "Sequence"} and iter_type.args:
+            if (
+                iter_type.name
+                in {"list", "List", "set", "Set", "Iterable", "Iterator", "Sequence"}
+                and iter_type.args
+            ):
                 return iter_type.args[0]
 
-            if iter_type.name in {"dict", "Dict", "Mapping"} and len(iter_type.args) >= 2:
+            if (
+                iter_type.name in {"dict", "Dict", "Mapping"}
+                and len(iter_type.args) >= 2
+            ):
                 return iter_type.args[0]
 
             return None
@@ -612,7 +648,10 @@ class AstAnalyzer:
             if receiver_type is None:
                 return None
 
-            if receiver_type.name in {"dict", "Dict", "Mapping"} and len(receiver_type.args) >= 2:
+            if (
+                receiver_type.name in {"dict", "Dict", "Mapping"}
+                and len(receiver_type.args) >= 2
+            ):
                 return TypeRef(
                     name="tuple",
                     args=[receiver_type.args[0], receiver_type.args[1]],
@@ -645,9 +684,9 @@ class AstAnalyzer:
                 continue
 
             if (
-                    isinstance(stmt, ast.Assign)
-                    and len(stmt.targets) == 1
-                    and isinstance(stmt.targets[0], ast.Name)
+                isinstance(stmt, ast.Assign)
+                and len(stmt.targets) == 1
+                and isinstance(stmt.targets[0], ast.Name)
             ):
                 target_name = stmt.targets[0].id
                 inferred = infer_expr_type(stmt.value)
@@ -674,15 +713,17 @@ class AstAnalyzer:
         for binding in unit.bindings:
             if binding.annotation:
                 try:
-                    result[binding.name] = TypeRef.from_annotation_string(binding.annotation)
+                    result[binding.name] = TypeRef.from_annotation_string(
+                        binding.annotation
+                    )
                 except Exception:
                     pass
 
         return result
 
     def build_local_type_map(
-            self,
-            node: ast.FunctionDef | ast.AsyncFunctionDef,
+        self,
+        node: ast.FunctionDef | ast.AsyncFunctionDef,
     ) -> dict[str, TypeRef]:
         match node:
             case ast.FunctionDef() | ast.AsyncFunctionDef():
@@ -696,7 +737,9 @@ class AstAnalyzer:
             start_line = node.lineno - 1
             sig_line = self.source_lines[start_line].strip()
             if not sig_line.endswith(":"):
-                for i in range(start_line + 1, min(start_line + 20, len(self.source_lines))):
+                for i in range(
+                    start_line + 1, min(start_line + 20, len(self.source_lines))
+                ):
                     sig_line += " " + self.source_lines[i].strip()
                     if self.source_lines[i].strip().endswith(":"):
                         break
@@ -720,7 +763,9 @@ class AstAnalyzer:
                 if dec.args:
                     info["args"] = [ast.unparse(arg) for arg in dec.args]
                 if dec.keywords:
-                    info["kwargs"] = {kw.arg: ast.unparse(kw.value) for kw in dec.keywords if kw.arg}
+                    info["kwargs"] = {
+                        kw.arg: ast.unparse(kw.value) for kw in dec.keywords if kw.arg
+                    }
             else:
                 info["name"] = ast.unparse(dec)
             decorators.append(info)
@@ -738,10 +783,18 @@ class AstAnalyzer:
             return "protected"
         return "public"
 
-    def _extract_params(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> list[ParamSpec]:
+    def _extract_params(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> list[ParamSpec]:
         params: list[ParamSpec] = []
         for arg in node.args.args:
-            params.append(ParamSpec(name=arg.arg, type=self._extract_type_ref(arg.annotation), default=None))
+            params.append(
+                ParamSpec(
+                    name=arg.arg,
+                    type=self._extract_type_ref(arg.annotation),
+                    default=None,
+                )
+            )
         defaults = node.args.defaults
         if defaults:
             start_idx = len(params) - len(defaults)
@@ -749,22 +802,24 @@ class AstAnalyzer:
                 params[start_idx + i].default = ast.unparse(default)
         return params
 
-    def _build_param_type_map(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> dict[str, TypeRef]:
+    def _build_param_type_map(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef
+    ) -> dict[str, TypeRef]:
         return build_param_type_map_with_defaults(node)
 
     def _extract_type_ref(self, annotation: ast.expr | None) -> TypeRef | None:
         return TypeRef.from_annotation_ast(annotation)
 
     def _is_local_operation_call(
-            self,
-            *,
-            raw_target: str,
-            resolved_target: str,
-            callable_fqn: str,
+        self,
+        *,
+        raw_target: str,
+        resolved_target: str,
+        callable_fqn: str,
     ) -> bool:
         if self._is_local_operation_target(
-                target=raw_target,
-                callable_fqn=callable_fqn,
+            target=raw_target,
+            callable_fqn=callable_fqn,
         ):
             return True
 
@@ -774,24 +829,24 @@ class AstAnalyzer:
         if resolved_target not in self.callable_inventory:
             return False
 
-        return resolved_target.startswith(f'{self.unit_fqn}.')
+        return resolved_target.startswith(f"{self.unit_fqn}.")
 
     def resolve_local_operation_calls(
-            self,
-            *,
-            branches: list[Branch],
-            callable_fqn: str,
-            known_types: dict[str, TypeRef],
+        self,
+        *,
+        execution_items: list[ExecutionItem],
+        callable_fqn: str,
+        known_types: dict[str, TypeRef],
     ) -> None:
-        for branch in branches:
-            constraint = branch.constraint
+        for ei in execution_items:
+            constraint = ei.constraint
             if constraint is None:
                 continue
 
-            if constraint.constraint_type != 'operation':
+            if constraint.constraint_type != "operation":
                 continue
 
-            operation_target = (constraint.operation_target or '').strip()
+            operation_target = (constraint.operation_target or "").strip()
             if not operation_target:
                 continue
 
@@ -806,9 +861,9 @@ class AstAnalyzer:
                 continue
 
             if not self._is_local_operation_call(
-                    raw_target=operation_target,
-                    resolved_target=resolved_target,
-                    callable_fqn=callable_fqn,
+                raw_target=operation_target,
+                resolved_target=resolved_target,
+                callable_fqn=callable_fqn,
             ):
                 continue
 
@@ -817,15 +872,15 @@ class AstAnalyzer:
             constraint.resolution_kind = resolution.resolution_kind
 
     def find_integration_candidates(
-            self,
-            *,
-            branches: list[Branch],
-            callable_id: str,
-            callable_fqn: str,
-            known_types: dict[str, TypeRef],
+        self,
+        *,
+        execution_items: list[ExecutionItem],
+        callable_id: str,
+        callable_fqn: str,
+        known_types: dict[str, TypeRef],
     ) -> list[dict[str, Any]]:
         integrations = build_integration_entries(
-            branches=branches,
+            execution_items=execution_items,
             callable_id=callable_id,
             callable_fqn=callable_fqn,
             unit_fqn=self.unit_fqn,
@@ -838,7 +893,7 @@ class AstAnalyzer:
                 param_types,
                 callable_fqn=callable_fqn,
             ),
-            signature_for_branch=default_signature,
+            signature_for_ei=default_signature,
         )
 
         enriched: list[dict[str, Any]] = []
@@ -846,7 +901,9 @@ class AstAnalyzer:
             payload = integration.to_dict()
 
             classification = payload.get("classification", {}) or {}
-            resolved_target = classification.get("resolved_target") or payload.get("target")
+            resolved_target = classification.get("resolved_target") or payload.get(
+                "target"
+            )
 
             payload["resolved_target"] = resolved_target
             payload["resolution_kind"] = payload.get("kind", "unknown")
@@ -870,10 +927,10 @@ class AstAnalyzer:
         return ".".join(parts[:-1]) if parts[-2][:1].isupper() else None
 
     def _is_local_operation_target(
-            self,
-            *,
-            target: str,
-            callable_fqn: str,
+        self,
+        *,
+        target: str,
+        callable_fqn: str,
     ) -> bool:
         if not target.startswith("self."):
             return False
@@ -882,7 +939,9 @@ class AstAnalyzer:
         if len(parts) < 2:
             return False
 
-        owner_class_fqn = callable_fqn.rsplit(".", 1)[0] if "." in callable_fqn else None
+        owner_class_fqn = (
+            callable_fqn.rsplit(".", 1)[0] if "." in callable_fqn else None
+        )
         if not owner_class_fqn:
             return False
 
@@ -902,10 +961,10 @@ class AstAnalyzer:
         return False
 
     def _resolve_target_details(
-            self,
-            target: str,
-            param_types: dict[str, TypeRef],
-            callable_fqn: str | None = None,
+        self,
+        target: str,
+        param_types: dict[str, TypeRef],
+        callable_fqn: str | None = None,
     ) -> TargetResolution:
         owner_class_fqn = None
         if callable_fqn:
@@ -945,10 +1004,10 @@ class AstAnalyzer:
         )
 
     def _resolve_target(
-            self,
-            target: str,
-            param_types: dict[str, TypeRef],
-            callable_fqn: str | None = None,
+        self,
+        target: str,
+        param_types: dict[str, TypeRef],
+        callable_fqn: str | None = None,
     ) -> tuple[str, str]:
         resolution = self._resolve_target_details(
             target,
@@ -970,35 +1029,41 @@ class AstAnalyzer:
 # ============================================================================
 
 
-def iter_successor_outcomes(branch: Branch):
-    if branch.statement_outcome is not None:
-        yield branch.statement_outcome
-    for target in branch.conditional_targets or []:
+def iter_successor_outcomes(ei: ExecutionItem):
+    if ei.statement_outcome is not None:
+        yield ei.statement_outcome
+    for target in ei.conditional_targets or []:
         yield target
-    for outcome in branch.disruptive_outcomes or []:
+    for outcome in ei.disruptive_outcomes or []:
         yield outcome
 
 
-def build_cfg(branches: list[Branch]) -> dict[str, list[str]]:
-    by_id = {branch.id: branch for branch in branches}
+def build_cfg(execution_items: list[ExecutionItem]) -> dict[str, list[str]]:
+    by_id = {ei.id: ei for ei in execution_items}
     graph: dict[str, list[str]] = {}
 
-    for branch in branches:
+    for ei in execution_items:
         successors: list[str] = []
-        for outcome in iter_successor_outcomes(branch):
+        for outcome in iter_successor_outcomes(ei):
             if outcome.is_terminal:
                 continue
             if outcome.target_ei:
                 successors.append(outcome.target_ei)
 
         seen: set[str] = set()
-        graph[branch.id] = [ei for ei in successors if ei in by_id and not (ei in seen or seen.add(ei))]
+        graph[ei.id] = [
+            ei for ei in successors if ei in by_id and not (ei in seen or seen.add(ei))
+        ]
 
     return graph
 
 
-def enumerate_paths(graph: dict[str, list[str]], start_ei: str, target_ei: str) -> list[list[str]]:
-    def dfs(current: str, target: str, path: list[str], visited: set[str]) -> list[list[str]]:
+def enumerate_paths(
+    graph: dict[str, list[str]], start_ei: str, target_ei: str
+) -> list[list[str]]:
+    def dfs(
+        current: str, target: str, path: list[str], visited: set[str]
+    ) -> list[list[str]]:
         if current == target:
             return [path + [current]]
         if current in visited:
@@ -1009,7 +1074,9 @@ def enumerate_paths(graph: dict[str, list[str]], start_ei: str, target_ei: str) 
             all_paths.extend(dfs(next_ei, target, path + [current], visited_copy))
         return all_paths
 
-    return [[target_ei]] if start_ei == target_ei else dfs(start_ei, target_ei, [], set())
+    return (
+        [[target_ei]] if start_ei == target_ei else dfs(start_ei, target_ei, [], set())
+    )
 
 
 def add_execution_paths(entries: list[dict[str, Any]]) -> None:
@@ -1026,28 +1093,30 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
                     break
 
         if (
-                ainfo.get("needs_callable_analysis")
-                and ainfo.get("branches")
-                and ainfo.get("integration_candidates")
+            ainfo.get("needs_callable_analysis")
+            and ainfo.get("execution_items")
+            and ainfo.get("integration_candidates")
         ):
-            branches = [Branch.from_dict(item) for item in ainfo["branches"]]
-            graph = build_cfg(branches)
+            execution_items = [
+                ExecutionItem.from_dict(item) for item in ainfo["execution_items"]
+            ]
+            graph = build_cfg(execution_items)
 
-            predecessors: dict[str, list[str]] = {branch.id: [] for branch in branches}
+            predecessors: dict[str, list[str]] = {ei.id: [] for ei in execution_items}
             for src, targets in graph.items():
                 for target in targets:
                     predecessors.setdefault(target, []).append(src)
 
-            branch_by_id = {branch.id: branch for branch in branches}
+            ei_by_id = {ei.id: ei for ei in execution_items}
 
             explicit_entry_eis = [
-                branch.id
-                for branch in branches
+                ei.id
+                for ei in execution_items
                 if (
-                        branch.statement_outcome is not None
-                        and branch.statement_outcome.synthetic
-                        and branch.stmt_type == "FunctionInvocation"
-                        and branch.description == "function start"
+                    ei.statement_outcome is not None
+                    and ei.statement_outcome.synthetic
+                    and ei.stmt_type == "FunctionInvocation"
+                    and ei.description == "function start"
                 )
             ]
 
@@ -1058,16 +1127,18 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
                     ei_id
                     for ei_id, preds in predecessors.items()
                     if not preds
-                       and not (
-                            branch_by_id[ei_id].owner_info is not None
-                            and branch_by_id[ei_id].owner_info.stmt_type == "Try"
-                            and branch_by_id[ei_id].owner_info.region == "except"
+                    and not (
+                        ei_by_id[ei_id].owner_info is not None
+                        and ei_by_id[ei_id].owner_info.stmt_type == "Try"
+                        and ei_by_id[ei_id].owner_info.region == "except"
                     )
                 ]
 
-                if not entry_eis and branches:
-                    first_line = min(branch.line for branch in branches)
-                    entry_eis = [branch.id for branch in branches if branch.line == first_line]
+                if not entry_eis and execution_items:
+                    first_line = min(ei.line for ei in execution_items)
+                    entry_eis = [
+                        ei.id for ei in execution_items if ei.line == first_line
+                    ]
 
             for integration in ainfo["integration_candidates"]:
                 target_ei = integration.get("ei_id")
@@ -1084,14 +1155,18 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
                     if path not in unique_paths:
                         unique_paths.append(path)
 
-                feasible_paths, feasibility_results = filter_feasible_paths(unique_paths, branches, timeout_ms=5000)
+                feasible_paths, feasibility_results = filter_feasible_paths(
+                    unique_paths, execution_items, timeout_ms=5000
+                )
                 integration["execution_paths"] = feasible_paths
                 integration["path_analysis"] = {
                     "total_syntactic_paths": len(unique_paths),
                     "feasible_paths": len(feasible_paths),
                     "infeasible_paths": len(unique_paths) - len(feasible_paths),
                     "filter_effectiveness": (
-                        100 * (1 - len(feasible_paths) / len(unique_paths)) if unique_paths else 0
+                        100 * (1 - len(feasible_paths) / len(unique_paths))
+                        if unique_paths
+                        else 0
                     ),
                 }
 
@@ -1100,7 +1175,9 @@ def add_execution_paths(entries: list[dict[str, Any]]) -> None:
                     path_id = "->".join(path)
                     result = feasibility_results.get(path_id)
                     if result and result.witness_values:
-                        witnesses.append({"path": path, "witness": result.witness_values})
+                        witnesses.append(
+                            {"path": path, "witness": result.witness_values}
+                        )
                 if witnesses:
                     integration["test_witnesses"] = witnesses
 
@@ -1128,7 +1205,9 @@ def build_class_hierarchy(entries: list[dict[str, Any]]) -> dict[str, dict[str, 
     return classes
 
 
-def find_methods_by_owner(entries: list[dict[str, Any]]) -> dict[str, dict[str, dict[str, Any]]]:
+def find_methods_by_owner(
+    entries: list[dict[str, Any]],
+) -> dict[str, dict[str, dict[str, Any]]]:
     methods_by_owner: dict[str, dict[str, dict[str, Any]]] = {}
 
     def recurse(items: list[dict[str, Any]]) -> None:
@@ -1145,9 +1224,9 @@ def find_methods_by_owner(entries: list[dict[str, Any]]) -> dict[str, dict[str, 
 
 
 def annotate_method_overrides(
-        entries: list[dict[str, Any]],
-        class_hierarchy: dict[str, dict[str, Any]],
-        project_method_fqns: set[str],
+    entries: list[dict[str, Any]],
+    class_hierarchy: dict[str, dict[str, Any]],
+    project_method_fqns: set[str],
 ) -> dict[str, list[str]]:
     methods_by_owner = find_methods_by_owner(entries)
     contract_methods: dict[str, list[str]] = {}
@@ -1172,16 +1251,25 @@ def annotate_method_overrides(
                         base_method = methods_by_owner.get(base, {}).get(name)
                         if base_method is not None:
                             overrides.append(base_fqn)
-                            if hierarchy_info(base_method).get("is_contract_method", False):
+                            if hierarchy_info(base_method).get(
+                                "is_contract_method", False
+                            ):
                                 implements_contract = True
-                                contract_methods.setdefault(base_fqn, []).append(entry.get("_fqn", ""))
+                                contract_methods.setdefault(base_fqn, []).append(
+                                    entry.get("_fqn", "")
+                                )
                             continue
 
                         if base_fqn in project_method_fqns:
                             overrides.append(base_fqn)
-                            if base in (class_hierarchy.get(owner, {}).get("contract_bases", []) or []):
+                            if base in (
+                                class_hierarchy.get(owner, {}).get("contract_bases", [])
+                                or []
+                            ):
                                 implements_contract = True
-                                contract_methods.setdefault(base_fqn, []).append(entry.get("_fqn", ""))
+                                contract_methods.setdefault(base_fqn, []).append(
+                                    entry.get("_fqn", "")
+                                )
 
                     if overrides:
                         hinfo["overrides"] = overrides
@@ -1199,20 +1287,25 @@ def annotate_method_overrides(
 # ============================================================================
 
 
-def attach_children(entries_by_id: dict[str, dict[str, Any]], unit_entries: list[UnitIndexEntry]) -> list[
-    dict[str, Any]]:
+def attach_children(
+    entries_by_id: dict[str, dict[str, Any]], unit_entries: list[UnitIndexEntry]
+) -> list[dict[str, Any]]:
     roots: list[dict[str, Any]] = []
     for entry in sorted(unit_entries, key=lambda item: item.ordinal_within_parent):
         payload = entries_by_id[entry.id]
         payload.setdefault("children", [])
         if (
-                entry.parent_id
-                and entry.parent_id in entries_by_id
-                and entry.parent_id != entry.owner_id
-                and entry.parent_id != entry.id
+            entry.parent_id
+            and entry.parent_id in entries_by_id
+            and entry.parent_id != entry.owner_id
+            and entry.parent_id != entry.id
         ):
             pass
-        if entry.parent_id and entry.parent_id in entries_by_id and entry.parent_id != entry.id:
+        if (
+            entry.parent_id
+            and entry.parent_id in entries_by_id
+            and entry.parent_id != entry.id
+        ):
             entries_by_id[entry.parent_id].setdefault("children", []).append(payload)
         else:
             roots.append(payload)
@@ -1220,9 +1313,9 @@ def attach_children(entries_by_id: dict[str, dict[str, Any]], unit_entries: list
 
 
 def merge_stage2(
-        entries_by_id: dict[str, dict[str, Any]],
-        unit_entries: list[UnitIndexEntry],
-        stage2_lookup: dict[tuple[str, int, int], dict[str, Any]],
+    entries_by_id: dict[str, dict[str, Any]],
+    unit_entries: list[UnitIndexEntry],
+    stage2_lookup: dict[tuple[str, int, int], dict[str, Any]],
 ) -> None:
     for entry in unit_entries:
         payload = entries_by_id[entry.id]
@@ -1232,33 +1325,38 @@ def merge_stage2(
             continue
 
         ainfo = analysis_info(payload)
-        ainfo["branches"] = stage2_item.get("branches", [])
-        ainfo["total_eis"] = stage2_item.get("total_eis", len(stage2_item.get("branches", [])))
+        ainfo["execution_items"] = stage2_item.get("execution_items", [])
+        ainfo["total_eis"] = stage2_item.get(
+            "total_eis",
+            len(stage2_item.get("execution_items", [])),
+        )
+
+        control_flow = stage2_item.get("control_flow")
+        if control_flow:
+            ainfo["control_flow"] = control_flow
 
 
-def enrich_branch_constraints_with_local_operation_targets(
-        *,
-        branches_payload: list[dict[str, Any]],
-        analyzer: AstAnalyzer,
-        callable_fqn: str,
-        known_types: dict[str, TypeRef],
+def enrich_ei_constraints_with_local_operation_targets(
+    *,
+    execution_items_payload: list[dict[str, Any]],
+    analyzer: AstAnalyzer,
+    callable_fqn: str,
+    known_types: dict[str, TypeRef],
 ) -> None:
-    for branch in branches_payload:
-        constraint = branch.get("constraint") or {}
+    for ei in execution_items_payload:
+        constraint = ei.get("constraint") or {}
 
         if constraint.get("constraint_type") != "operation":
             continue
 
-        operation_target = str(
-            constraint.get("operation_target") or ""
-        ).strip()
+        operation_target = str(constraint.get("operation_target") or "").strip()
 
         if not operation_target:
             continue
 
         if not analyzer._is_local_operation_target(
-                target=operation_target,
-                callable_fqn=callable_fqn,
+            target=operation_target,
+            callable_fqn=callable_fqn,
         ):
             continue
 
@@ -1273,9 +1371,7 @@ def enrich_branch_constraints_with_local_operation_targets(
         constraint["resolution_kind"] = resolution.resolution_kind
 
         if resolution.resolved_receiver_type:
-            constraint["resolved_receiver_type"] = (
-                resolution.resolved_receiver_type
-            )
+            constraint["resolved_receiver_type"] = resolution.resolved_receiver_type
 
         if resolution.resolution_basis:
             constraint["resolution_basis"] = resolution.resolution_basis
@@ -1284,9 +1380,9 @@ def enrich_branch_constraints_with_local_operation_targets(
             constraint["candidate_targets"] = resolution.candidate_targets
 
 
-def enrich_branch_constraints_with_integration_targets(
-        branches_payload: list[dict[str, Any]],
-        integration_candidates: list[dict[str, Any]],
+def enrich_ei_constraints_with_integration_targets(
+    execution_items_payload: list[dict[str, Any]],
+    integration_candidates: list[dict[str, Any]],
 ) -> None:
     candidates_by_ei = {
         candidate.get("ei_id"): candidate
@@ -1294,13 +1390,13 @@ def enrich_branch_constraints_with_integration_targets(
         if candidate.get("ei_id")
     }
 
-    for branch in branches_payload:
-        branch_id = branch.get("id")
-        candidate = candidates_by_ei.get(branch_id)
+    for ei in execution_items_payload:
+        ei_id = ei.get("id")
+        candidate = candidates_by_ei.get(ei_id)
         if candidate is None:
             continue
 
-        constraint = branch.get("constraint")
+        constraint = ei.get("constraint")
         if not constraint:
             continue
 
@@ -1345,7 +1441,9 @@ def count_by_kind(entries: list[dict[str, Any]]) -> dict[str, int]:
     return counts
 
 
-def resolve_stage2_file(unit: UnitIndex, ei_file: Path | None, ei_root: Path | None) -> Path | None:
+def resolve_stage2_file(
+    unit: UnitIndex, ei_file: Path | None, ei_root: Path | None
+) -> Path | None:
     if ei_file is not None:
         return ei_file
     if ei_root is None:
@@ -1355,15 +1453,15 @@ def resolve_stage2_file(unit: UnitIndex, ei_file: Path | None, ei_root: Path | N
 
 
 def process_unit(
-        unit: UnitIndex,
-        project_symbol_fqns: set[str],
-        project_method_fqns: set[str],
-        project_contract_classes: set[str],
-        project_field_types_by_class: dict[str, dict[str, TypeRef]],
-        project_callable_inventory: dict[str, str],
-        project_collapsible_operation_fqns: set[str],
-        stage2_file: Path | None,
-        output_root: Path,
+    unit: UnitIndex,
+    project_symbol_fqns: set[str],
+    project_method_fqns: set[str],
+    project_contract_classes: set[str],
+    project_field_types_by_class: dict[str, dict[str, TypeRef]],
+    project_callable_inventory: dict[str, str],
+    project_collapsible_operation_fqns: set[str],
+    stage2_file: Path | None,
+    output_root: Path,
 ) -> dict[str, Any]:
     source_path = Path(unit.filepath)
     source = source_path.read_text(encoding="utf-8")
@@ -1402,7 +1500,9 @@ def process_unit(
 
     entries_by_id: dict[str, dict[str, Any]] = {}
     for entry in unit.entries:
-        node = ast_index.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+        node = ast_index.nodes_by_fqn_and_line.get(
+            (entry.fully_qualified_name, entry.lineno)
+        )
 
         if entry.kind in {"unit_function", "method", "nested_function"}:
             analyzer.current_callable_fqn = entry.fully_qualified_name
@@ -1429,19 +1529,25 @@ def process_unit(
 
         entries_by_id[entry.id] = payload
 
-    merge_stage2(entries_by_id, unit.entries, build_stage2_lookup(load_stage2_yaml(stage2_file)))
+    merge_stage2(
+        entries_by_id, unit.entries, build_stage2_lookup(load_stage2_yaml(stage2_file))
+    )
 
     for entry in unit.entries:
         payload = entries_by_id[entry.id]
         ainfo = analysis_info(payload)
-        branches_payload = ainfo.get("branches")
-        if not branches_payload:
+        execution_items_payload = ainfo.get("execution_items")
+        if not execution_items_payload:
             continue
 
-        branches = [Branch.from_dict(item) for item in branches_payload]
+        execution_items = [
+            ExecutionItem.from_dict(item) for item in execution_items_payload
+        ]
         known_types: dict[str, TypeRef] = payload.pop("_known_types", {}) or {}
 
-        node = ast_index.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+        node = ast_index.nodes_by_fqn_and_line.get(
+            (entry.fully_qualified_name, entry.lineno)
+        )
 
         analyzer.current_callable_fqn = entry.fully_qualified_name
 
@@ -1452,17 +1558,17 @@ def process_unit(
         merged_known_types: dict[str, TypeRef] = {
             **unit_binding_types,
             **known_types,
-            **local_types
+            **local_types,
         }
 
         analyzer.resolve_local_operation_calls(
-            branches=branches,
+            execution_items=execution_items,
             callable_fqn=entry.fully_qualified_name,
             known_types=merged_known_types,
         )
 
         integration_candidates = analyzer.find_integration_candidates(
-            branches=branches,
+            execution_items=execution_items,
             callable_id=payload["id"],
             callable_fqn=entry.fully_qualified_name,
             known_types=merged_known_types,
@@ -1470,13 +1576,13 @@ def process_unit(
 
         ainfo["integration_candidates"] = integration_candidates
 
-        enrich_branch_constraints_with_integration_targets(
-            branches_payload=ainfo["branches"],
+        enrich_ei_constraints_with_integration_targets(
+            execution_items_payload=ainfo["execution_items"],
             integration_candidates=integration_candidates,
         )
 
-        enrich_branch_constraints_with_local_operation_targets(
-            branches_payload=ainfo["branches"],
+        enrich_ei_constraints_with_local_operation_targets(
+            execution_items_payload=ainfo["execution_items"],
             analyzer=analyzer,
             callable_fqn=entry.fully_qualified_name,
             known_types=merged_known_types,
@@ -1527,7 +1633,9 @@ def process_unit(
         },
     }
 
-    output_path = output_root / (unit.fully_qualified_name.replace(".", "/") + ".inventory.yaml")
+    output_path = output_root / (
+        unit.fully_qualified_name.replace(".", "/") + ".inventory.yaml"
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
         yaml.dump(inventory, sort_keys=False, allow_unicode=True, width=float("inf")),
@@ -1545,7 +1653,9 @@ def process_unit(
 # ============================================================================
 
 
-def select_unit(project_index: ProjectIndex, file_arg: Path | None, fqn_arg: str | None) -> UnitIndex | None:
+def select_unit(
+    project_index: ProjectIndex, file_arg: Path | None, fqn_arg: str | None
+) -> UnitIndex | None:
     if file_arg is not None:
         resolved = file_arg.resolve()
         for unit in project_index.units:
@@ -1559,12 +1669,25 @@ def select_unit(project_index: ProjectIndex, file_arg: Path | None, fqn_arg: str
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Build stage 3 inventory from structured stage 1 and stage 2 outputs")
-    parser.add_argument("--unit-index", type=Path, required=True, help="Structured stage 1 project index JSON")
+    parser = argparse.ArgumentParser(
+        description="Build stage 3 inventory from structured stage 1 and stage 2 outputs"
+    )
+    parser.add_argument(
+        "--unit-index",
+        type=Path,
+        required=True,
+        help="Structured stage 1 project index JSON",
+    )
     parser.add_argument("--file", type=Path, help="Python source file for the unit")
-    parser.add_argument("--fqn", type=str, help="Fully qualified module name for the unit")
+    parser.add_argument(
+        "--fqn", type=str, help="Fully qualified module name for the unit"
+    )
     parser.add_argument("--ei-file", type=Path, help="Stage 2 EI YAML for this unit")
-    parser.add_argument("--ei-root", type=Path, help="Root directory containing per-unit stage 2 YAML files")
+    parser.add_argument(
+        "--ei-root",
+        type=Path,
+        help="Root directory containing per-unit stage 2 YAML files",
+    )
     parser.add_argument(
         "--output-root",
         type=Path,
@@ -1583,7 +1706,9 @@ def main() -> int:
     project_index = load_project_index(args.unit_index)
     project_contract_classes = collect_project_contract_classes(project_index)
     project_field_types_by_class = load_class_field_registry(args.unit_index)
-    project_collapsible_operation_fqns = collect_project_collapsible_operation_fqns(project_index)
+    project_collapsible_operation_fqns = collect_project_collapsible_operation_fqns(
+        project_index
+    )
     unit = select_unit(project_index, args.file, args.fqn)
     if unit is None:
         print("Error: could not resolve unit from --file/--fqn", file=sys.stderr)

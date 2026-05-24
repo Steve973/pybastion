@@ -186,23 +186,25 @@ class ReadinessReport:
 
 @dataclass(slots=True)
 class Config:
-    exclude_dirs: set[str] = field(default_factory=lambda: {
-        ".git",
-        ".hg",
-        ".svn",
-        ".tox",
-        ".nox",
-        ".venv",
-        "venv",
-        "env",
-        "__pycache__",
-        ".mypy_cache",
-        ".pytest_cache",
-        "dist",
-        "build",
-        "site-packages",
-        "node_modules",
-    })
+    exclude_dirs: set[str] = field(
+        default_factory=lambda: {
+            ".git",
+            ".hg",
+            ".svn",
+            ".tox",
+            ".nox",
+            ".venv",
+            "venv",
+            "env",
+            "__pycache__",
+            ".mypy_cache",
+            ".pytest_cache",
+            "dist",
+            "build",
+            "site-packages",
+            "node_modules",
+        }
+    )
     include_info: bool = True
     max_findings_per_type: int | None = None
 
@@ -307,7 +309,16 @@ def iterable_element_type(annotation: str | None) -> str | None:
     if not inner:
         return None
 
-    if root in {"list", "List", "Sequence", "Iterable", "Iterator", "Collection", "set", "Set"}:
+    if root in {
+        "list",
+        "List",
+        "Sequence",
+        "Iterable",
+        "Iterator",
+        "Collection",
+        "set",
+        "Set",
+    }:
         return inner
 
     if root in {"tuple", "Tuple"}:
@@ -382,9 +393,9 @@ def simple_name(expr: ast.AST | None) -> str | None:
 
 def self_attribute_name(expr: ast.AST | None) -> str | None:
     if (
-            isinstance(expr, ast.Attribute)
-            and isinstance(expr.value, ast.Name)
-            and expr.value.id == "self"
+        isinstance(expr, ast.Attribute)
+        and isinstance(expr.value, ast.Name)
+        and expr.value.id == "self"
     ):
         return expr.attr
     return None
@@ -397,19 +408,19 @@ def is_empty_container_expr(expr: ast.expr) -> bool:
         return len(expr.keys) == 0
     if isinstance(expr, ast.Call):
         return (
-                isinstance(expr.func, ast.Name)
-                and expr.func.id in {"list", "dict", "set", "tuple"}
-                and not expr.args
-                and not expr.keywords
+            isinstance(expr.func, ast.Name)
+            and expr.func.id in {"list", "dict", "set", "tuple"}
+            and not expr.args
+            and not expr.keywords
         )
     return False
 
 
 def is_internal_or_builtin_receiver(name: str) -> bool:
     return (
-            name in {"self", "cls", "super"}
-            or name in BUILTIN_RECEIVERS
-            or name.startswith("typing.")
+        name in {"self", "cls", "super"}
+        or name in BUILTIN_RECEIVERS
+        or name.startswith("typing.")
     )
 
 
@@ -434,7 +445,9 @@ def decorator_names(node: CallableNode) -> set[str]:
     return names
 
 
-def has_marker_comment(lines: list[str], node: ast.AST, marker_names: set[str], window: int = 4) -> bool:
+def has_marker_comment(
+    lines: list[str], node: ast.AST, marker_names: set[str], window: int = 4
+) -> bool:
     lineno = getattr(node, "lineno", 1)
     start = max(0, lineno - window - 1)
     end = max(0, lineno - 1)
@@ -496,8 +509,8 @@ def annotation_from_type_ref_dict(payload: Any) -> str | None:
 
 
 def field_annotations_from_registry(
-        field_registry: dict[str, dict[str, dict[str, object]]],
-        class_fqn: str,
+    field_registry: dict[str, dict[str, dict[str, object]]],
+    class_fqn: str,
 ) -> dict[str, str]:
     fields = field_registry.get(class_fqn, {}) or {}
     annotations: dict[str, str] = {}
@@ -527,19 +540,19 @@ def property_return_annotations_from_class(node: ast.ClassDef) -> dict[str, str]
 
 
 def type_for_iterable_expr(
-        expr: ast.AST,
-        *,
-        local_annotations: dict[str, str],
-        param_annotations: dict[str, str | None],
-        module_annotations: dict[str, str],
-        class_member_annotations: dict[str, str],
+    expr: ast.AST,
+    *,
+    local_annotations: dict[str, str],
+    param_annotations: dict[str, str | None],
+    module_annotations: dict[str, str],
+    class_member_annotations: dict[str, str],
 ) -> str | None:
     name = simple_name(expr)
     if name:
         return (
-                local_annotations.get(name)
-                or param_annotations.get(name)
-                or module_annotations.get(name)
+            local_annotations.get(name)
+            or param_annotations.get(name)
+            or module_annotations.get(name)
         )
 
     attr_name = self_attribute_name(expr)
@@ -579,12 +592,12 @@ def type_for_iterable_expr(
 
 
 def iteration_value_type_for_expr(
-        expr: ast.AST,
-        *,
-        local_annotations: dict[str, str],
-        param_annotations: dict[str, str | None],
-        module_annotations: dict[str, str],
-        class_member_annotations: dict[str, str],
+    expr: ast.AST,
+    *,
+    local_annotations: dict[str, str],
+    param_annotations: dict[str, str | None],
+    module_annotations: dict[str, str],
+    class_member_annotations: dict[str, str],
 ) -> str | None:
     iterable_type = type_for_iterable_expr(
         expr,
@@ -606,9 +619,9 @@ def iteration_value_type_for_expr(
 
 
 def bind_target_type(
-        target: ast.AST,
-        value_type: str | None,
-        inferred_receiver_types: dict[str, str],
+    target: ast.AST,
+    value_type: str | None,
+    inferred_receiver_types: dict[str, str],
 ) -> None:
     if not value_type:
         return
@@ -631,16 +644,18 @@ def bind_target_type(
 
 
 def bind_comprehension_target_types(
-        node: CallableNode,
-        *,
-        local_annotations: dict[str, str],
-        param_annotations: dict[str, str | None],
-        module_annotations: dict[str, str],
-        class_member_annotations: dict[str, str],
-        inferred_receiver_types: dict[str, str],
+    node: CallableNode,
+    *,
+    local_annotations: dict[str, str],
+    param_annotations: dict[str, str | None],
+    module_annotations: dict[str, str],
+    class_member_annotations: dict[str, str],
+    inferred_receiver_types: dict[str, str],
 ) -> None:
     for child in ast.walk(node):
-        if not isinstance(child, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)):
+        if not isinstance(
+            child, (ast.ListComp, ast.SetComp, ast.GeneratorExp, ast.DictComp)
+        ):
             continue
 
         for generator in child.generators:
@@ -655,12 +670,12 @@ def bind_comprehension_target_types(
 
 
 def collect_context(
-        node: CallableNode,
-        class_name: str | None,
-        imported_names: set[str],
-        module_annotations: dict[str, str],
-        class_member_annotations: dict[str, str],
-        known_receiver_names: set[str],
+    node: CallableNode,
+    class_name: str | None,
+    imported_names: set[str],
+    module_annotations: dict[str, str],
+    class_member_annotations: dict[str, str],
+    known_receiver_names: set[str],
 ) -> FunctionContext:
     param_annotations: dict[str, str | None] = {}
     args = [*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs]
@@ -757,9 +772,21 @@ class SourceReadinessScanner:
         self.project_fqns: set[str] = set()
 
     def scan(self, grouping: str) -> ReadinessReport:
-        python_files = list(iter_python_files(self.source_root, self.config.exclude_dirs))
-        self.project_fqns = {derive_fqn(path, self.source_root) for path in python_files}
-        parsed_modules: list[tuple[Path, ast.Module, list[str], Any, dict[str, dict[str, dict[str, object]]]]] = []
+        python_files = list(
+            iter_python_files(self.source_root, self.config.exclude_dirs)
+        )
+        self.project_fqns = {
+            derive_fqn(path, self.source_root) for path in python_files
+        }
+        parsed_modules: list[
+            tuple[
+                Path,
+                ast.Module,
+                list[str],
+                Any,
+                dict[str, dict[str, dict[str, object]]],
+            ]
+        ] = []
 
         for path in python_files:
             try:
@@ -806,7 +833,9 @@ class SourceReadinessScanner:
                 continue
 
             unit_index, field_registry = stage1_result
-            parsed_modules.append((path, tree, source.splitlines(), unit_index, field_registry))
+            parsed_modules.append(
+                (path, tree, source.splitlines(), unit_index, field_registry)
+            )
             self.index_function_definitions(tree)
 
         for path, tree, lines, unit_index, field_registry in parsed_modules:
@@ -822,7 +851,11 @@ class SourceReadinessScanner:
 
         return ReadinessReport(
             source_root=str(self.source_root),
-            files_scanned=len(list(self.source_root.rglob("*"))) if self.source_root.exists() else 0,
+            files_scanned=(
+                len(list(self.source_root.rglob("*")))
+                if self.source_root.exists()
+                else 0
+            ),
             python_files_scanned=len(python_files),
             finding_count=len(findings),
             severity_counts=severity_counts,
@@ -834,15 +867,17 @@ class SourceReadinessScanner:
     def index_function_definitions(self, tree: ast.Module) -> None:
         for node in ast.walk(tree):
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                self.function_return_annotations[node.name] = annotation_to_string(node.returns)
+                self.function_return_annotations[node.name] = annotation_to_string(
+                    node.returns
+                )
 
     def scan_module(
-            self,
-            path: Path,
-            tree: ast.Module,
-            lines: list[str],
-            unit_index: Any,
-            field_registry: dict[str, dict[str, dict[str, object]]],
+        self,
+        path: Path,
+        tree: ast.Module,
+        lines: list[str],
+        unit_index: Any,
+        field_registry: dict[str, dict[str, dict[str, object]]],
     ) -> None:
         module_fqn = derive_fqn(path, self.source_root)
         module_annotations = module_annotations_from_unit_index(unit_index)
@@ -907,7 +942,9 @@ class SourceReadinessScanner:
                     ),
                 )
 
-    def find_parent_class_name(self, tree: ast.Module, target: CallableNode) -> str | None:
+    def find_parent_class_name(
+        self, tree: ast.Module, target: CallableNode
+    ) -> str | None:
         for node in ast.walk(tree):
             if isinstance(node, ast.ClassDef) and target in node.body:
                 return node.name
@@ -971,16 +1008,19 @@ class SourceReadinessScanner:
         for receiver, iter_expr in ctx.loop_sources.items():
             if receiver not in ctx.calls_by_receiver:
                 continue
-            if receiver in ctx.local_annotations or receiver in ctx.inferred_receiver_types:
+            if (
+                receiver in ctx.local_annotations
+                or receiver in ctx.inferred_receiver_types
+            ):
                 continue
 
             iterable_name = simple_name(iter_expr)
             iterable_annotation = None
             if iterable_name:
                 iterable_annotation = (
-                        ctx.local_annotations.get(iterable_name)
-                        or ctx.param_annotations.get(iterable_name)
-                        or ctx.module_annotations.get(iterable_name)
+                    ctx.local_annotations.get(iterable_name)
+                    or ctx.param_annotations.get(iterable_name)
+                    or ctx.module_annotations.get(iterable_name)
                 )
 
             if iterable_element_type(iterable_annotation):
@@ -1014,7 +1054,10 @@ class SourceReadinessScanner:
             if name in ctx.local_annotations:
                 continue
             for loop_var, iter_expr in ctx.loop_sources.items():
-                if simple_name(iter_expr) != name or loop_var not in ctx.calls_by_receiver:
+                if (
+                    simple_name(iter_expr) != name
+                    or loop_var not in ctx.calls_by_receiver
+                ):
                     continue
                 if loop_var in ctx.inferred_receiver_types:
                     continue
@@ -1037,7 +1080,10 @@ class SourceReadinessScanner:
         for receiver, assigned_expr in ctx.local_assignments.items():
             if receiver not in ctx.calls_by_receiver:
                 continue
-            if receiver in ctx.local_annotations or receiver in ctx.inferred_receiver_types:
+            if (
+                receiver in ctx.local_annotations
+                or receiver in ctx.inferred_receiver_types
+            ):
                 continue
             if not isinstance(assigned_expr, ast.Call):
                 continue
@@ -1068,10 +1114,10 @@ class SourceReadinessScanner:
     def check_any_receivers(self, path: Path, ctx: FunctionContext) -> None:
         for receiver, calls in ctx.calls_by_receiver.items():
             annotation = (
-                    ctx.local_annotations.get(receiver)
-                    or ctx.param_annotations.get(receiver)
-                    or ctx.module_annotations.get(receiver)
-                    or ctx.inferred_receiver_types.get(receiver)
+                ctx.local_annotations.get(receiver)
+                or ctx.param_annotations.get(receiver)
+                or ctx.module_annotations.get(receiver)
+                or ctx.inferred_receiver_types.get(receiver)
             )
             if not is_any_annotation(annotation):
                 continue
@@ -1124,8 +1170,8 @@ class SourceReadinessScanner:
 
     @staticmethod
     def call_result_is_invoked(
-            call: ast.Call,
-            parent_map: dict[ast.AST, ast.AST],
+        call: ast.Call,
+        parent_map: dict[ast.AST, ast.AST],
     ) -> bool:
         parent = parent_map.get(call)
         return isinstance(parent, ast.Call) and parent.func is call
@@ -1143,7 +1189,10 @@ class SourceReadinessScanner:
             elif isinstance(child.func, ast.Attribute):
                 func_name = child.func.attr
 
-            if func_name == "getattr" and not SourceReadinessScanner.call_result_is_invoked(child, parent_map):
+            if (
+                func_name == "getattr"
+                and not SourceReadinessScanner.call_result_is_invoked(child, parent_map)
+            ):
                 continue
 
             if func_name in {"hasattr", "setattr"}:
@@ -1163,11 +1212,15 @@ class SourceReadinessScanner:
                     confidence="high",
                 )
 
-    def check_marker_opportunities(self, path: Path, lines: list[str], ctx: FunctionContext) -> None:
+    def check_marker_opportunities(
+        self, path: Path, lines: list[str], ctx: FunctionContext
+    ) -> None:
         names = decorator_names(ctx.node)
         if names & {"MechanicalOperation", "UtilityOperation"}:
             return
-        if has_marker_comment(lines, ctx.node, {"MechanicalOperation", "UtilityOperation"}):
+        if has_marker_comment(
+            lines, ctx.node, {"MechanicalOperation", "UtilityOperation"}
+        ):
             return
 
         lname = ctx.node.name.lower()
@@ -1208,18 +1261,20 @@ class SourceReadinessScanner:
             if opaque_call is None:
                 continue
             self.add_finding(
-                finding_type="opaque_branch_condition_for_path_modeling",
+                finding_type="opaque_ei_condition_for_path_modeling",
                 severity="info",
                 file=path,
                 line=child.lineno,
                 callable_name=ctx.qualified_name,
                 observed=safe_unparse(child.test),
-                message="Branch condition contains a call that may require controllable fixture or target behavior to exercise.",
-                suggestion="No source change is required. If this branch matters for integration tests, make the receiver type explicit and keep the behavior controllable.",
+                message="EI condition contains a call that may require controllable fixture or target behavior to exercise.",
+                suggestion="No source change is required. If this EI matters for integration tests, make the receiver type explicit and keep the behavior controllable.",
                 confidence="low",
             )
 
-    def opaque_condition_call(self, expr: ast.expr, ctx: FunctionContext) -> ast.Call | None:
+    def opaque_condition_call(
+        self, expr: ast.expr, ctx: FunctionContext
+    ) -> ast.Call | None:
         for node in ast.walk(expr):
             if not isinstance(node, ast.Call):
                 continue
@@ -1258,19 +1313,19 @@ class SourceReadinessScanner:
         return False
 
     def add_finding(
-            self,
-            *,
-            finding_type: str,
-            severity: Severity,
-            file: Path,
-            line: int,
-            message: str,
-            suggestion: str | None = None,
-            example: str | None = None,
-            callable_name: str | None = None,
-            symbol: str | None = None,
-            observed: str | None = None,
-            confidence: str = "medium",
+        self,
+        *,
+        finding_type: str,
+        severity: Severity,
+        file: Path,
+        line: int,
+        message: str,
+        suggestion: str | None = None,
+        example: str | None = None,
+        callable_name: str | None = None,
+        symbol: str | None = None,
+        observed: str | None = None,
+        confidence: str = "medium",
     ) -> None:
         if severity == "info" and not self.config.include_info:
             return
@@ -1300,11 +1355,15 @@ class SourceReadinessScanner:
         findings = dedupe_findings(findings)
         limit = self.config.max_findings_per_type
         if not limit:
-            return sorted(findings, key=lambda item: (item.file, item.line, item.finding_type))
+            return sorted(
+                findings, key=lambda item: (item.file, item.line, item.finding_type)
+            )
 
         counts: dict[str, int] = {}
         limited: list[Finding] = []
-        for finding in sorted(findings, key=lambda item: (item.file, item.line, item.finding_type)):
+        for finding in sorted(
+            findings, key=lambda item: (item.file, item.line, item.finding_type)
+        ):
             current = counts.get(finding.finding_type, 0)
             if current >= limit:
                 continue
@@ -1332,7 +1391,9 @@ def dedupe_findings(findings: list[Finding]) -> list[Finding]:
     return result
 
 
-def count_by(findings: list[Finding], key_fn, fixed_keys: tuple[str, ...] = ()) -> dict[str, int]:
+def count_by(
+    findings: list[Finding], key_fn, fixed_keys: tuple[str, ...] = ()
+) -> dict[str, int]:
     counts: dict[str, int] = {key: 0 for key in fixed_keys}
     for finding in findings:
         key = str(key_fn(finding))
@@ -1391,7 +1452,9 @@ def validate_grouping(value: str) -> str:
     allowed = {"m", "s", "t"}
     codes = list(value)
     if len(codes) != 3 or set(codes) != allowed:
-        raise ValueError("--grouping must contain each of m, s, and t exactly once, such as smt or mst.")
+        raise ValueError(
+            "--grouping must contain each of m, s, and t exactly once, such as smt or mst."
+        )
     return value
 
 
@@ -1411,11 +1474,17 @@ def grouped_findings_as_dict(findings: list[Finding], grouping: str) -> dict[str
     return sort_grouped_findings(root, grouping, 0)
 
 
-def sort_grouped_findings(node: dict[str, Any], grouping: str, depth: int) -> dict[str, Any]:
+def sort_grouped_findings(
+    node: dict[str, Any], grouping: str, depth: int
+) -> dict[str, Any]:
     if "_findings" in node:
         findings = sorted(
             node["_findings"],
-            key=lambda item: (str(item.get("file", "")), int(item.get("line", 0)), str(item.get("type", ""))),
+            key=lambda item: (
+                str(item.get("file", "")),
+                int(item.get("line", 0)),
+                str(item.get("type", "")),
+            ),
         )
         return {"findings": findings}
 
@@ -1498,7 +1567,9 @@ def write_report(report: ReadinessReport, output: Path, fmt: str) -> None:
     if fmt == "json":
         text = json.dumps(report_to_dict(report), indent=2, sort_keys=False)
     elif fmt in {"yaml", "yml"}:
-        text = yaml.safe_dump(report_to_dict(report), sort_keys=False, allow_unicode=True, width=120)
+        text = yaml.safe_dump(
+            report_to_dict(report), sort_keys=False, allow_unicode=True, width=120
+        )
     elif fmt in {"markdown", "md"}:
         text = render_markdown(report)
     else:
@@ -1527,8 +1598,8 @@ def print_console_summary(report: ReadinessReport, output_path: Path) -> None:
         print()
         print("Top finding categories:")
         for finding_type, count in sorted(
-                report.finding_type_counts.items(),
-                key=lambda item: (-item[1], item[0]),
+            report.finding_type_counts.items(),
+            key=lambda item: (-item[1], item[0]),
         )[:10]:
             print(f"  {finding_type:52} {count}")
 
@@ -1538,9 +1609,9 @@ def print_console_summary(report: ReadinessReport, output_path: Path) -> None:
 
 
 def resolve_output_path(
-        output_arg: Path | None,
-        project_root: Path,
-        output_format: str,
+    output_arg: Path | None,
+    project_root: Path,
+    output_format: str,
 ) -> tuple[Path, str]:
     match output_format:
         case "json":
@@ -1557,9 +1628,7 @@ def resolve_output_path(
         output_filename = default_filename
     else:
         resolved = (
-            output_arg
-            if output_arg.is_absolute()
-            else project_root / output_arg
+            output_arg if output_arg.is_absolute() else project_root / output_arg
         ).resolve()
 
         if resolved.exists() and resolved.is_dir():

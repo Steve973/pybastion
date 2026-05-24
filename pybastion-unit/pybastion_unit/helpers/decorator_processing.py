@@ -19,240 +19,233 @@ from typing import Any
 # =============================================================================
 
 COMMON_FIELDS: dict[str, dict[str, Any]] = {
-    'name': {
-        'required': True,
-        'strict': False,
-        'value_cardinality': '1..1',
+    "name": {
+        "required": True,
+        "strict": False,
+        "value_cardinality": "1..1",
     },
-    'comment': {
-        'required': False,
-        'strict': False,
-        'value_cardinality': '1..1',
+    "comment": {
+        "required": False,
+        "strict": False,
+        "value_cardinality": "1..1",
     },
 }
 
 ANALYSIS_DECORATORS: dict[str, Any] = {
-    'Operation': {
-        'MechanicalOperation': {
-            'effect': 'exclude_from_flow',
-            'analysis_scope': 'immediate',
-            'target_scope': 'callable',
-            'common_fields': ['comment'],
-            'fields': {
-                'type': {
-                    'required': True,
-                    'strict': True,
-                    'value_cardinality': '1..1',
-                    'values': [
-                        'serialization',
-                        'deserialization',
-                        'validation',
-                        'formatting',
-                        'conversion',
-                        'normalization',
-                        'data_transform',
-                        'presentation',
-                        'construction',
+    "Operation": {
+        "MechanicalOperation": {
+            "effect": "exclude_from_flow",
+            "analysis_scope": "immediate",
+            "target_scope": "callable",
+            "common_fields": ["comment"],
+            "fields": {
+                "type": {
+                    "required": True,
+                    "strict": True,
+                    "value_cardinality": "1..1",
+                    "values": [
+                        "serialization",
+                        "deserialization",
+                        "validation",
+                        "formatting",
+                        "conversion",
+                        "normalization",
+                        "data_transform",
+                        "presentation",
+                        "construction",
                     ],
                 },
-                'alias': {
-                    'required': False,
-                    'strict': False,
-                    'value_cardinality': '1..1',
+                "alias": {
+                    "required": False,
+                    "strict": False,
+                    "value_cardinality": "1..1",
                 },
             },
         },
-        'UtilityOperation': {
-            'effect': 'exclude_from_flow',
-            'analysis_scope': 'immediate',
-            'target_scope': 'callable',
-            'common_fields': ['comment'],
-            'fields': {
-                'type': {
-                    'required': True,
-                    'strict': True,
-                    'value_cardinality': '1..1',
-                    'values': [
-                        'logging',
-                        'caching',
-                        'config',
-                        'observability',
-                        'audit',
-                        'data_structure',
-                        'registry',
+        "UtilityOperation": {
+            "effect": "exclude_from_flow",
+            "analysis_scope": "immediate",
+            "target_scope": "callable",
+            "common_fields": ["comment"],
+            "fields": {
+                "type": {
+                    "required": True,
+                    "strict": True,
+                    "value_cardinality": "1..1",
+                    "values": [
+                        "logging",
+                        "caching",
+                        "config",
+                        "observability",
+                        "audit",
+                        "data_structure",
+                        "registry",
                     ],
                 },
-                'alias': {
-                    'required': False,
-                    'strict': False,
-                    'value_cardinality': '1..1',
+                "alias": {
+                    "required": False,
+                    "strict": False,
+                    "value_cardinality": "1..1",
                 },
             },
         },
     },
-
-    'Reachability': {
-        'ExternalApiMethod': {
-            'effect': 'mark_external_entrypoint',
-            'analysis_scope': 'codebase',
-            'target_scope': 'callable',
-            'common_fields': ['comment'],
-            'fields': {},
+    "Reachability": {
+        "ExternalApiMethod": {
+            "effect": "mark_external_entrypoint",
+            "analysis_scope": "codebase",
+            "target_scope": "callable",
+            "common_fields": ["comment"],
+            "fields": {},
         },
-        'FrameworkCallback': {
-            'effect': 'mark_framework_callback',
-            'analysis_scope': 'codebase',
-            'target_scope': 'callable',
-            'common_fields': ['comment'],
-            'fields': {
-                'hook': {
-                    'required': False,
-                    'strict': False,
-                    'value_cardinality': '1..1',
+        "FrameworkCallback": {
+            "effect": "mark_framework_callback",
+            "analysis_scope": "codebase",
+            "target_scope": "callable",
+            "common_fields": ["comment"],
+            "fields": {
+                "hook": {
+                    "required": False,
+                    "strict": False,
+                    "value_cardinality": "1..1",
                 },
             },
         },
-        'CalledThroughAbstraction': {
-            'effect': 'mark_abstraction_reachable',
-            'analysis_scope': 'codebase',
-            'target_scope': 'callable',
-            'common_fields': ['comment'],
-            'fields': {},
+        "CalledThroughAbstraction": {
+            "effect": "mark_abstraction_reachable",
+            "analysis_scope": "codebase",
+            "target_scope": "callable",
+            "common_fields": ["comment"],
+            "fields": {},
         },
     },
-
-    'Feature': {
-        'FeatureStart': {
-            'effect': 'mark_flow_start',
-            'analysis_scope': 'codebase',
-            'target_scope': 'statement',
-            'common_fields': ['name', 'comment'],
-            'fields': {
-                'variants': {
-                    'required': False,
-                    'strict': False,
-                    'value_cardinality': '1..N',
+    "Feature": {
+        "FeatureStart": {
+            "effect": "mark_flow_start",
+            "analysis_scope": "codebase",
+            "target_scope": "statement",
+            "common_fields": ["name", "comment"],
+            "fields": {
+                "variants": {
+                    "required": False,
+                    "strict": False,
+                    "value_cardinality": "1..N",
                 },
             },
-            'co_occurrence': {
-                'required': {
-                    'one_of': {
-                        'FeatureEnd': {
-                            'correlation': {'field': 'name', 'operator': 'eq'},
-                            'repeatable': True,
+            "co_occurrence": {
+                "required": {
+                    "one_of": {
+                        "FeatureEnd": {
+                            "correlation": {"field": "name", "operator": "eq"},
+                            "repeatable": True,
                         },
-                        'FeatureEndConditional': {
-                            'correlation': {'field': 'name', 'operator': 'eq'},
-                            'repeatable': True,
+                        "FeatureEndConditional": {
+                            "correlation": {"field": "name", "operator": "eq"},
+                            "repeatable": True,
                         },
                     },
                 },
-                'optional': {
-                    'FeatureTrace': {
-                        'correlation': {'field': 'name', 'operator': 'eq'},
-                        'repeatable': True,
+                "optional": {
+                    "FeatureTrace": {
+                        "correlation": {"field": "name", "operator": "eq"},
+                        "repeatable": True,
                     },
-                    'FeatureBranch': {
-                        'correlation': {'field': 'name', 'operator': 'eq'},
-                        'repeatable': True,
+                    "FeatureBranch": {
+                        "correlation": {"field": "name", "operator": "eq"},
+                        "repeatable": True,
                     },
-                    'FeatureConverge': {
-                        'correlation': {'field': 'name', 'operator': 'eq'},
-                        'repeatable': True,
+                    "FeatureConverge": {
+                        "correlation": {"field": "name", "operator": "eq"},
+                        "repeatable": True,
                     },
-                    'FeatureEndConditional': {
-                        'correlation': {'field': 'name', 'operator': 'eq'},
-                        'repeatable': True,
+                    "FeatureEndConditional": {
+                        "correlation": {"field": "name", "operator": "eq"},
+                        "repeatable": True,
                     },
                 },
             },
         },
-
-        'FeatureTrace': {
-            'effect': 'mark_flow_waypoint',
-            'analysis_scope': 'codebase',
-            'target_scope': 'statement',
-            'common_fields': ['name', 'comment'],
-            'fields': {
-                'branch': {
-                    'required': False,
-                    'strict': False,
-                    'value_cardinality': '1..1',
+        "FeatureTrace": {
+            "effect": "mark_flow_waypoint",
+            "analysis_scope": "codebase",
+            "target_scope": "statement",
+            "common_fields": ["name", "comment"],
+            "fields": {
+                "branch": {
+                    "required": False,
+                    "strict": False,
+                    "value_cardinality": "1..1",
                 },
             },
         },
-
-        'FeatureBranch': {
-            'effect': 'mark_flow_branch',
-            'analysis_scope': 'codebase',
-            'target_scope': 'statement',
-            'common_fields': ['name', 'comment'],
-            'fields': {
-                'branch': {
-                    'required': False,
-                    'strict': False,
-                    'value_cardinality': '1..1',
+        "FeatureBranch": {
+            "effect": "mark_flow_branch",
+            "analysis_scope": "codebase",
+            "target_scope": "statement",
+            "common_fields": ["name", "comment"],
+            "fields": {
+                "branch": {
+                    "required": False,
+                    "strict": False,
+                    "value_cardinality": "1..1",
                 },
-                'control_polarity': {
-                    'required': False,
-                    'strict': True,
-                    'value_cardinality': '1..1',
-                    'values': ['true', 'false'],
+                "control_polarity": {
+                    "required": False,
+                    "strict": True,
+                    "value_cardinality": "1..1",
+                    "values": ["true", "false"],
                 },
             },
-            'required_one_of': [
-                ['branch', 'branches'],
+            "required_one_of": [
+                ["branch", "branches"],
             ],
         },
-
-        'FeatureConverge': {
-            'effect': 'mark_flow_convergence',
-            'analysis_scope': 'codebase',
-            'target_scope': 'statement',
-            'common_fields': ['name', 'comment'],
-            'fields': {
-                'branches': {
-                    'required': True,
-                    'strict': False,
-                    'value_cardinality': '1..N',
+        "FeatureConverge": {
+            "effect": "mark_flow_convergence",
+            "analysis_scope": "codebase",
+            "target_scope": "statement",
+            "common_fields": ["name", "comment"],
+            "fields": {
+                "branches": {
+                    "required": True,
+                    "strict": False,
+                    "value_cardinality": "1..N",
                 },
-                'into': {
-                    'required': False,
-                    'strict': False,
-                    'value_cardinality': '1..1',
-                },
-            },
-        },
-
-        'FeatureEndConditional': {
-            'effect': 'mark_flow_conditional_end',
-            'analysis_scope': 'codebase',
-            'target_scope': 'statement',
-            'common_fields': ['name', 'comment'],
-            'fields': {
-                'branch': {
-                    'required': False,
-                    'strict': False,
-                    'value_cardinality': '1..1',
-                },
-                'on_condition': {
-                    'required': True,
-                    'strict': False,
-                    'value_cardinality': '1..1',
+                "into": {
+                    "required": False,
+                    "strict": False,
+                    "value_cardinality": "1..1",
                 },
             },
         },
-
-        'FeatureEnd': {
-            'effect': 'mark_flow_end',
-            'analysis_scope': 'codebase',
-            'target_scope': 'statement',
-            'common_fields': ['name', 'comment'],
-            'fields': {
-                'branch': {
-                    'required': False,
-                    'strict': False,
-                    'value_cardinality': '1..1',
+        "FeatureEndConditional": {
+            "effect": "mark_flow_conditional_end",
+            "analysis_scope": "codebase",
+            "target_scope": "statement",
+            "common_fields": ["name", "comment"],
+            "fields": {
+                "branch": {
+                    "required": False,
+                    "strict": False,
+                    "value_cardinality": "1..1",
+                },
+                "on_condition": {
+                    "required": True,
+                    "strict": False,
+                    "value_cardinality": "1..1",
+                },
+            },
+        },
+        "FeatureEnd": {
+            "effect": "mark_flow_end",
+            "analysis_scope": "codebase",
+            "target_scope": "statement",
+            "common_fields": ["name", "comment"],
+            "fields": {
+                "branch": {
+                    "required": False,
+                    "strict": False,
+                    "value_cardinality": "1..1",
                 },
             },
         },
@@ -263,6 +256,7 @@ ANALYSIS_DECORATORS: dict[str, Any] = {
 # =============================================================================
 # Schema Resolution
 # =============================================================================
+
 
 def get_decorator_schema(decorator_name: str) -> dict[str, Any] | None:
     """
@@ -287,18 +281,18 @@ def get_decorator_effect(decorator_name: str) -> str | None:
     """
     schema = get_decorator_schema(decorator_name)
     if schema:
-        return schema.get('effect')
+        return schema.get("effect")
     return None
 
 
 def get_decorator_analysis_scope(decorator_name: str) -> str | None:
     schema = get_decorator_schema(decorator_name)
-    return schema.get('analysis_scope') if schema else None
+    return schema.get("analysis_scope") if schema else None
 
 
 def get_decorator_target_scope(decorator_name: str) -> str | None:
     schema = get_decorator_schema(decorator_name)
-    return schema.get('target_scope') if schema else None
+    return schema.get("target_scope") if schema else None
 
 
 def is_known_decorator(decorator_name: str) -> bool:
@@ -310,15 +304,15 @@ def _resolve_common_fields(schema: dict[str, Any]) -> dict[str, Any]:
     """
     Return a copy of the schema with common_fields merged into fields.
     """
-    resolved = {k: v for k, v in schema.items() if k != 'common_fields'}
-    common_keys = schema.get('common_fields', [])
+    resolved = {k: v for k, v in schema.items() if k != "common_fields"}
+    common_keys = schema.get("common_fields", [])
     if common_keys:
         merged_fields = {}
         for key in common_keys:
             if key in COMMON_FIELDS:
                 merged_fields[key] = COMMON_FIELDS[key]
-        merged_fields.update(schema.get('fields', {}))
-        resolved['fields'] = merged_fields
+        merged_fields.update(schema.get("fields", {}))
+        resolved["fields"] = merged_fields
     return resolved
 
 
@@ -326,9 +320,10 @@ def _resolve_common_fields(schema: dict[str, Any]) -> dict[str, Any]:
 # Parsing
 # =============================================================================
 
+
 def extract_statement_decorators(
-        stmt: ast.stmt,
-        source_lines: list[str],
+    stmt: ast.stmt,
+    source_lines: list[str],
 ) -> list[dict[str, Any]]:
     """
     Extract analysis decorators from comments preceding a statement.
@@ -342,11 +337,11 @@ def extract_statement_decorators(
         # Scan upward from the line before the statement
         for line_idx in range(stmt.lineno - 2, -1, -1):
             line = source_lines[line_idx].strip()
-            if line.startswith('# :: '):
+            if line.startswith("# :: "):
                 decorator = parse_decorator_comment(line)
                 if decorator:
                     decorators.append(decorator)
-            elif line.startswith('#'):
+            elif line.startswith("#"):
                 continue  # Regular comment, keep scanning
             elif not line:
                 break  # Blank line, stop
@@ -357,8 +352,8 @@ def extract_statement_decorators(
 
 
 def extract_callable_decorators(
-        node: ast.FunctionDef | ast.AsyncFunctionDef,
-        source_lines: list[str],
+    node: ast.FunctionDef | ast.AsyncFunctionDef,
+    source_lines: list[str],
 ) -> list[dict[str, Any]]:
     """
     Extract all analysis decorators from comments preceding a function node,
@@ -372,11 +367,11 @@ def extract_callable_decorators(
     if node.lineno > 1:
         for line_idx in range(node.lineno - 2, -1, -1):
             line = source_lines[line_idx].strip()
-            if line.startswith('# :: '):
+            if line.startswith("# :: "):
                 decorator = parse_decorator_comment(line)
                 if decorator:
                     decorators.append(decorator)
-            elif line.startswith('@'):
+            elif line.startswith("@"):
                 continue  # skip Python decorators, keep scanning
             else:
                 break  # blank line or code — stop
@@ -394,9 +389,9 @@ def extract_callable_decorators(
 
     # Check docstring
     docstring = expr_value.value
-    for line in docstring.split('\n'):
+    for line in docstring.split("\n"):
         line = line.strip()
-        if line.startswith(':: '):
+        if line.startswith(":: "):
             decorator = parse_decorator_comment(line)
             if decorator:
                 decorators.append(decorator)
@@ -413,18 +408,18 @@ def parse_decorator_comment(line: str) -> dict[str, Any] | None:
 
     Returns dict with 'name' and 'kwargs', or None if line is not a decorator.
     """
-    if '::' not in line:
+    if "::" not in line:
         return None
 
     # Strip comment marker
-    line = line.lstrip('#').strip()
-    if not line.startswith('::'):
+    line = line.lstrip("#").strip()
+    if not line.startswith("::"):
         return None
 
     # Strip :: marker
     line = line[2:].strip()
 
-    parts = [p.strip() for p in line.split('|')]
+    parts = [p.strip() for p in line.split("|")]
     if not parts:
         return None
 
@@ -434,13 +429,13 @@ def parse_decorator_comment(line: str) -> dict[str, Any] | None:
 
     kwargs: dict[str, str] = {}
     for part in parts[1:]:
-        if '=' in part:
-            key, value = part.split('=', 1)
+        if "=" in part:
+            key, value = part.split("=", 1)
             kwargs[key.strip()] = value.strip().strip('"').strip("'")
 
     return {
-        'name': decorator_name,
-        'kwargs': kwargs,
+        "name": decorator_name,
+        "kwargs": kwargs,
     }
 
 
@@ -448,10 +443,13 @@ def parse_decorator_comment(line: str) -> dict[str, Any] | None:
 # Field Validation
 # =============================================================================
 
+
 class DecoratorValidationError:
     """A single validation error on a decorator instance."""
 
-    def __init__(self, decorator_name: str, message: str, field: str | None = None) -> None:
+    def __init__(
+        self, decorator_name: str, message: str, field: str | None = None
+    ) -> None:
         self.decorator_name = decorator_name
         self.field = field
         self.message = message
@@ -476,25 +474,33 @@ def validate_decorator(decorator: dict[str, Any]) -> list[DecoratorValidationErr
     Returns a list of validation errors (empty if valid).
     """
     errors: list[DecoratorValidationError] = []
-    name = decorator.get('name', '')
-    kwargs = decorator.get('kwargs', {})
+    name = decorator.get("name", "")
+    kwargs = decorator.get("kwargs", {})
 
     schema = get_decorator_schema(name)
     if schema is None:
-        errors.append(DecoratorValidationError(name, 'Unknown decorator name'))
+        errors.append(DecoratorValidationError(name, "Unknown decorator name"))
         return errors
 
-    fields = schema.get('fields', {})
+    fields = schema.get("fields", {})
 
     # Check required fields
     for field_name, field_spec in fields.items():
-        if field_spec.get('required', False) and field_name not in kwargs:
-            errors.append(DecoratorValidationError(name, f"Required field '{field_name}' is missing", field_name))
+        if field_spec.get("required", False) and field_name not in kwargs:
+            errors.append(
+                DecoratorValidationError(
+                    name, f"Required field '{field_name}' is missing", field_name
+                )
+            )
 
     # Check for unknown fields
     for field_name in kwargs:
         if field_name not in fields:
-            errors.append(DecoratorValidationError(name, f"Unknown field '{field_name}'", field_name))
+            errors.append(
+                DecoratorValidationError(
+                    name, f"Unknown field '{field_name}'", field_name
+                )
+            )
 
     # Check strict fields and value cardinality
     for field_name, value in kwargs.items():
@@ -504,29 +510,29 @@ def validate_decorator(decorator: dict[str, Any]) -> list[DecoratorValidationErr
         field_spec = fields[field_name]
 
         # Strict value checking
-        if field_spec.get('strict', False):
-            valid_values = field_spec.get('values', [])
+        if field_spec.get("strict", False):
+            valid_values = field_spec.get("values", [])
             if value not in valid_values:
                 errors.append(
                     DecoratorValidationError(
                         name,
                         f"Field '{field_name}' has invalid value '{value}'. Must be one of: {valid_values}",
-                        field_name
+                        field_name,
                     )
                 )
 
         # Value cardinality checking for multi-value fields
-        cardinality = field_spec.get('value_cardinality', '1..1')
-        if cardinality not in ('1..1', '0..1'):
+        cardinality = field_spec.get("value_cardinality", "1..1")
+        if cardinality not in ("1..1", "0..1"):
             # Multi-value field — parse comma-separated values
-            values = [v.strip() for v in value.split(',') if v.strip()]
-            min_count = int(cardinality.split('..')[0])
+            values = [v.strip() for v in value.split(",") if v.strip()]
+            min_count = int(cardinality.split("..")[0])
             if len(values) < min_count:
                 errors.append(
                     DecoratorValidationError(
                         name,
                         f"Field '{field_name}' requires at least {min_count} value(s), got {len(values)}",
-                        field_name
+                        field_name,
                     )
                 )
 
@@ -536,6 +542,7 @@ def validate_decorator(decorator: dict[str, Any]) -> list[DecoratorValidationErr
 # =============================================================================
 # Marker Validation
 # =============================================================================
+
 
 class AnalysisMarkerValidationError:
     """A marker validation error."""
@@ -550,32 +557,32 @@ class AnalysisMarkerValidationError:
 
 
 def validate_feature_marker_co_occurrences(
-        by_flow: dict[str, dict[str, list[dict[str, Any]]]],
+    by_flow: dict[str, dict[str, list[dict[str, Any]]]],
 ) -> list[AnalysisMarkerValidationError]:
     errors: list[AnalysisMarkerValidationError] = []
 
     for flow_name, marker_types in by_flow.items():
-        if 'FeatureStart' not in marker_types:
+        if "FeatureStart" not in marker_types:
             continue
 
-        if len(marker_types['FeatureStart']) > 1:
+        if len(marker_types["FeatureStart"]) > 1:
             errors.append(
                 AnalysisMarkerValidationError(
-                    marker_name='FeatureStart',
+                    marker_name="FeatureStart",
                     feature_name=flow_name,
-                    message='FeatureStart must appear exactly once per feature flow',
+                    message="FeatureStart must appear exactly once per feature flow",
                 )
             )
 
         if (
-                'FeatureEnd' not in marker_types
-                and 'FeatureEndConditional' not in marker_types
+            "FeatureEnd" not in marker_types
+            and "FeatureEndConditional" not in marker_types
         ):
             errors.append(
                 AnalysisMarkerValidationError(
-                    marker_name='FeatureStart',
+                    marker_name="FeatureStart",
                     feature_name=flow_name,
-                    message='Feature flow requires at least one FeatureEnd or FeatureEndConditional',
+                    message="Feature flow requires at least one FeatureEnd or FeatureEndConditional",
                 )
             )
 
@@ -583,18 +590,18 @@ def validate_feature_marker_co_occurrences(
 
 
 def validate_analysis_markers(
-        inventory_entries: list[dict[str, Any]],
+    inventory_entries: list[dict[str, Any]],
 ) -> list[AnalysisMarkerValidationError]:
     errors: list[AnalysisMarkerValidationError] = []
     by_flow: dict[str, dict[str, list[dict[str, Any]]]] = {}
 
     def collect_marker(
-            marker: dict[str, Any],
-            *,
-            actual_target_scope: str,
+        marker: dict[str, Any],
+        *,
+        actual_target_scope: str,
     ) -> None:
-        feature_name = marker.get('kwargs', {}).get('name')
-        marker_name = marker.get('name', '')
+        feature_name = marker.get("kwargs", {}).get("name")
+        marker_name = marker.get("name", "")
         expected_target_scope = get_decorator_target_scope(marker_name)
 
         if expected_target_scope is None:
@@ -602,7 +609,7 @@ def validate_analysis_markers(
                 AnalysisMarkerValidationError(
                     feature_name=feature_name,
                     marker_name=marker_name,
-                    message='Unknown analysis marker',
+                    message="Unknown analysis marker",
                 )
             )
             return
@@ -613,17 +620,17 @@ def validate_analysis_markers(
                     feature_name=feature_name,
                     marker_name=marker_name,
                     message=(
-                        f'Expected target_scope={expected_target_scope!r}, '
-                        f'found on {actual_target_scope!r}'
+                        f"Expected target_scope={expected_target_scope!r}, "
+                        f"found on {actual_target_scope!r}"
                     ),
                 )
             )
             return
 
-        if get_decorator_analysis_scope(marker_name) != 'codebase':
+        if get_decorator_analysis_scope(marker_name) != "codebase":
             return
 
-        flow_name = marker.get('kwargs', {}).get('name')
+        flow_name = marker.get("kwargs", {}).get("name")
         if not flow_name:
             return
 
@@ -633,14 +640,18 @@ def validate_analysis_markers(
 
     def collect(entries: list[dict[str, Any]]) -> None:
         for entry in entries:
-            for marker in (entry.get('signature_info', {}) or {}).get('decorators', []) or []:
-                collect_marker(marker, actual_target_scope='callable')
+            for marker in (entry.get("signature_info", {}) or {}).get(
+                "decorators", []
+            ) or []:
+                collect_marker(marker, actual_target_scope="callable")
 
-            for branch in (entry.get('analysis_info', {}) or {}).get('branches', []) or []:
-                for marker in branch.get('decorators', []) or []:
-                    collect_marker(marker, actual_target_scope='statement')
+            for ei in (entry.get("analysis_info", {}) or {}).get(
+                "execution_items", []
+            ) or []:
+                for marker in ei.get("decorators", []) or []:
+                    collect_marker(marker, actual_target_scope="statement")
 
-            collect(entry.get('children', []) or [])
+            collect(entry.get("children", []) or [])
 
     collect(inventory_entries)
 
@@ -653,6 +664,7 @@ def validate_analysis_markers(
 # Convenience
 # =============================================================================
 
+
 def has_effect(decorator: dict[str, Any], effect: str) -> bool:
     """
     Return True if the decorator has the given effect.
@@ -663,12 +675,12 @@ def has_effect(decorator: dict[str, Any], effect: str) -> bool:
         if has_effect(decorator, 'exclude_from_flow'):
             ...
     """
-    return get_decorator_effect(decorator.get('name', '')) == effect
+    return get_decorator_effect(decorator.get("name", "")) == effect
 
 
 def collect_decorators_by_effect(
-        decorators: list[dict[str, Any]],
-        effect: str,
+    decorators: list[dict[str, Any]],
+    effect: str,
 ) -> list[dict[str, Any]]:
     """Return all decorators from the list that have the given effect."""
     return [d for d in decorators if has_effect(d, effect)]

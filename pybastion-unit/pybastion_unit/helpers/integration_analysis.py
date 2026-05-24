@@ -4,7 +4,7 @@ import hashlib
 from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
-from pybastion_common.models import Branch, TypeRef
+from pybastion_common.models import ExecutionItem, TypeRef
 from pybastion_common.knowledge_base import (
     BUILTIN_METHODS,
     BUILTIN_RECEIVER_METHODS,
@@ -32,30 +32,30 @@ class IntegrationEntry:
 
 
 ResolverFn = Callable[[str, dict[str, TypeRef]], tuple[str | None, str | None]]
-SignatureFn = Callable[[Branch], str]
+SignatureFn = Callable[[ExecutionItem], str]
 
 
 def _integration_id(
-        *,
-        callable_id: str,
-        ei_id: str,
-        target: str,
-        kind: str,
+    *,
+    callable_id: str,
+    ei_id: str,
+    target: str,
+    kind: str,
 ) -> str:
     seed = f"{callable_id}|{ei_id}|{kind}|{target}"
     digest = hashlib.sha1(seed.encode("utf-8")).hexdigest()[:10].upper()
     return f"{callable_id}_I{digest}"
 
 
-def default_signature(branch: Branch) -> str:
-    constraint = branch.constraint
+def default_signature(ei: ExecutionItem) -> str:
+    constraint = ei.constraint
     if constraint is not None and constraint.expr:
         return constraint.expr.strip()
 
-    if branch.statement_outcome is not None and branch.statement_outcome.outcome:
-        return branch.statement_outcome.outcome.strip()
+    if ei.statement_outcome is not None and ei.statement_outcome.outcome:
+        return ei.statement_outcome.outcome.strip()
 
-    return (branch.description or "").strip()
+    return (ei.description or "").strip()
 
 
 def _base_name(target: str) -> str:
@@ -117,8 +117,8 @@ def _is_extlib_target(target: str) -> bool:
 
 
 def _is_collapsible_operation_target(
-        resolved_target: str | None,
-        collapsible_operation_fqns: set[str],
+    resolved_target: str | None,
+    collapsible_operation_fqns: set[str],
 ) -> bool:
     if not resolved_target:
         return False
@@ -126,16 +126,16 @@ def _is_collapsible_operation_target(
     return resolved_target in collapsible_operation_fqns
 
 
-def _is_forbidden_integration_branch(branch: Branch) -> bool:
-    owner = branch.owner_info
+def _is_forbidden_integration_ei(ei: ExecutionItem) -> bool:
+    owner = ei.owner_info
     if owner is not None and owner.stmt_type == "Try" and owner.region == "except":
         return True
 
-    for decorator in branch.decorators:
+    for decorator in ei.decorators:
         if decorator.get("name", "") in ("MechanicalOperation", "UtilityOperation"):
             return True
 
-    constraint = branch.constraint
+    constraint = ei.constraint
     if constraint is None:
         return False
 
@@ -149,24 +149,24 @@ def _is_forbidden_integration_branch(branch: Branch) -> bool:
     return False
 
 
-def _is_operation_branch(branch: Branch) -> bool:
-    constraint = branch.constraint
+def _is_operation_ei(ei: ExecutionItem) -> bool:
+    constraint = ei.constraint
     return (
-            constraint is not None
-            and constraint.constraint_type == "operation"
-            and bool((constraint.operation_target or "").strip())
+        constraint is not None
+        and constraint.constraint_type == "operation"
+        and bool((constraint.operation_target or "").strip())
     )
 
 
 def _classify_integration_target(
-        *,
-        raw_target: str,
-        resolved_target: str | None,
-        resolved_type: str | None,
-        callable_fqn: str,
-        unit_fqn: str,
-        project_fqns: set[str],
-        callable_inventory: dict[str, str],
+    *,
+    raw_target: str,
+    resolved_target: str | None,
+    resolved_type: str | None,
+    callable_fqn: str,
+    unit_fqn: str,
+    project_fqns: set[str],
+    callable_inventory: dict[str, str],
 ) -> dict[str, Any]:
     candidate = (resolved_target or raw_target or "").strip()
     receiver_type = (resolved_type or "").strip()
@@ -232,10 +232,14 @@ def _classify_integration_target(
             "resolved_target": candidate,
         }
 
-    if receiver_type and "." in raw_target and (
+    if (
+        receiver_type
+        and "." in raw_target
+        and (
             receiver_type == "Path"
             or receiver_type.startswith("pathlib.")
             or is_stdlib_module(receiver_type.split(".", 1)[0])
+        )
     ):
         method_name = raw_target.split(".")[-1]
         stdlib_target = f"{receiver_type}.{method_name}"
@@ -274,41 +278,41 @@ def _classify_integration_target(
 
 
 def build_integration_entries(
-        *,
-        branches: list[Branch],
-        callable_id: str,
-        callable_fqn: str,
-        unit_fqn: str,
-        project_fqns: set[str],
-        callable_inventory: dict[str, str],
-        collapsible_operation_fqns: set[str],
-        known_types: dict[str, TypeRef],
-        resolve_target: ResolverFn,
-        signature_for_branch: SignatureFn | None = None,
+    *,
+    execution_items: list[ExecutionItem],
+    callable_id: str,
+    callable_fqn: str,
+    unit_fqn: str,
+    project_fqns: set[str],
+    callable_inventory: dict[str, str],
+    collapsible_operation_fqns: set[str],
+    known_types: dict[str, TypeRef],
+    resolve_target: ResolverFn,
+    signature_for_ei: SignatureFn | None = None,
 ) -> list[IntegrationEntry]:
-    signature_fn = signature_for_branch or default_signature
+    signature_fn = signature_for_ei or default_signature
     entries: list[IntegrationEntry] = []
 
-    for branch in branches:
-        if not _is_operation_branch(branch):
+    for ei in execution_items:
+        if not _is_operation_ei(ei):
             continue
 
-        if _is_forbidden_integration_branch(branch):
+        if _is_forbidden_integration_ei(ei):
             continue
 
-        constraint = branch.constraint
+        constraint = ei.constraint
         raw_target = (constraint.operation_target or "").strip()
         if not raw_target:
             continue
 
-        signature = signature_fn(branch)
+        signature = signature_fn(ei)
         if not signature:
             continue
 
         resolved_target, resolved_type = resolve_target(raw_target, known_types)
         if _is_collapsible_operation_target(
-                resolved_target,
-                collapsible_operation_fqns,
+            resolved_target,
+            collapsible_operation_fqns,
         ):
             continue
 
@@ -332,25 +336,21 @@ def build_integration_entries(
             IntegrationEntry(
                 id=_integration_id(
                     callable_id=callable_id,
-                    ei_id=branch.id,
+                    ei_id=ei.id,
                     target=target,
                     kind=kind,
                 ),
-                ei_id=branch.id,
-                line=branch.line,
+                ei_id=ei.id,
+                line=ei.line,
                 kind=kind,
                 target=target,
                 signature=signature,
-                stmt_type=branch.stmt_type,
+                stmt_type=ei.stmt_type,
                 owner_stmt_type=(
-                    branch.owner_info.stmt_type
-                    if branch.owner_info is not None
-                    else None
+                    ei.owner_info.stmt_type if ei.owner_info is not None else None
                 ),
                 owner_region=(
-                    branch.owner_info.region
-                    if branch.owner_info is not None
-                    else None
+                    ei.owner_info.region if ei.owner_info is not None else None
                 ),
                 classification=classification,
             )

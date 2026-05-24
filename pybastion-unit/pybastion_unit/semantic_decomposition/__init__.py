@@ -13,7 +13,8 @@ from .control import (
     WhileDecomposer,
     WithDecomposer,
 )
-from .decomp_types import ControlOwner, DecompositionContext, DecomposerResult, OwnerKind
+from .decomp_models import DecomposerResult
+from .decomp_types import ControlOwner, DecompositionContext, OwnerKind
 from .simple import (
     AnnAssignDecomposer,
     AssertDecomposer,
@@ -32,7 +33,6 @@ from .simple import (
     RaiseDecomposer,
     ReturnDecomposer,
 )
-
 
 _DECOMPOSERS: dict[type[ast.stmt], type[StatementDecomposer]] = {
     ast.If: IfDecomposer,

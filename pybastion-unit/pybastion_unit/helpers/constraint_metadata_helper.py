@@ -1,8 +1,8 @@
 """
 Constraint Metadata Extraction Helpers
 
-Functions to extract constraint metadata when creating Branch objects
-in stage2_enumerate_exec_items.py. These create BranchConstraint objects
+Functions to extract constraint metadata when creating ExecutionItem objects
+in stage2_enumerate_exec_items.py. These create ExecutionConstraint objects
 from outcome strings and AST statements.
 """
 
@@ -10,7 +10,7 @@ import ast
 import re
 from typing import Any
 
-from pybastion_common.models import BranchConstraint
+from pybastion_common.models import ExecutionConstraint
 from pybastion_common.smt_path_checker import ConstraintExtractor
 
 
@@ -59,14 +59,19 @@ def extract_operators_and_operands(node: ast.expr) -> tuple[list[str], list[str]
     operands: list[str] = []
 
     _CMP_OP_MAP = {
-        ast.Eq: '==', ast.NotEq: '!=',
-        ast.Lt: '<', ast.LtE: '<=',
-        ast.Gt: '>', ast.GtE: '>=',
-        ast.Is: 'is', ast.IsNot: 'is not',
-        ast.In: 'in', ast.NotIn: 'not in',
+        ast.Eq: "==",
+        ast.NotEq: "!=",
+        ast.Lt: "<",
+        ast.LtE: "<=",
+        ast.Gt: ">",
+        ast.GtE: ">=",
+        ast.Is: "is",
+        ast.IsNot: "is not",
+        ast.In: "in",
+        ast.NotIn: "not in",
     }
-    _BOOL_OP_MAP = {ast.And: 'and', ast.Or: 'or'}
-    _UNARY_OP_MAP = {ast.Not: 'not', ast.USub: '-', ast.UAdd: '+', ast.Invert: '~'}
+    _BOOL_OP_MAP = {ast.And: "and", ast.Or: "or"}
+    _UNARY_OP_MAP = {ast.Not: "not", ast.USub: "-", ast.UAdd: "+", ast.Invert: "~"}
 
     for child in ast.walk(node):
         if isinstance(child, ast.Compare):
@@ -86,7 +91,7 @@ def extract_operators_and_operands(node: ast.expr) -> tuple[list[str], list[str]
                 operators.append(sym)
 
         elif isinstance(child, ast.Name):
-            if child.id not in ('True', 'False', 'None') and child.id not in operands:
+            if child.id not in ("True", "False", "None") and child.id not in operands:
                 operands.append(child.id)
 
         elif isinstance(child, ast.Constant):
@@ -112,42 +117,40 @@ def extract_variables_from_ast_node(node: ast.AST) -> set[str]:
     for child in ast.walk(node):
         if isinstance(child, ast.Name):
             # Exclude special names like True, False, None
-            if child.id not in ('True', 'False', 'None'):
+            if child.id not in ("True", "False", "None"):
                 variables.add(child.id)
 
     return variables
 
 
 def parse_outcome_to_constraint(
-        outcome: str,
-        stmt: ast.stmt,
-        branch_id: str = "",
-        line: int = 0,
-        call_node: ast.Call | None = None,
-        skips_lines: list[int] | None = None
-) -> BranchConstraint | None:
+    outcome: str,
+    stmt: ast.stmt,
+    ei_id: str = "",
+    line: int = 0,
+    call_node: ast.Call | None = None,
+) -> ExecutionConstraint | None:
     """
-    Parse an outcome string and statement to create a BranchConstraint.
+    Parse an outcome string and statement to create a ExecutionConstraint.
 
-    This is called when creating Branch objects to populate the
+    This is called when creating ExecutionItem objects to populate the
     constraint field.
 
     Args:
         outcome: The outcome string (e.g., "value > 0 is true → enters if block")
         stmt: The AST statement this outcome came from
-        branch_id: Branch/EI ID for traceability
+        ei_id: ExecutionItem ID for traceability
         line: Line number in source code
         call_node: The AST Call node if this outcome is from a function call, else None
-        skips_lines: List of line numbers to skip when parsing the outcome
 
     Returns:
-        BranchConstraint object if constraint exists, None otherwise
+        ExecutionConstraint object if constraint exists, None otherwise
     """
     # Split into condition and result if present
-    if ' → ' in outcome:
-        condition, result = outcome.split(' → ', 1)
+    if " → " in outcome:
+        condition, result = outcome.split(" → ", 1)
     else:
-        condition = 'executes'
+        condition = "executes"
         result = outcome
 
     outcome_lower = outcome.lower()
@@ -167,7 +170,7 @@ def parse_outcome_to_constraint(
     # Detect constraint type and extract metadata
 
     # 1. CONDITION (if/while/assert)
-    if 'is true' in condition or 'is false' in condition:
+    if "is true" in condition or "is false" in condition:
         if isinstance(stmt, (ast.If, ast.While, ast.Assert)):
             # Extract the condition expression
             if isinstance(stmt, ast.If):
@@ -179,9 +182,9 @@ def parse_outcome_to_constraint(
             else:
                 expr = condition
 
-            constraint_type = 'condition'
+            constraint_type = "condition"
             constraint_expr = expr
-            constraint_polarity = 'is true' in condition
+            constraint_polarity = "is true" in condition
             variables_read = extract_variables_from_ast_node(stmt.test)
             operators, operands = extract_operators_and_operands(stmt.test)
             smt_expr = _compute_smt_expr(expr, constraint_polarity)
@@ -189,15 +192,15 @@ def parse_outcome_to_constraint(
         elif isinstance(stmt, ast.Assign):
             # BoolOp short-circuit: extract expression from outcome
             # Format: "raw_configs_by_instance_id is true → ..."
-            match = re.match(r'(.+?) is (true|false)', condition)
+            match = re.match(r"(.+?) is (true|false)", condition)
             if match:
                 expr = match.group(1)
-                constraint_type = 'condition'
+                constraint_type = "condition"
                 constraint_expr = expr
-                constraint_polarity = match.group(2) == 'true'
+                constraint_polarity = match.group(2) == "true"
 
                 try:
-                    expr_ast = ast.parse(expr, mode='eval')
+                    expr_ast = ast.parse(expr, mode="eval")
                     variables_read = extract_variables_from_ast_node(expr_ast)
                     operators, operands = extract_operators_and_operands(expr_ast.body)
                     smt_expr = _compute_smt_expr(expr, constraint_polarity)
@@ -206,10 +209,16 @@ def parse_outcome_to_constraint(
 
     # 2. ITERATION (for/while loop outcomes)
     elif isinstance(stmt, (ast.For, ast.While)):
-        if 'iterations' in outcome_lower or 'completes' in outcome_lower or 'breaks' in outcome_lower:
-            constraint_type = 'iteration'
+        if (
+            "iterations" in outcome_lower
+            or "completes" in outcome_lower
+            or "breaks" in outcome_lower
+        ):
+            constraint_type = "iteration"
             if isinstance(stmt, ast.For):
-                constraint_expr = f"for {ast.unparse(stmt.target)} in {ast.unparse(stmt.iter)}"
+                constraint_expr = (
+                    f"for {ast.unparse(stmt.target)} in {ast.unparse(stmt.iter)}"
+                )
                 variables_read = extract_variables_from_ast_node(stmt.iter)
                 variables_written = extract_variables_from_ast_node(stmt.target)
             else:
@@ -217,71 +226,71 @@ def parse_outcome_to_constraint(
                 variables_read = extract_variables_from_ast_node(stmt.test)
 
             # Add polarity for iteration alternatives
-            if '0 iterations' in outcome or 'initially false' in outcome:
+            if "0 iterations" in outcome or "initially false" in outcome:
                 constraint_polarity = False
-            elif '≥1 iterations' in outcome or 'initially true' in outcome:
+            elif "≥1 iterations" in outcome or "initially true" in outcome:
                 constraint_polarity = True
 
     # 3. COMPREHENSION
-    elif 'is empty' in condition or 'has items' in condition:
+    elif "is empty" in condition or "has items" in condition:
         # Comprehension iteration alternatives
-        if 'is empty' in condition:
-            match = re.match(r'(.+?) is empty', condition)
+        if "is empty" in condition:
+            match = re.match(r"(.+?) is empty", condition)
             polarity = False
         else:  # 'has items' in condition
-            match = re.match(r'(.+?) has items', condition)
+            match = re.match(r"(.+?) has items", condition)
             polarity = True
 
         if match:
             iter_expr = match.group(1)
-            constraint_type = 'iteration'
+            constraint_type = "iteration"
             constraint_expr = iter_expr
             constraint_polarity = polarity
             # Extract variables from iter expression
             try:
-                expr_ast = ast.parse(iter_expr, mode='eval')
+                expr_ast = ast.parse(iter_expr, mode="eval")
                 variables_read = extract_variables_from_ast_node(expr_ast)
             except:
                 variables_read = set()
 
     # 4. EXCEPTION (try/except, raise, or exception propagation)
     elif isinstance(stmt, ast.Try):
-        constraint_type = 'exception'
-        if 'raises' in outcome_lower:
+        constraint_type = "exception"
+        if "raises" in outcome_lower:
             # Try to extract exception type
-            match = re.search(r'raises (\w+)', result)
+            match = re.search(r"raises (\w+)", result)
             if match:
-                metadata['exception_types'] = [match.group(1)]
+                metadata["exception_types"] = [match.group(1)]
 
     # 5. OPERATION (function/method calls)
-    elif 'executes →' in outcome and 'succeeds' in result_lower:
+    elif "executes →" in outcome and "succeeds" in result_lower:
         # Extract operation from condition
         # Format: "executes → validate(data) succeeds"
-        match = re.match(r'executes → (.+) succeeds', outcome)
+        match = re.match(r"executes → (.+) succeeds", outcome)
         if match:
             operation = match.group(1)
-            constraint_type = 'operation'
+            constraint_type = "operation"
             constraint_expr = operation
 
             # Try to parse and extract variables
             try:
-                expr_ast = ast.parse(operation, mode='eval')
+                expr_ast = ast.parse(operation, mode="eval")
                 variables_read = extract_variables_from_ast_node(expr_ast)
             except:
                 variables_read = set()
 
     # 6. EXCEPTION PROPAGATION (from operation)
-    elif 'raises exception' in result_lower and 'propagates' in result_lower:
+    elif "raises exception" in result_lower and "propagates" in result_lower:
         # Extract operation from condition
-        match = re.match(r'(.+) raises exception', condition)
+        match = re.match(r"(.+) raises exception", condition)
         if match:
             operation = match.group(1)
-            constraint_type = 'exception'
+            constraint_type = "exception"
             constraint_expr = operation
 
     # 7. ASSIGNMENT
     elif isinstance(stmt, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
-        constraint_type = 'assignment'
+        constraint_type = "assignment"
 
         # Extract written variables
         if isinstance(stmt, ast.Assign):
@@ -304,52 +313,51 @@ def parse_outcome_to_constraint(
 
     # 8. MATCH CASE
     elif isinstance(stmt, ast.Match):
-        if 'match case' in outcome_lower:
-            constraint_type = 'match_case'
+        if "match case" in outcome_lower:
+            constraint_type = "match_case"
             # Extract case pattern from outcome
-            match = re.search(r'match case \d+: (.+?)(?:$| →)', outcome)
+            match = re.search(r"match case \d+: (.+?)(?:$| →)", outcome)
             if match:
                 constraint_expr = match.group(1)
 
     operation_target = ast.unparse(call_node.func) if call_node is not None else None
-    skip_eis = [str(skips_line) for skips_line in skips_lines if skips_line is not None] if skips_lines else None
 
-    # If we found constraint data, create BranchConstraint
+    # If we found constraint data, create ExecutionConstraint
     if constraint_type and constraint_expr:
-        return BranchConstraint(
+        return ExecutionConstraint(
             expr=constraint_expr,
             polarity=constraint_polarity,
             constraint_type=constraint_type,
             variables_read=variables_read,
             variables_written=variables_written,
-            branch_id=branch_id,
+            ei_id=ei_id,
             line=line,
             operators=operators,
             operands=operands,
             smt_expr=smt_expr,
             operation_target=operation_target,
-            metadata=metadata
+            metadata=metadata,
         )
 
     if operation_target:
-        return BranchConstraint(
+        return ExecutionConstraint(
             expr=operation_target,
             polarity=None,
-            constraint_type='operation',
+            constraint_type="operation",
             operation_target=operation_target,
-            branch_id=branch_id,
-            line=line
+            ei_id=ei_id,
+            line=line,
         )
 
     return None
 
 
-def populate_constraint_relationships(branches: list) -> None:
+def populate_constraint_relationships(execution_items: list) -> None:
     """
-    Post-enumeration pass: populate implies and excludes on BranchConstraint objects.
+    Post-enumeration pass: populate implies and excludes on ExecutionConstraint objects.
 
-    Must be called after all branches for a callable are built.
-    Mutates branches in place.
+    Must be called after all execution_items for a callable are built.
+    Mutates execution_items in place.
 
     Rules:
       excludes: same expr, same line, opposite polarity — direct if/else pairs
@@ -357,38 +365,42 @@ def populate_constraint_relationships(branches: list) -> None:
                 e.g. x > 10 implies x > 5, x > 0; excludes x < 10, x <= 10
 
     Args:
-        branches: Complete list of Branch objects for one callable
+        execution_items: Complete list of ExecutionItem objects for one callable
     """
-    # Only work on branches that have condition-type constraints with polarity
-    condition_branches = [
-        b for b in branches
-        if b.constraint is not None
-           and b.constraint.polarity is not None
+    # Only work on EIs that have condition-type constraints with polarity
+    condition_eis = [
+        b
+        for b in execution_items
+        if b.constraint is not None and b.constraint.polarity is not None
     ]
 
     # --- EXCLUDES ---
-    # Group by (expr, line) — branches sharing both are mutual alternatives
+    # Group by (expr, line) — EIs sharing both are mutual alternatives
     from collections import defaultdict
+
     by_expr_line: dict[tuple[str, int], list] = defaultdict(list)
-    for b in condition_branches:
+    for b in condition_eis:
         key = (b.constraint.expr, b.constraint.line)
         by_expr_line[key].append(b)
 
     for group in by_expr_line.values():
         if len(group) < 2:
             continue
-        # Every branch in the group excludes every other
+        # Every EI in the group excludes every other
         for b in group:
             for other in group:
-                if other.id != b.id and other.constraint.polarity != b.constraint.polarity:
+                if (
+                    other.id != b.id
+                    and other.constraint.polarity != b.constraint.polarity
+                ):
                     if other.id not in b.constraint.excludes:
                         b.constraint.excludes.append(other.id)
 
     # --- IMPLIES ---
     # Only applies to numeric single-variable comparisons: x > N, x >= N, x < N, x <= N
-    # For each such branch, find other branches on the same variable that are
+    # For each such EI, find other EIs on the same variable that are
     # logically weaker (i.e. must also be true whenever this one is true)
-    numeric_ops = {'>', '>=', '<', '<='}
+    numeric_ops = {">", ">=", "<", "<="}
 
     def parse_numeric_constraint(b) -> tuple[str, str, int | float] | None:
         """
@@ -410,7 +422,7 @@ def populate_constraint_relationships(branches: list) -> None:
         if len(variables) != 1 or len(constants) != 1:
             return None
         try:
-            val = int(constants[0]) if '.' not in constants[0] else float(constants[0])
+            val = int(constants[0]) if "." not in constants[0] else float(constants[0])
         except ValueError:
             return None
         # Adjust operator if polarity is False (negated condition)
@@ -426,7 +438,7 @@ def populate_constraint_relationships(branches: list) -> None:
             return False
 
     def _negate_op(op: str) -> str:
-        return {'>': '<=', '>=': '<', '<': '>=', '<=': '>'}[op]
+        return {">": "<=", ">=": "<", "<": ">=", "<=": ">"}[op]
 
     def _implies(op1: str, val1: int | float, op2: str, val2: int | float) -> bool:
         """
@@ -440,37 +452,37 @@ def populate_constraint_relationships(branches: list) -> None:
           x >= 10 implies x > 9  (True for integers, approximate for floats)
         """
         # Both constraints on same side of number line
-        if op1 in ('>', '>=') and op2 in ('>', '>='):
+        if op1 in (">", ">=") and op2 in (">", ">="):
             # x > val1 implies x > val2 iff val1 >= val2 (strictly stronger lower bound)
-            if op1 == '>' and op2 == '>':
+            if op1 == ">" and op2 == ">":
                 return val1 >= val2
-            if op1 == '>' and op2 == '>=':
+            if op1 == ">" and op2 == ">=":
                 return val1 >= val2
-            if op1 == '>=' and op2 == '>':
+            if op1 == ">=" and op2 == ">":
                 return val1 > val2
-            if op1 == '>=' and op2 == '>=':
+            if op1 == ">=" and op2 == ">=":
                 return val1 >= val2
-        if op1 in ('<', '<=') and op2 in ('<', '<='):
+        if op1 in ("<", "<=") and op2 in ("<", "<="):
             # x < val1 implies x < val2 iff val1 <= val2
-            if op1 == '<' and op2 == '<':
+            if op1 == "<" and op2 == "<":
                 return val1 <= val2
-            if op1 == '<' and op2 == '<=':
+            if op1 == "<" and op2 == "<=":
                 return val1 <= val2
-            if op1 == '<=' and op2 == '<':
+            if op1 == "<=" and op2 == "<":
                 return val1 < val2
-            if op1 == '<=' and op2 == '<=':
+            if op1 == "<=" and op2 == "<=":
                 return val1 <= val2
         return False
 
-    # Parse all branches into numeric form where possible
-    numeric: list[tuple[object, str, str, int | float]] = []  # (branch, var, op, val)
-    for b in condition_branches:
+    # Parse all EIs into numeric form where possible
+    numeric: list[tuple[object, str, str, int | float]] = []  # (EI, var, op, val)
+    for b in condition_eis:
         parsed = parse_numeric_constraint(b)
         if parsed:
             var, op, val = parsed
             numeric.append((b, var, op, val))
 
-    # Group by variable name — only compare branches on the same variable
+    # Group by variable name — only compare EIs on the same variable
     by_var: dict[str, list] = defaultdict(list)
     for entry in numeric:
         by_var[entry[1]].append(entry)
@@ -486,13 +498,12 @@ def populate_constraint_relationships(branches: list) -> None:
 
 
 def enrich_outcome_with_constraint(
-        outcome: str,
-        call_node: ast.Call | None,
-        stmt: ast.stmt,
-        ei_id: str,
-        line: int,
-        skips_lines: list[int] | None = None
-) -> tuple[str, str, BranchConstraint | None]:
+    outcome: str,
+    call_node: ast.Call | None,
+    stmt: ast.stmt,
+    ei_id: str,
+    line: int,
+) -> tuple[str, str, ExecutionConstraint | None]:
     """
     Enrich an outcome string with the extracted constraint.
 
@@ -507,20 +518,19 @@ def enrich_outcome_with_constraint(
         (condition, result, constraint)
     """
     # Split outcome into condition and result
-    if ' → ' in outcome:
-        condition, result = outcome.split(' → ', 1)
+    if " → " in outcome:
+        condition, result = outcome.split(" → ", 1)
     else:
-        condition = 'executes'
-        result = outcome.replace('executes: ', '')
+        condition = "executes"
+        result = outcome.replace("executes: ", "")
 
     # Extract constraint
     constraint = parse_outcome_to_constraint(
         outcome,
         stmt,
-        branch_id=ei_id,
+        ei_id=ei_id,
         line=line,
         call_node=call_node,
-        skips_lines=skips_lines
     )
 
     return condition, result, constraint

@@ -9,7 +9,7 @@ from pybastion_common.models import (
     TargetHint,
 )
 from pybastion_common.knowledge_base import NO_OP_CALLS
-from .decomp_types import DecomposerResult
+from .decomp_models import DecomposerResult, ExecutionStatementDecomposition
 
 
 def is_no_op_call(node: ast.Call) -> bool:
@@ -42,42 +42,48 @@ def operation_eis(expressions: Iterable[ast.AST]) -> list[DecomposerResult]:
             text = ast.unparse(op)
             results.append(
                 DecomposerResult(
-                    description=f"{text} succeeds",
-                    call_node=op,
-                    statement_outcome=StatementOutcome(
-                        outcome=f"{text} succeeds",
+                    candidate_node=op,
+                    decomposition=ExecutionStatementDecomposition(
+                        description=f"{text} succeeds",
+                        statement_outcome=StatementOutcome(
+                            outcome=f"{text} succeeds",
+                        ),
+                        disruptive_outcomes=[
+                            DisruptiveOutcome(
+                                outcome="exception propagates",
+                                is_terminal=True,
+                                terminates_via="exception",
+                            )
+                        ],
                     ),
-                    disruptive_outcomes=[
-                        DisruptiveOutcome(
-                            outcome="exception propagates",
-                            is_terminal=True,
-                            terminates_via="exception",
-                        )
-                    ],
                 )
             )
     return results
 
 
 def semantic(
-        description: str,
-        next_stmt_lines: list[int] | None = None,
-        *,
-        skips_lines: list[int] | None = None,
-        is_terminal: bool = False,
-        terminates_via: str | None = None,
-        target_hint: TargetHint | None = None,
+    description: str,
+    next_stmt_lines: list[int] | None = None,
+    *,
+    skips_lines: list[int] | None = None,
+    is_terminal: bool = False,
+    terminates_via: str | None = None,
+    target_hint: TargetHint | None = None,
 ) -> DecomposerResult:
-    next_line = next_stmt_lines[0] if next_stmt_lines and len(next_stmt_lines) == 1 else None
+    next_line = (
+        next_stmt_lines[0] if next_stmt_lines and len(next_stmt_lines) == 1 else None
+    )
     return DecomposerResult(
-        description=description,
-        statement_outcome=StatementOutcome(
-            outcome=description,
-            target_line=next_line,
-            skips_lines=[] if skips_lines is None else list(skips_lines),
-            is_terminal=is_terminal,
-            terminates_via=terminates_via,
-            target_hint=target_hint,
+        decomposition=ExecutionStatementDecomposition(
+            description=description,
+            statement_outcome=StatementOutcome(
+                outcome=description,
+                target_line=next_line,
+                skips_lines=[] if skips_lines is None else list(skips_lines),
+                is_terminal=is_terminal,
+                terminates_via=terminates_via,
+                target_hint=target_hint,
+            ),
         ),
     )
 
@@ -89,8 +95,8 @@ def body_lines(body: list[ast.stmt]) -> list[int]:
 
 
 def select_target_from_chain(
-        next_stmt_lines: list[int] | None,
-        skips_lines: list[int] | None,
+    next_stmt_lines: list[int] | None,
+    skips_lines: list[int] | None,
 ) -> int | None:
     if not next_stmt_lines:
         return None
@@ -104,11 +110,13 @@ def select_target_from_chain(
 
 def implicit_return_result() -> DecomposerResult:
     return DecomposerResult(
-        description="implicit return",
-        statement_outcome=StatementOutcome(
-            outcome="implicit return",
-            is_terminal=True,
-            terminates_via="implicit-return",
+        decomposition=ExecutionStatementDecomposition(
+            description="implicit return",
+            statement_outcome=StatementOutcome(
+                outcome="implicit return",
+                is_terminal=True,
+                terminates_via="implicit-return",
+            ),
         ),
     )
 

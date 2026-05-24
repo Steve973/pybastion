@@ -32,6 +32,7 @@ packages = [
 ]
 
 [tool.poetry.dependencies]
+pybastion-common = { path = "../pybastion-common", develop = true }
 networkx = "==3.4.2"
 python = ">=3.11,<4.0"
 pyyaml = "^6.0"

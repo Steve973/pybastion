@@ -118,3 +118,120 @@ def synthetic_nested_branch_feature(raw: str) -> dict[str, str]:
 
     # :: FeatureEnd | name=synthetic_nested_branch
     return finish(converged)
+
+
+################################################################################
+##  Fixtures to test control statement analysis
+################################################################################
+
+
+def fixture_if_control(value: str) -> str:
+    if value.startswith("a"):
+        return "starts-a"
+
+    if value.endswith("z"):
+        return "ends-z"
+
+    return "other"
+
+
+def fixture_match_control(value: str) -> str:
+    match value:
+        case "alpha":
+            return "matched-alpha"
+        case "beta" | "bravo":
+            return "matched-betaish"
+        case other if other.startswith("x"):
+            return "matched-guarded-x"
+        case _:
+            return "matched-default"
+
+
+def fixture_for_control(values: list[str]) -> str:
+    result = "empty"
+
+    for value in values:
+        if value == "stop":
+            break
+
+        if value == "skip":
+            continue
+
+        result = f"seen:{value}"
+    else:
+        result = "completed"
+
+    return result
+
+
+def fixture_while_control(limit: int) -> str:
+    count = 0
+
+    while count < limit:
+        count += 1
+
+        if count == 2:
+            continue
+
+        if count == 4:
+            break
+    else:
+        return "exhausted"
+
+    return f"stopped:{count}"
+
+
+def fixture_try_control(value: str) -> str:
+    try:
+        normalized = value.strip()
+
+        if normalized == "value":
+            return "direct-value"
+
+        parsed = int(normalized)
+    except ValueError:
+        return "value-error"
+    except TypeError:
+        return "type-error"
+    else:
+        return f"parsed:{parsed}"
+    finally:
+        cleanup_marker = "cleanup"
+        len(cleanup_marker)
+
+
+def fixture_with_control(path: str) -> str:
+    with open(path, encoding="utf-8") as handle:
+        content = handle.read()
+
+    if content:
+        return "has-content"
+
+    return "empty"
+
+
+def fixture_mixed_control(values: list[str], fallback: str) -> str:
+    result = fallback
+
+    try:
+        for value in values:
+            match value:
+                case "skip":
+                    continue
+                case "stop":
+                    break
+                case text if text.startswith("a"):
+                    result = text.upper()
+                case _:
+                    result = value.lower()
+        else:
+            result = "loop-completed"
+    except AttributeError:
+        result = "attribute-error"
+    finally:
+        result = f"final:{result}"
+
+    if result.endswith("error"):
+        return "failed"
+
+    return result

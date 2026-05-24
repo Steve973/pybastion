@@ -3,12 +3,15 @@ from __future__ import annotations
 import ast
 
 from .expressions import decompose_expression_node
-from .decomp_types import DecompositionContext, DecomposerResult, StatementPart
+from .decomp_models import DecomposerResult, ExecutionStatementDecomposition
+from .decomp_types import DecompositionContext, StatementPart
 
 
 class StatementDecomposer:
     @classmethod
-    def statement_parts(cls, stmt: ast.stmt, context: DecompositionContext) -> list[StatementPart]:
+    def statement_parts(
+        cls, stmt: ast.stmt, context: DecompositionContext
+    ) -> list[StatementPart]:
         return []
 
     @classmethod

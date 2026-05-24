@@ -3,7 +3,8 @@ from __future__ import annotations
 import ast
 
 from .common import operation_eis
-from .decomp_types import DecompositionContext, DecomposerResult
+from .decomp_models import DecomposerResult, ExecutionStatementDecomposition
+from .decomp_types import DecompositionContext
 
 
 def _wrap(text: str) -> str:
@@ -127,6 +128,7 @@ def _enumerate_or(values: list[ast.AST]) -> tuple[list[str], list[str]]:
     false_conditions: list[str] = prior_false_prefixes
     return true_conditions, false_conditions
 
+
 class BoolOpDecomposer:
     @classmethod
     def decompose_expression_boolop(
@@ -144,7 +146,9 @@ class BoolOpDecomposer:
         return results
 
 
-def decompose_expression_node(node: ast.AST, context: DecompositionContext) -> list[DecomposerResult]:
+def decompose_expression_node(
+    node: ast.AST, context: DecompositionContext
+) -> list[DecomposerResult]:
     if isinstance(node, ast.BoolOp):
         return BoolOpDecomposer.decompose_expression_boolop(node, context)
     if isinstance(node, ast.IfExp):
@@ -158,7 +162,9 @@ def decompose_expression_node(node: ast.AST, context: DecompositionContext) -> l
     if isinstance(node, ast.Await):
         return decompose_expression_node(node.value, context)
     if isinstance(node, ast.BinOp):
-        return decompose_expression_node(node.left, context) + decompose_expression_node(node.right, context)
+        return decompose_expression_node(
+            node.left, context
+        ) + decompose_expression_node(node.right, context)
     if isinstance(node, ast.UnaryOp):
         return decompose_expression_node(node.operand, context)
     if isinstance(node, ast.Call):
@@ -168,7 +174,9 @@ def decompose_expression_node(node: ast.AST, context: DecompositionContext) -> l
     if isinstance(node, ast.keyword):
         return decompose_expression_node(node.value, context)
     if isinstance(node, ast.Subscript):
-        return decompose_expression_node(node.value, context) + decompose_expression_node(node.slice, context)
+        return decompose_expression_node(
+            node.value, context
+        ) + decompose_expression_node(node.slice, context)
     if isinstance(node, ast.Slice):
         results: list[DecomposerResult] = []
         if node.lower:

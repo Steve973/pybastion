@@ -77,6 +77,7 @@ class ProjectIndex:
 # Common Types
 # =============================================================================
 
+
 @dataclass
 class TypeRef:
     """
@@ -87,6 +88,7 @@ class TypeRef:
         list[str] -> TypeRef(name='list', args=[TypeRef(name='str')])
         dict[str, Any] -> TypeRef(name='dict', args=[TypeRef(name='str'), TypeRef(name='Any')])
     """
+
     name: str
     args: list[TypeRef] = field(default_factory=list)
 
@@ -156,15 +158,17 @@ class TypeRef:
         if not data:
             return None
         return cls(
-            name=data['name'],
-            args=[cls.from_dict(arg) for arg in data.get('args', []) if arg is not None]
+            name=data["name"],
+            args=[
+                cls.from_dict(arg) for arg in data.get("args", []) if arg is not None
+            ],
         )
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to inventory dict format."""
-        result: dict[str, Any] = {'name': self.name}
+        result: dict[str, Any] = {"name": self.name}
         if self.args:
-            result['args'] = [arg.to_dict() for arg in self.args]
+            result["args"] = [arg.to_dict() for arg in self.args]
         return result
 
     def to_annotation_string(self) -> str:
@@ -194,6 +198,7 @@ class TypeRef:
 @dataclass
 class ParamSpec:
     """Parameter specification."""
+
     name: str
     type: TypeRef | None = None
     default: str | None = None  # Store as string representation
@@ -202,30 +207,33 @@ class ParamSpec:
     def from_dict(cls, data: dict[str, Any]) -> ParamSpec:
         """Parse from inventory dict format."""
         return cls(
-            name=data['name'],
-            type=TypeRef.from_dict(data['type']) if 'type' in data else None,
-            default=data.get('default')
+            name=data["name"],
+            type=TypeRef.from_dict(data["type"]) if "type" in data else None,
+            default=data.get("default"),
         )
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to inventory dict format."""
-        result: dict[str, Any] = {'name': self.name}
+        result: dict[str, Any] = {"name": self.name}
         if self.type:
-            result['type'] = self.type.to_dict()
+            result["type"] = self.type.to_dict()
         if self.default is not None:
-            result['default'] = self.default
+            result["default"] = self.default
         return result
 
 
 # =============================================================================
-# Execution Items (Branches)
+# Execution Items
 # =============================================================================
 
+
 @dataclass
-class BranchConstraint:
+class ExecutionConstraint:
     """
-    Represents a logical constraint extracted from source code branches
-    (flow control and operations).
+    Represents a logical constraint extracted from individual source code items
+    that are invoked/executed during program execution. This has a granularity
+    finer than the statement level, since statements consist of one or more
+    items that can be invoked and have an effect or return value.
 
     This class is utilized for constraint analysis, conflict detection,
     and logical evaluation of branching behavior during program execution.
@@ -256,7 +264,7 @@ class BranchConstraint:
         variables_written (set[str]): Variables being assigned or written to within
             the constraint.
 
-        branch_id (str): Unique identifier for the corresponding branch in the
+        ei_id (str): Unique identifier for the corresponding item in the
             source code. Useful for traceability in control-flow analysis.
 
         line (int): Line number of the source code where the constraint originates.
@@ -277,10 +285,10 @@ class BranchConstraint:
         exception_types (list[str]): List of exception types specifically handled
             by this constraint in 'exception' constraints.
 
-        implies (list[str]): List of branch IDs logically implied by this constraint
+        implies (list[str]): List of EI IDs logically implied by this constraint
             (e.g., "x > 10" implies "x > 5"). Used for optimization and analysis.
 
-        excludes (list[str]): List of branch IDs that this constraint logically
+        excludes (list[str]): List of EI IDs that this constraint logically
             excludes as mutually exclusive (e.g., "x > 10" excludes "x < 5").
 
         metadata (dict[str, Any]): Additional metadata for extensibility and specialized
@@ -288,7 +296,7 @@ class BranchConstraint:
             - 'loop_header': Indicates whether this is a loop entry constraint.
             - 'loop_id': Unique identifier for the surrounding loop structure.
             - 'mutually_exclusive_with': Specifies sets of mutually exclusive
-              branch constraints.
+              execution constraints.
     """
 
     expr: str
@@ -324,8 +332,8 @@ class BranchConstraint:
     variables_written: set[str] = field(default_factory=set)
     """Variables written/assigned in this constraint."""
 
-    branch_id: str = ""
-    """Source branch ID for traceability."""
+    ei_id: str = ""
+    """Source execution item ID for traceability."""
 
     line: int = 0
     """Source line number in the code."""
@@ -364,14 +372,14 @@ class BranchConstraint:
 
     implies: list[str] = field(default_factory=list)
     """
-    Branch IDs that this constraint logically implies.
+    EI IDs that this constraint logically implies.
     Example: '123' implies '234'
     Used for constraint propagation and optimization.
     """
 
     excludes: list[str] = field(default_factory=list)
     """
-    Branch IDs that this constraint excludes (mutually exclusive).
+    EI IDs that this constraint excludes (mutually exclusive).
     Example: '123' excludes '234'
     Used for conflict detection.
     """
@@ -381,10 +389,10 @@ class BranchConstraint:
     Additional metadata for specialized analysis:
     - 'loop_header': bool - whether this is a loop entry constraint
     - 'loop_id': str - identifier for the containing loop
-    - 'mutually_exclusive_with': set[str] - alternative branch IDs
+    - 'mutually_exclusive_with': set[str] - alternative EI IDs
     """
 
-    def conflicts_with(self, other: BranchConstraint) -> bool:
+    def conflicts_with(self, other: ExecutionConstraint) -> bool:
         """
         Check if this constraint conflicts with another constraint.
 
@@ -397,18 +405,21 @@ class BranchConstraint:
             True if constraints are mutually exclusive
         """
         # Same expression with opposite polarities = conflict
-        if (self.expr == other.expr and
-                self.constraint_type == 'condition' and
-                self.polarity is not None and other.polarity is not None):
+        if (
+            self.expr == other.expr
+            and self.constraint_type == "condition"
+            and self.polarity is not None
+            and other.polarity is not None
+        ):
             return self.polarity != other.polarity
 
         # Check explicit exclusions
-        if other.branch_id in self.excludes:
+        if other.ei_id in self.excludes:
             return True
 
         return False
 
-    def is_compatible_with(self, other: BranchConstraint) -> bool:
+    def is_compatible_with(self, other: ExecutionConstraint) -> bool:
         """
         Check if this constraint can coexist with another in the same path.
 
@@ -448,109 +459,109 @@ class BranchConstraint:
         parts = [self.constraint_type, self.expr]
 
         if self.polarity is not None:
-            parts.append('true' if self.polarity else 'false')
+            parts.append("true" if self.polarity else "false")
 
-        return ':'.join(parts)
+        return ":".join(parts)
 
     @classmethod
-    def from_branch(cls, branch) -> BranchConstraint | None:
+    def from_execution_item(cls, execution_item) -> ExecutionConstraint | None:
         """
-        Extract constraint from a Branch object.
+        Extract constraint from an ExecutionItem object.
 
         Args:
-            branch: Branch object with constraint metadata
+            execution_item: ExecutionItem object with constraint metadata
 
         Returns:
-            BranchConstraint if the branch has any constraint data, None otherwise
+            ExecutionConstraint if the ExecutionItem has any constraint data, None otherwise
         """
-        if not branch.constraint_expr:
+        if not execution_item.constraint_expr:
             return None
 
         return cls(
-            expr=branch.constraint_expr,
-            polarity=branch.constraint_polarity,
-            constraint_type=branch.constraint_type or 'unknown',
-            variables_read=branch.variables_read.copy(),
-            variables_written=branch.variables_written.copy(),
-            branch_id=branch.id,
-            line=branch.line,
-            operation_target=branch.metadata.get('operation_target'),
-            exception_types=branch.metadata.get('exception_types', []),
-            metadata=branch.metadata.copy()
+            expr=execution_item.constraint_expr,
+            polarity=execution_item.constraint_polarity,
+            constraint_type=execution_item.constraint_type or "unknown",
+            variables_read=execution_item.variables_read.copy(),
+            variables_written=execution_item.variables_written.copy(),
+            ei_id=execution_item.id,
+            line=execution_item.line,
+            operation_target=execution_item.metadata.get("operation_target"),
+            exception_types=execution_item.metadata.get("exception_types", []),
+            metadata=execution_item.metadata.copy(),
         )
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary format for serialization."""
         result: dict[str, Any] = {
-            'expr': self.expr,
-            'constraint_type': self.constraint_type,
+            "expr": self.expr,
+            "constraint_type": self.constraint_type,
         }
 
         if self.polarity is not None:
-            result['polarity'] = self.polarity
+            result["polarity"] = self.polarity
 
         if self.variables_read:
-            result['variables_read'] = sorted(list(self.variables_read))
+            result["variables_read"] = sorted(list(self.variables_read))
 
         if self.variables_written:
-            result['variables_written'] = sorted(list(self.variables_written))
+            result["variables_written"] = sorted(list(self.variables_written))
 
-        if self.branch_id:
-            result['branch_id'] = self.branch_id
+        if self.ei_id:
+            result["ei_id"] = self.ei_id
 
         if self.line > 0:
-            result['line'] = self.line
+            result["line"] = self.line
 
         if self.operators:
-            result['operators'] = self.operators
+            result["operators"] = self.operators
 
         if self.operands:
-            result['operands'] = self.operands
+            result["operands"] = self.operands
 
         if self.smt_expr:
-            result['smt_expr'] = self.smt_expr
+            result["smt_expr"] = self.smt_expr
 
         if self.operation_target:
-            result['operation_target'] = self.operation_target
+            result["operation_target"] = self.operation_target
 
         if self.exception_types:
-            result['exception_types'] = self.exception_types
+            result["exception_types"] = self.exception_types
 
         if self.implies:
-            result['implies'] = self.implies
+            result["implies"] = self.implies
 
         if self.excludes:
-            result['excludes'] = self.excludes
+            result["excludes"] = self.excludes
 
         if self.metadata:
-            result['metadata'] = self.metadata
+            result["metadata"] = self.metadata
 
         return result
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> BranchConstraint:
+    def from_dict(cls, data: dict[str, Any]) -> ExecutionConstraint:
         """Parse from dictionary format."""
         return cls(
-            expr=data['expr'],
-            polarity=data.get('polarity'),
-            constraint_type=data['constraint_type'],
-            variables_read=set(data.get('variables_read', [])),
-            variables_written=set(data.get('variables_written', [])),
-            branch_id=data.get('branch_id', ''),
-            line=data.get('line', 0),
-            operators=data.get('operators', []),
-            operands=data.get('operands', []),
-            smt_expr=data.get('smt_expr'),
-            operation_target=data.get('operation_target'),
-            exception_types=data.get('exception_types', []),
-            implies=data.get('implies', []),
-            excludes=data.get('excludes', []),
-            metadata=data.get('metadata', {})
+            expr=data["expr"],
+            polarity=data.get("polarity"),
+            constraint_type=data["constraint_type"],
+            variables_read=set(data.get("variables_read", [])),
+            variables_written=set(data.get("variables_written", [])),
+            ei_id=data.get("ei_id", ""),
+            line=data.get("line", 0),
+            operators=data.get("operators", []),
+            operands=data.get("operands", []),
+            smt_expr=data.get("smt_expr"),
+            operation_target=data.get("operation_target"),
+            exception_types=data.get("exception_types", []),
+            implies=data.get("implies", []),
+            excludes=data.get("excludes", []),
+            metadata=data.get("metadata", {}),
         )
 
     def __repr__(self) -> str:
         """Enhanced repr showing key constraint information."""
-        parts = [f"BranchConstraint(type={self.constraint_type!r}"]
+        parts = [f"ExecutionConstraint(type={self.constraint_type!r}"]
 
         # Truncate long expressions
         expr = self.expr
@@ -561,10 +572,10 @@ class BranchConstraint:
         if self.polarity is not None:
             parts.append(f"polarity={self.polarity}")
 
-        if self.branch_id:
-            parts.append(f"branch={self.branch_id!r}")
+        if self.ei_id:
+            parts.append(f"ei={self.ei_id!r}")
 
-        return ', '.join(parts) + ')'
+        return ", ".join(parts) + ")"
 
 
 @dataclass
@@ -581,13 +592,13 @@ class TargetHint:
         """Convert to dictionary format for serialization."""
         result: dict[str, Any] = {}
         if self.line is not None:
-            result['line'] = self.line
+            result["line"] = self.line
         if self.role is not None:
-            result['role'] = self.role
+            result["role"] = self.role
         if self.polarity is not None:
-            result['polarity'] = self.polarity
+            result["polarity"] = self.polarity
         if self.expr is not None:
-            result['expr'] = self.expr
+            result["expr"] = self.expr
 
         return result
 
@@ -595,11 +606,11 @@ class TargetHint:
     def from_dict(cls, data: dict[str, Any]) -> Self:
         """Parse from dictionary format."""
         return cls(
-            line=data.get('line'),
-            role=data.get('role'),
-            polarity=data.get('polarity'),
-            expr=data.get('expr'),
-            stmt_type=data.get('stmt_type'),
+            line=data.get("line"),
+            role=data.get("role"),
+            polarity=data.get("polarity"),
+            expr=data.get("expr"),
+            stmt_type=data.get("stmt_type"),
         )
 
 
@@ -618,38 +629,42 @@ class StatementOutcome:
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary format for serialization."""
         result: dict[str, Any] = {
-            'outcome': self.outcome,
+            "outcome": self.outcome,
         }
         if self.target_line is not None:
-            result['target_line'] = self.target_line
+            result["target_line"] = self.target_line
         if self.target_ei is not None:
-            result['target_ei'] = self.target_ei
+            result["target_ei"] = self.target_ei
         if self.is_terminal:
-            result['is_terminal'] = self.is_terminal
-            result['terminates_via'] = self.terminates_via
+            result["is_terminal"] = self.is_terminal
+            result["terminates_via"] = self.terminates_via
         if self.skips_lines:
-            result['skips_lines'] = self.skips_lines
+            result["skips_lines"] = self.skips_lines
         if self.skips_eis:
-            result['skips_eis'] = self.skips_eis
+            result["skips_eis"] = self.skips_eis
         if self.target_hint is not None:
-            result['target_hint'] = self.target_hint.to_dict()
+            result["target_hint"] = self.target_hint.to_dict()
         if self.synthetic:
-            result['synthetic'] = self.synthetic
+            result["synthetic"] = self.synthetic
         return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
         """Parse from dictionary format."""
         return cls(
-            outcome=data['outcome'],
-            target_line=data.get('target_line'),
-            target_ei=data.get('target_ei'),
-            is_terminal=data.get('is_terminal', False),
-            terminates_via=data.get('terminates_via'),
-            skips_lines=data.get('skips_lines', []),
-            skips_eis=data.get('skips_eis', []),
-            target_hint=TargetHint.from_dict(data.get('target_hint', {})) if data.get('target_hint') else None,
-            synthetic=data.get('synthetic', False),
+            outcome=data["outcome"],
+            target_line=data.get("target_line"),
+            target_ei=data.get("target_ei"),
+            is_terminal=data.get("is_terminal", False),
+            terminates_via=data.get("terminates_via"),
+            skips_lines=data.get("skips_lines", []),
+            skips_eis=data.get("skips_eis", []),
+            target_hint=(
+                TargetHint.from_dict(data.get("target_hint", {}))
+                if data.get("target_hint")
+                else None
+            ),
+            synthetic=data.get("synthetic", False),
         )
 
 
@@ -668,38 +683,42 @@ class DisruptiveOutcome:
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary format for serialization."""
         result: dict[str, Any] = {
-            'outcome': self.outcome,
+            "outcome": self.outcome,
         }
         if self.target_line is not None:
-            result['target_line'] = self.target_line
+            result["target_line"] = self.target_line
         if self.target_ei is not None:
-            result['target_ei'] = self.target_ei
+            result["target_ei"] = self.target_ei
         if self.is_terminal:
-            result['is_terminal'] = self.is_terminal
-            result['terminates_via'] = self.terminates_via
+            result["is_terminal"] = self.is_terminal
+            result["terminates_via"] = self.terminates_via
         if self.skips_lines:
-            result['skips_lines'] = self.skips_lines
+            result["skips_lines"] = self.skips_lines
         if self.skips_eis:
-            result['skips_eis'] = self.skips_eis
+            result["skips_eis"] = self.skips_eis
         if self.target_hint is not None:
-            result['target_hint'] = self.target_hint.to_dict()
+            result["target_hint"] = self.target_hint.to_dict()
         if self.synthetic:
-            result['synthetic'] = self.synthetic
+            result["synthetic"] = self.synthetic
         return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
         """Parse from dictionary format."""
         return cls(
-            outcome=data['outcome'],
-            target_line=data.get('target_line'),
-            target_ei=data.get('target_ei'),
-            is_terminal=data.get('is_terminal', False),
-            terminates_via=data.get('terminates_via'),
-            skips_lines=data.get('skips_lines', []),
-            skips_eis=data.get('skips_eis', []),
-            target_hint=TargetHint.from_dict(data.get('target_hint', {})) if data.get('target_hint') else None,
-            synthetic=data.get('synthetic', False),
+            outcome=data["outcome"],
+            target_line=data.get("target_line"),
+            target_ei=data.get("target_ei"),
+            is_terminal=data.get("is_terminal", False),
+            terminates_via=data.get("terminates_via"),
+            skips_lines=data.get("skips_lines", []),
+            skips_eis=data.get("skips_eis", []),
+            target_hint=(
+                TargetHint.from_dict(data.get("target_hint", {}))
+                if data.get("target_hint")
+                else None
+            ),
+            synthetic=data.get("synthetic", False),
         )
 
 
@@ -719,40 +738,44 @@ class ConditionalTarget:
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary format for serialization."""
         result: dict[str, Any] = {
-            'target_condition': self.target_condition,
-            'condition_result': self.condition_result,
+            "target_condition": self.target_condition,
+            "condition_result": self.condition_result,
         }
         if self.target_line is not None:
-            result['target_line'] = self.target_line
+            result["target_line"] = self.target_line
         if self.target_ei is not None:
-            result['target_ei'] = self.target_ei
+            result["target_ei"] = self.target_ei
         if self.is_terminal:
-            result['is_terminal'] = self.is_terminal
-            result['terminates_via'] = self.terminates_via
+            result["is_terminal"] = self.is_terminal
+            result["terminates_via"] = self.terminates_via
         if self.skips_lines:
-            result['skips_lines'] = self.skips_lines
+            result["skips_lines"] = self.skips_lines
         if self.skips_eis:
-            result['skips_eis'] = self.skips_eis
+            result["skips_eis"] = self.skips_eis
         if self.target_hint is not None:
-            result['target_hint'] = self.target_hint.to_dict()
+            result["target_hint"] = self.target_hint.to_dict()
         if self.synthetic:
-            result['synthetic'] = self.synthetic
+            result["synthetic"] = self.synthetic
         return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
         """Parse from dictionary format."""
         return cls(
-            target_condition=data['target_condition'],
-            condition_result=data['condition_result'],
-            target_line=data.get('target_line'),
-            target_ei=data.get('target_ei'),
-            is_terminal=data.get('is_terminal', False),
-            terminates_via=data.get('terminates_via'),
-            skips_lines=data.get('skips_lines', []),
-            skips_eis=data.get('skips_eis', []),
-            target_hint=TargetHint.from_dict(data.get('target_hint', {})) if data.get('target_hint') else None,
-            synthetic=data.get('synthetic', False),
+            target_condition=data["target_condition"],
+            condition_result=data["condition_result"],
+            target_line=data.get("target_line"),
+            target_ei=data.get("target_ei"),
+            is_terminal=data.get("is_terminal", False),
+            terminates_via=data.get("terminates_via"),
+            skips_lines=data.get("skips_lines", []),
+            skips_eis=data.get("skips_eis", []),
+            target_hint=(
+                TargetHint.from_dict(data.get("target_hint", {}))
+                if data.get("target_hint")
+                else None
+            ),
+            synthetic=data.get("synthetic", False),
         )
 
 
@@ -761,46 +784,42 @@ class OwnerInfo:
     stmt_type: str | None = None
     region: str | None = None
     line: int | None = None
-    branch_id: str | None = None
+    ei_id: str | None = None
     expr: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary format for serialization."""
         result: dict[str, Any] = {}
         if self.stmt_type is not None:
-            result['stmt_type'] = self.stmt_type
+            result["stmt_type"] = self.stmt_type
         if self.region is not None:
-            result['region'] = self.region
+            result["region"] = self.region
         if self.line is not None:
-            result['line'] = self.line
-        if self.branch_id is not None:
-            result['branch_id'] = self.branch_id
+            result["line"] = self.line
+        if self.ei_id is not None:
+            result["ei_id"] = self.ei_id
         return result
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
         """Parse from dictionary format."""
         return cls(
-            stmt_type=data.get('stmt_type'),
-            region=data.get('region'),
-            line=data.get('line'),
-            branch_id=data.get('branch_id'),
-            expr=data.get('expr'),
+            stmt_type=data.get("stmt_type"),
+            region=data.get("region"),
+            line=data.get("line"),
+            ei_id=data.get("ei_id"),
+            expr=data.get("expr"),
         )
 
 
 @dataclass
-class Branch:
+class ExecutionItem:
     """
-    Execution Item (EI) representation with constraint tracking.
-
-    Contract between stage2_enumerate_exec_items.py and downstream stages.
-    Called "Branch" in current code but represents an Execution Item.
-
-    Enhanced with constraint metadata to enable path feasibility analysis.
-
-    In the newer model, Branch is a container for concrete outcome objects rather
-    than a flattened holder of top-level target/terminal fields.
+    Execution Item (EI) representation with constraint tracking. It is the contract
+    between stage2_enumerate_exec_items.py and downstream stages. Enhanced with
+    constraint metadata to enable path feasibility analysis. This is a container for
+    concrete outcome objects rather than a flattened holder of top-level target/terminal
+    fields.
     """
 
     id: str
@@ -820,7 +839,7 @@ class Branch:
     Statement-level decorators (e.g., for feature flow tracing).
     """
 
-    constraint: BranchConstraint | None = None
+    constraint: ExecutionConstraint | None = None
     """
     Constraint object containing all constraint-related metadata.
     Replaces scattered constraint_type, constraint_expr, constraint_polarity fields.
@@ -873,21 +892,23 @@ class Branch:
     """
 
     def __post_init__(self) -> None:
-        """Validate branch structure."""
+        """Validate EI structure."""
         if not self.id:
-            raise ValueError("Branch ID cannot be empty")
+            raise ValueError("EI ID cannot be empty")
         if self.line <= 0:
             raise ValueError(f"Invalid line number: {self.line}")
 
-        present = sum([
-            self.statement_outcome is not None,
-            bool(self.conditional_targets),
-            bool(self.disruptive_outcomes),
-        ])
+        present = sum(
+            [
+                self.statement_outcome is not None,
+                bool(self.conditional_targets),
+                bool(self.disruptive_outcomes),
+            ]
+        )
 
         if present == 0:
             raise ValueError(
-                "Branch must have at least one of: statement_outcome, "
+                "ExecutionItem must have at least one of: statement_outcome, "
                 "conditional_targets, disruptive_outcomes"
             )
 
@@ -901,24 +922,30 @@ class Branch:
             description=data["description"],
             decorators=data.get("decorators", []),
             constraint=(
-                BranchConstraint.from_dict(data["constraint"])
-                if data.get("constraint") else None
+                ExecutionConstraint.from_dict(data["constraint"])
+                if data.get("constraint")
+                else None
             ),
             stmt_type=data.get("stmt_type"),
             statement_outcome=(
                 StatementOutcome.from_dict(data["statement_outcome"])
-                if data.get("statement_outcome") else None
+                if data.get("statement_outcome")
+                else None
             ),
             conditional_targets=(
                 [ConditionalTarget.from_dict(ct) for ct in data["conditional_targets"]]
-                if data.get("conditional_targets") else None
+                if data.get("conditional_targets")
+                else None
             ),
             disruptive_outcomes=(
                 [DisruptiveOutcome.from_dict(o) for o in data["disruptive_outcomes"]]
-                if data.get("disruptive_outcomes") else None
+                if data.get("disruptive_outcomes")
+                else None
             ),
             owner_info=(
-                OwnerInfo.from_dict(data["owner_info"]) if data.get("owner_info") else None
+                OwnerInfo.from_dict(data["owner_info"])
+                if data.get("owner_info")
+                else None
             ),
             metadata=data.get("metadata", {}),
         )
@@ -1002,9 +1029,9 @@ class Branch:
 
         return result
 
-    def conflicts_with(self, other: Branch) -> bool:
+    def conflicts_with(self, other: ExecutionItem) -> bool:
         """
-        Check if this branch's constraints conflict with another branch.
+        Check if this EI's constraints conflict with another EI.
 
         Used for path feasibility analysis to detect impossible paths.
 
@@ -1018,7 +1045,7 @@ class Branch:
 
     def get_constraint_signature(self) -> str:
         """
-        Get a signature representing this branch's constraint.
+        Get a signature representing this EI's constraint.
 
         Used for grouping and comparison in path analysis.
 
@@ -1032,26 +1059,26 @@ class Branch:
 
         return ""
 
-    def is_alternative_to(self, other: Branch) -> bool:
+    def is_alternative_to(self, other: ExecutionItem) -> bool:
         """
-        Check if this branch is a mutually exclusive alternative to another.
+        Check if this EI is a mutually exclusive alternative to another.
 
-        Branches are alternatives if they:
+        EIs are alternatives if they:
         1. Are on the same line (same decision point)
         2. Have the same condition but different descriptions
 
         Returns:
-            True if branches are mutually exclusive alternatives
+            True if EIs are mutually exclusive alternatives
         """
         return (
-                self.line == other.line
-                and self.condition == other.condition
-                and self.description != other.description
+            self.line == other.line
+            and self.condition == other.condition
+            and self.description != other.description
         )
 
     def __repr__(self) -> str:
         """Enhanced repr showing constraint and terminal information."""
-        parts = [f"Branch(id={self.id!r}, line={self.line}"]
+        parts = [f"ExecutionItem(id={self.id!r}, line={self.line}"]
 
         if self.constraint is not None:
             parts.append(f"constraint={self.constraint.constraint_type!r}")
@@ -1068,11 +1095,13 @@ class Branch:
         if self.statement_outcome is not None and self.statement_outcome.is_terminal:
             parts.append(f"terminal={self.statement_outcome.terminates_via!r}")
         elif self.disruptive_outcomes:
-            terminal_modes = sorted({
-                outcome.terminates_via
-                for outcome in self.disruptive_outcomes
-                if outcome.is_terminal and outcome.terminates_via is not None
-            })
+            terminal_modes = sorted(
+                {
+                    outcome.terminates_via
+                    for outcome in self.disruptive_outcomes
+                    if outcome.is_terminal and outcome.terminates_via is not None
+                }
+            )
             if terminal_modes:
                 parts.append(f"terminal={terminal_modes!r}")
 
@@ -1083,23 +1112,26 @@ class Branch:
 # Integration Points
 # =============================================================================
 
+
 class IntegrationType(StrEnum):
     """Type of integration point."""
-    CALL = 'call'
-    CONSTRUCT = 'construct'
-    IMPORT = 'import'
-    DISPATCH = 'dispatch'
-    IO = 'io'
-    OTHER = 'other'
+
+    CALL = "call"
+    CONSTRUCT = "construct"
+    IMPORT = "import"
+    DISPATCH = "dispatch"
+    IO = "io"
+    OTHER = "other"
 
 
 class IntegrationCategory(StrEnum):
     """Category of integration after classification."""
-    INTERUNIT = 'interunit'
-    STDLIB = 'stdlib'
-    EXTLIB = 'extlib'
-    BOUNDARY = 'boundaries'
-    UNKNOWN = 'unknown'
+
+    INTERUNIT = "interunit"
+    STDLIB = "stdlib"
+    EXTLIB = "extlib"
+    BOUNDARY = "boundaries"
+    UNKNOWN = "unknown"
 
 
 class ResolutionKind(StrEnum):
@@ -1146,6 +1178,7 @@ class IntegrationCandidate:
         - "contract_dispatch"
         - "fallback_original"
     """
+
     type: str  # IntegrationType value
     target: str
     line: int
@@ -1173,42 +1206,44 @@ class IntegrationCandidate:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
         """Parse from inventory dict format."""
-        target = data['target']
+        target = data["target"]
         return cls(
-            type=data['type'],
+            type=data["type"],
             target=target,
-            line=data['line'],
-            signature=data['signature'],
-            resolved_target=data.get('resolved_target', target),
-            resolution_kind=ResolutionKind(data.get("resolution_kind", ResolutionKind.UNRESOLVED.value)),
-            candidate_targets=data.get('candidate_targets', []),
-            resolution_basis=data.get('resolution_basis'),
-            execution_paths=data.get('execution_paths', [])
+            line=data["line"],
+            signature=data["signature"],
+            resolved_target=data.get("resolved_target", target),
+            resolution_kind=ResolutionKind(
+                data.get("resolution_kind", ResolutionKind.UNRESOLVED.value)
+            ),
+            candidate_targets=data.get("candidate_targets", []),
+            resolution_basis=data.get("resolution_basis"),
+            execution_paths=data.get("execution_paths", []),
         )
 
     def to_dict(self) -> dict[str, Any]:
         """Convert to inventory dict format."""
         result: dict[str, Any] = {
-            'type': self.type,
-            'target': self.target,
-            'line': self.line,
-            'signature': self.signature,
+            "type": self.type,
+            "target": self.target,
+            "line": self.line,
+            "signature": self.signature,
         }
 
         if self.resolved_target is not None:
-            result['resolved_target'] = self.resolved_target
+            result["resolved_target"] = self.resolved_target
 
         if self.resolution_kind:
             result["resolution_kind"] = self.resolution_kind.value
 
         if self.candidate_targets:
-            result['candidate_targets'] = self.candidate_targets
+            result["candidate_targets"] = self.candidate_targets
 
         if self.resolution_basis:
-            result['resolution_basis'] = self.resolution_basis
+            result["resolution_basis"] = self.resolution_basis
 
         if self.execution_paths:
-            result['execution_paths'] = self.execution_paths
+            result["execution_paths"] = self.execution_paths
 
         return result
 
@@ -1242,20 +1277,20 @@ class IntegrationCandidate:
         fact: dict[str, Any] = {}
 
         if integration_id:
-            fact['id'] = integration_id
+            fact["id"] = integration_id
 
-        fact['target'] = self.target
-        fact['resolved_target'] = self.resolved_target
-        fact['resolution_kind'] = self.resolution_kind
-        fact['kind'] = self.type
-        fact['signature'] = self.signature
-        fact['execution_paths'] = self.execution_paths
+        fact["target"] = self.target
+        fact["resolved_target"] = self.resolved_target
+        fact["resolution_kind"] = self.resolution_kind
+        fact["kind"] = self.type
+        fact["signature"] = self.signature
+        fact["execution_paths"] = self.execution_paths
 
         if self.candidate_targets:
-            fact['candidate_targets'] = self.candidate_targets
+            fact["candidate_targets"] = self.candidate_targets
 
         if self.resolution_basis:
-            fact['resolution_basis'] = self.resolution_basis
+            fact["resolution_basis"] = self.resolution_basis
 
         return fact
 
@@ -1263,6 +1298,7 @@ class IntegrationCandidate:
 # =============================================================================
 # Callable Entries
 # =============================================================================
+
 
 @dataclass
 class CallableSignatureInfo:
@@ -1281,7 +1317,11 @@ class CallableSignatureInfo:
             decorators=data.get("decorators", []),
             modifiers=data.get("modifiers", []),
             params=[ParamSpec.from_dict(p) for p in data.get("params", [])],
-            return_type=TypeRef.from_dict(data.get("return_type")) if data.get("return_type") else None,
+            return_type=(
+                TypeRef.from_dict(data.get("return_type"))
+                if data.get("return_type")
+                else None
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -1348,7 +1388,7 @@ class CallableHierarchyInfo:
 
 @dataclass
 class CallableAnalysisInfo:
-    branches: list[Branch] = field(default_factory=list)
+    execution_items: list[ExecutionItem] = field(default_factory=list)
     integration_candidates: list[IntegrationCandidate] = field(default_factory=list)
     total_eis: int = 0
     needs_callable_analysis: bool = False
@@ -1357,9 +1397,12 @@ class CallableAnalysisInfo:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
         return cls(
-            branches=[Branch.from_dict(b) for b in data.get("branches", [])],
+            execution_items=[
+                ExecutionItem.from_dict(b) for b in data.get("execution_items", [])
+            ],
             integration_candidates=[
-                IntegrationCandidate.from_dict(c) for c in data.get("integration_candidates", [])
+                IntegrationCandidate.from_dict(c)
+                for c in data.get("integration_candidates", [])
             ],
             total_eis=data.get("total_eis", 0),
             needs_callable_analysis=data.get("needs_callable_analysis", False),
@@ -1368,8 +1411,8 @@ class CallableAnalysisInfo:
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {}
-        if self.branches:
-            result["branches"] = [branch.to_dict() for branch in self.branches]
+        if self.execution_items:
+            result["execution_items"] = [ei.to_dict() for ei in self.execution_items]
         if self.integration_candidates:
             result["integration_candidates"] = [
                 candidate.to_dict() for candidate in self.integration_candidates
@@ -1405,8 +1448,12 @@ class CallableEntry:
             line_start=data.get("line_start", 0),
             line_end=data.get("line_end", 0),
             children=[cls.from_dict(c) for c in data.get("children", [])],
-            signature_info=CallableSignatureInfo.from_dict(data.get("signature_info", {})),
-            hierarchy_info=CallableHierarchyInfo.from_dict(data.get("hierarchy_info", {})),
+            signature_info=CallableSignatureInfo.from_dict(
+                data.get("signature_info", {})
+            ),
+            hierarchy_info=CallableHierarchyInfo.from_dict(
+                data.get("hierarchy_info", {})
+            ),
             analysis_info=CallableAnalysisInfo.from_dict(data.get("analysis_info", {})),
         )
 
@@ -1446,10 +1493,11 @@ class ExternalNodeType(StrEnum):
     BOUNDARY: System boundary call (file I/O, network, database, etc.)
     UNKNOWN: Unresolved or unknown call type
     """
-    STDLIB = 'stdlib'
-    EXTLIB = 'extlib'
-    BOUNDARY = 'boundary'
-    UNKNOWN = 'unknown'
+
+    STDLIB = "stdlib"
+    EXTLIB = "extlib"
+    BOUNDARY = "boundary"
+    UNKNOWN = "unknown"
 
     @classmethod
     def from_integration_category(cls, category: str) -> Self:
@@ -1463,29 +1511,29 @@ class ExternalNodeType(StrEnum):
             Corresponding ExternalNodeType
         """
         mapping = {
-            'stdlib': cls.STDLIB,
-            'extlib': cls.EXTLIB,
-            'boundary': cls.BOUNDARY,
-            'unknown': cls.UNKNOWN,
+            "stdlib": cls.STDLIB,
+            "extlib": cls.EXTLIB,
+            "boundary": cls.BOUNDARY,
+            "unknown": cls.UNKNOWN,
         }
         return mapping.get(category, cls.UNKNOWN)
 
 
 class ExternalTargetType(StrEnum):
-    STDLIB = 'EXTERNAL_STDLIB'
-    EXTLIB = 'EXTERNAL_EXTLIB'
-    BOUNDARY = 'EXTERNAL_BOUNDARY'
-    UNKNOWN = 'EXTERNAL_UNKNOWN'
+    STDLIB = "EXTERNAL_STDLIB"
+    EXTLIB = "EXTERNAL_EXTLIB"
+    BOUNDARY = "EXTERNAL_BOUNDARY"
+    UNKNOWN = "EXTERNAL_UNKNOWN"
 
     @classmethod
     def from_category(cls, category: str) -> Self:
         """Map integration category to external target type."""
         mapping = {
-            'stdlib': cls.STDLIB,
-            'extlib': cls.EXTLIB,
-            'boundary': cls.BOUNDARY,
-            'unknown': cls.UNKNOWN,
-            'interunit': cls.UNKNOWN,  # Fallback for unresolved interunit
+            "stdlib": cls.STDLIB,
+            "extlib": cls.EXTLIB,
+            "boundary": cls.BOUNDARY,
+            "unknown": cls.UNKNOWN,
+            "interunit": cls.UNKNOWN,  # Fallback for unresolved interunit
         }
         return mapping.get(category, cls.UNKNOWN)
 
@@ -1497,8 +1545,9 @@ class CallNodeType(StrEnum):
     LOCAL: Callable in the same module
     INTERUNIT: Callable in a different module within the same project
     """
-    LOCAL = 'local'
-    INTERUNIT = 'interunit'
+
+    LOCAL = "local"
+    INTERUNIT = "interunit"
 
 
 class NodeCategory(StrEnum):
@@ -1508,5 +1557,6 @@ class NodeCategory(StrEnum):
     CALL_NODE: Concrete callable that can be traced into (local or interunit)
     EXTERNAL_NODE: Placeholder for external calls requiring fixtures/mocks
     """
-    CALL_NODE = 'call_node'
-    EXTERNAL_NODE = 'external_node'
+
+    CALL_NODE = "call_node"
+    EXTERNAL_NODE = "external_node"

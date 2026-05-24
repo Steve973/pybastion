@@ -1354,6 +1354,95 @@ def selected_target_eis_for_branch_marker(
     return branch_marker.branch_selection.selected_target_eis
 
 
+def end_branch_name(end: FeatureMarkerRecord) -> str:
+    value = end.kwargs.get('branch')
+
+    if value is None:
+        return 'main'
+
+    text = str(value).strip()
+    return text if text else 'main'
+
+
+def branch_point_marker_for_branch(
+        branch_point: FeatureBranchPoint,
+        branch_name: str,
+) -> FeatureMarkerRecord | None:
+    for marker in branch_point.branch_markers:
+        if branch_name_for_marker(marker) == branch_name:
+            return marker
+
+    return None
+
+
+def all_control_target_eis_for_branch_point(
+        branch_point: FeatureBranchPoint,
+) -> list[str]:
+    result: list[str] = []
+
+    for marker in branch_point.branch_markers:
+        marked_statement = marker.marked_statement
+        if marked_statement is None:
+            continue
+
+        for control_ei in marked_statement.control_eis:
+            for target in control_ei.conditional_targets:
+                target_ei = target.get('target_ei')
+                if target_ei and target_ei not in result:
+                    result.append(str(target_ei))
+
+    return result
+
+
+def selected_target_eis_for_branch_point(
+        branch_point: FeatureBranchPoint,
+) -> set[str]:
+    result: set[str] = set()
+
+    for marker in branch_point.branch_markers:
+        result.update(selected_target_eis_for_branch_marker(marker))
+
+    return result
+
+
+def continuation_target_eis_for_branch_point(
+        branch_point: FeatureBranchPoint,
+) -> list[str]:
+    all_targets = all_control_target_eis_for_branch_point(branch_point)
+    selected_targets = selected_target_eis_for_branch_point(branch_point)
+
+    return [
+        target_ei
+        for target_ei in all_targets
+        if target_ei not in selected_targets
+    ]
+
+
+def target_eis_for_end_at_branch_point(
+        *,
+        end: FeatureMarkerRecord,
+        branch_point: FeatureBranchPoint,
+) -> tuple[list[str], str]:
+    required_branch = end_branch_name(end)
+
+    if required_branch != 'main':
+        required_marker = branch_point_marker_for_branch(
+            branch_point,
+            required_branch,
+        )
+
+        if required_marker is not None:
+            return (
+                selected_target_eis_for_branch_marker(required_marker),
+                required_branch,
+            )
+
+    return (
+        continuation_target_eis_for_branch_point(branch_point),
+        'main',
+    )
+
+
 def forbidden_sibling_branch_region_nodes(
         cfg: nx.DiGraph,
         *,
@@ -1515,6 +1604,53 @@ def expand_case_at_branch_point_with_segments(
         )
 
     return expanded_cases
+
+
+def advance_case_through_branch_point_for_end(
+        cfg: nx.DiGraph,
+        *,
+        case: FeatureFlowCase,
+        branch_point: FeatureBranchPoint,
+        end: FeatureMarkerRecord,
+) -> FeatureFlowCase | None:
+    target_eis, branch_name = target_eis_for_end_at_branch_point(
+        end=end,
+        branch_point=branch_point,
+    )
+
+    if not target_eis:
+        return None
+
+    branch_target_segment = trace_feature_path_segment(
+        cfg,
+        feature_name=case.feature_name,
+        segment_branch_path=case.active_branch_path,
+        start_eis=list(case.current_eis),
+        end_eis=target_eis,
+        role=FeaturePathSegmentRole.BRANCH_TARGET,
+        disposition=FeaturePathSegmentDisposition.ACCEPTED,
+        disposition_reason=FeaturePathSegmentDispositionReason.EXACT_GRAPH_PATH,
+    )
+
+    if branch_target_segment is None:
+        return None
+
+    next_branch_path = extend_branch_path(
+        case.case_branch_path,
+        branch_name,
+    )
+
+    return FeatureFlowCase(
+        feature_name=case.feature_name,
+        case_branch_path=next_branch_path,
+        active_branch_path=next_branch_path,
+        current_eis=(branch_target_segment.end_ei,),
+        segments=(*case.segments, branch_target_segment),
+        status=case.status,
+        end_kind=case.end_kind,
+        outcome_kind=case.outcome_kind,
+        end_marker_node_id=case.end_marker_node_id,
+    )
 
 
 def expand_cases_at_branch_point_with_segments(
@@ -1900,77 +2036,17 @@ def trace_feature_flow_cases_to_end(
 
             cases_reaching_branch_point.append(case_at_branch_point)
 
-        expanded_cases = expand_cases_at_branch_point_with_segments(
-            cfg,
-            cases=cases_reaching_branch_point,
-            branch_point=branch_point,
-        )
+        next_cases: list[FeatureFlowCase] = []
 
-        cases = expanded_cases
-
-        if not cases:
-            return FeatureFlowTraceResult(
-                completed_cases=completed_cases,
-                unresolved_cases=[],
-            )
-
-    for branch_point_index, branch_point in enumerate(branch_points):
-        cases_after_converge: list[FeatureFlowCase] = []
-
-        for case in cases:
-            converge_result = trace_nearest_converge_point_for_case(
+        for case in cases_reaching_branch_point:
+            advanced_case = advance_case_through_branch_point_for_end(
                 cfg,
                 case=case,
-                converge_points=converge_points,
-                branch_points=branch_points,
-            )
-
-            if converge_result is None:
-                cases_after_converge.append(case)
-                continue
-
-            converge_point, converge_segment = converge_result
-
-            converged_case = trace_case_to_converge_point(
-                case=case,
-                converge_point=converge_point,
-                segment=converge_segment,
-            )
-
-            cases_after_converge.append(converged_case)
-
-        cases_still_active: list[FeatureFlowCase] = []
-
-        for case in cases_after_converge:
-            completed_case = trace_case_to_end_before_branch_point(
-                cfg,
-                case=case,
+                branch_point=branch_point,
                 end=end,
-                branch_point=branch_point,
             )
 
-            if completed_case is not None:
-                completed_cases.append(completed_case)
-                continue
-
-            cases_still_active.append(case)
-
-        if not cases_still_active:
-            return FeatureFlowTraceResult(
-                completed_cases=completed_cases,
-                unresolved_cases=unresolved_cases,
-            )
-
-        cases_reaching_branch_point: list[FeatureFlowCase] = []
-
-        for case in cases_still_active:
-            case_at_branch_point = trace_case_to_branch_point(
-                cfg,
-                case=case,
-                branch_point=branch_point,
-            )
-
-            if case_at_branch_point is None:
+            if advanced_case is None:
                 completed_case = trace_case_to_end(
                     cfg,
                     case=case,
@@ -1997,43 +2073,55 @@ def trace_feature_flow_cases_to_end(
 
                 continue
 
-            cases_reaching_branch_point.append(case_at_branch_point)
+            next_cases.append(advanced_case)
 
-        expanded_cases = expand_cases_at_branch_point_with_segments(
-            cfg,
-            cases=cases_reaching_branch_point,
-            branch_point=branch_point,
-        )
-
-        next_branch_point = (
-            branch_points[branch_point_index + 1]
-            if branch_point_index + 1 < len(branch_points)
-            else None
-        )
-
-        if next_branch_point is None:
-            cases = expanded_cases
-        else:
-            cases = []
-
-            for case in expanded_cases:
-                completed_case = trace_case_to_end_before_branch_point(
-                    cfg,
-                    case=case,
-                    end=end,
-                    branch_point=next_branch_point,
-                )
-
-                if completed_case is not None:
-                    completed_cases.append(completed_case)
-                    continue
-
-                cases.append(case)
+        cases = next_cases
 
         if not cases:
             return FeatureFlowTraceResult(
                 completed_cases=completed_cases,
                 unresolved_cases=unresolved_cases,
+            )
+
+    for case in cases:
+        converge_result = trace_nearest_converge_point_for_case(
+            cfg,
+            case=case,
+            converge_points=converge_points,
+            branch_points=branch_points,
+        )
+
+        if converge_result is not None:
+            converge_point, converge_segment = converge_result
+
+            case = trace_case_to_converge_point(
+                case=case,
+                converge_point=converge_point,
+                segment=converge_segment,
+            )
+
+        completed_case = trace_case_to_end(
+            cfg,
+            case=case,
+            end=end,
+        )
+
+        if completed_case is not None:
+            completed_cases.append(completed_case)
+            continue
+
+        unresolved_cases.append(
+            unresolved_case_for_end_failure(
+                case,
+                end=end,
+            )
+        )
+
+        if verbose:
+            debug_print_end_path_failure(
+                cfg,
+                case=case,
+                end=end,
             )
 
     return FeatureFlowTraceResult(

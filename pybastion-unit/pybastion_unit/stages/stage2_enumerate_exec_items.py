@@ -25,9 +25,23 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from pybastion_common.models import (
+    ExecutionItem,
+    ConditionalTarget,
+    DisruptiveOutcome,
+    OwnerInfo,
+    ProjectIndex,
+    StatementOutcome,
+    UnitBindingEntry,
+    UnitIndex,
+    UnitIndexEntry,
+)
 
-from pybastion_common.models import Branch, StatementOutcome, ConditionalTarget, DisruptiveOutcome, OwnerInfo, \
-    ProjectIndex, UnitIndex, UnitIndexEntry, UnitBindingEntry
+from pybastion_unit.helpers.callable_id_generation import (
+    FUNC_ID_EXPR,
+    generate_ei_id,
+    generate_function_entry_ei_id,
+)
 from pybastion_unit.helpers.constraint_metadata_helper import (
     enrich_outcome_with_constraint,
     populate_constraint_relationships,
@@ -35,11 +49,15 @@ from pybastion_unit.helpers.constraint_metadata_helper import (
 from pybastion_unit.helpers.decorator_processing import extract_statement_decorators
 from pybastion_unit.helpers.type_indexing import build_module_index
 from pybastion_unit.semantic_decomposition import decompose_statement
-from pybastion_unit.semantic_decomposition.decomp_types import DecompositionContext, ControlOwner, OwnerKind
-from pybastion_unit.helpers.callable_id_generation import (
-    FUNC_ID_EXPR,
-    generate_ei_id,
-    generate_function_entry_ei_id,
+from pybastion_unit.semantic_decomposition.decomp_models import (
+    ExecutionStatementDecomposition,
+    ControlStatementDecomposition,
+    ControlFlow,
+)
+from pybastion_unit.semantic_decomposition.decomp_types import (
+    ControlOwner,
+    DecompositionContext,
+    OwnerKind,
 )
 
 ENUM_BASES: set[str] = {"Enum", "IntEnum", "StrEnum", "Flag", "IntFlag"}
@@ -63,7 +81,9 @@ def load_project_index(filepath: Path) -> ProjectIndex:
     units: list[UnitIndex] = []
     for unit_payload in payload.get("units", []):
         entries = [UnitIndexEntry(**entry) for entry in unit_payload.get("entries", [])]
-        bindings = [UnitBindingEntry(**binding) for binding in unit_payload.get("bindings", [])]
+        bindings = [
+            UnitBindingEntry(**binding) for binding in unit_payload.get("bindings", [])
+        ]
         units.append(
             UnitIndex(
                 unit_id=unit_payload["unit_id"],
@@ -91,8 +111,8 @@ class StatementContext:
 
 
 def _prepend_next_line(
-        local_next_line: int | None,
-        inherited_next_lines: list[int] | None,
+    local_next_line: int | None,
+    inherited_next_lines: list[int] | None,
 ) -> list[int] | None:
     if local_next_line is None:
         return inherited_next_lines
@@ -105,12 +125,14 @@ def get_statement_contexts(node: ast.AST) -> list[StatementContext]:
     result: list[StatementContext] = []
 
     def visit_block(
-            statements: list[ast.stmt],
-            inherited_next_lines: list[int] | None = None,
-            owners: tuple[ControlOwner, ...] = (),
+        statements: list[ast.stmt],
+        inherited_next_lines: list[int] | None = None,
+        owners: tuple[ControlOwner, ...] = (),
     ) -> None:
         for i, stmt in enumerate(statements):
-            local_next_line = statements[i + 1].lineno if i + 1 < len(statements) else None
+            local_next_line = (
+                statements[i + 1].lineno if i + 1 < len(statements) else None
+            )
             next_lines = _prepend_next_line(local_next_line, inherited_next_lines)
 
             result.append(
@@ -125,22 +147,28 @@ def get_statement_contexts(node: ast.AST) -> list[StatementContext]:
                 visit_block(
                     stmt.body,
                     next_lines,
-                    (*owners, ControlOwner(
-                        kind=OwnerKind.IF,
-                        node=stmt,
-                        region="body",
-                        next_stmt_lines=next_lines
-                    )),
+                    (
+                        *owners,
+                        ControlOwner(
+                            kind=OwnerKind.IF,
+                            node=stmt,
+                            region="body",
+                            next_stmt_lines=next_lines,
+                        ),
+                    ),
                 )
                 visit_block(
                     stmt.orelse,
                     next_lines,
-                    (*owners, ControlOwner(
-                        kind=OwnerKind.IF,
-                        node=stmt,
-                        region="orelse",
-                        next_stmt_lines=next_lines
-                    )),
+                    (
+                        *owners,
+                        ControlOwner(
+                            kind=OwnerKind.IF,
+                            node=stmt,
+                            region="orelse",
+                            next_stmt_lines=next_lines,
+                        ),
+                    ),
                 )
                 continue
 
@@ -149,12 +177,15 @@ def get_statement_contexts(node: ast.AST) -> list[StatementContext]:
                     visit_block(
                         case.body,
                         next_lines,
-                        (*owners, ControlOwner(
-                            kind=OwnerKind.MATCH,
-                            node=stmt,
-                            region=f"case[{case_index}]",
-                            next_stmt_lines=next_lines,
-                        )),
+                        (
+                            *owners,
+                            ControlOwner(
+                                kind=OwnerKind.MATCH,
+                                node=stmt,
+                                region=f"case[{case_index}]",
+                                next_stmt_lines=next_lines,
+                            ),
+                        ),
                     )
                 continue
 
@@ -162,22 +193,28 @@ def get_statement_contexts(node: ast.AST) -> list[StatementContext]:
                 visit_block(
                     stmt.body,
                     next_lines,
-                    (*owners, ControlOwner(
-                        kind=OwnerKind.LOOP,
-                        node=stmt,
-                        region="body",
-                        next_stmt_lines=next_lines
-                    ))
+                    (
+                        *owners,
+                        ControlOwner(
+                            kind=OwnerKind.LOOP,
+                            node=stmt,
+                            region="body",
+                            next_stmt_lines=next_lines,
+                        ),
+                    ),
                 )
                 visit_block(
                     stmt.orelse,
                     next_lines,
-                    (*owners, ControlOwner(
-                        kind=OwnerKind.LOOP,
-                        node=stmt,
-                        region="orelse",
-                        next_stmt_lines=next_lines
-                    ))
+                    (
+                        *owners,
+                        ControlOwner(
+                            kind=OwnerKind.LOOP,
+                            node=stmt,
+                            region="orelse",
+                            next_stmt_lines=next_lines,
+                        ),
+                    ),
                 )
                 continue
 
@@ -185,12 +222,15 @@ def get_statement_contexts(node: ast.AST) -> list[StatementContext]:
                 visit_block(
                     stmt.body,
                     next_lines,
-                    (*owners, ControlOwner(
-                        kind=OwnerKind.WITH,
-                        node=stmt,
-                        region="body",
-                        next_stmt_lines=next_lines
-                    )),
+                    (
+                        *owners,
+                        ControlOwner(
+                            kind=OwnerKind.WITH,
+                            node=stmt,
+                            region="body",
+                            next_stmt_lines=next_lines,
+                        ),
+                    ),
                 )
                 continue
 
@@ -198,49 +238,63 @@ def get_statement_contexts(node: ast.AST) -> list[StatementContext]:
                 visit_block(
                     stmt.body,
                     next_lines,
-                    (*owners, ControlOwner(
-                        kind=OwnerKind.TRY,
-                        node=stmt,
-                        region="body",
-                        next_stmt_lines=next_lines,
-                    )),
+                    (
+                        *owners,
+                        ControlOwner(
+                            kind=OwnerKind.TRY,
+                            node=stmt,
+                            region="body",
+                            next_stmt_lines=next_lines,
+                        ),
+                    ),
                 )
 
                 visit_block(
                     stmt.orelse,
                     next_lines,
-                    (*owners, ControlOwner(
-                        kind=OwnerKind.TRY,
-                        node=stmt,
-                        region="else",
-                        next_stmt_lines=next_lines,
-                    )),
+                    (
+                        *owners,
+                        ControlOwner(
+                            kind=OwnerKind.TRY,
+                            node=stmt,
+                            region="else",
+                            next_stmt_lines=next_lines,
+                        ),
+                    ),
                 )
 
                 for handler in stmt.handlers:
                     visit_block(
                         handler.body,
                         next_lines,
-                        (*owners, ControlOwner(
-                            kind=OwnerKind.TRY,
-                            node=stmt,
-                            region="except",
-                            next_stmt_lines=next_lines,
-                        )),
+                        (
+                            *owners,
+                            ControlOwner(
+                                kind=OwnerKind.TRY,
+                                node=stmt,
+                                region="except",
+                                next_stmt_lines=next_lines,
+                            ),
+                        ),
                     )
 
                 visit_block(
                     stmt.finalbody,
                     next_lines,
-                    (*owners, ControlOwner(
-                        kind=OwnerKind.TRY,
-                        node=stmt,
-                        region="finally",
-                        next_stmt_lines=next_lines,
-                    )),
+                    (
+                        *owners,
+                        ControlOwner(
+                            kind=OwnerKind.TRY,
+                            node=stmt,
+                            region="finally",
+                            next_stmt_lines=next_lines,
+                        ),
+                    ),
                 )
 
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)):
+    if isinstance(
+        node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)
+    ):
         visit_block(node.body)
 
     return result
@@ -259,29 +313,48 @@ def _build_decomposition_context(context: StatementContext) -> DecompositionCont
 
 
 class FunctionResult:
-    def __init__(self, name: str, line_start: int, line_end: int, branches: list[Branch]) -> None:
+    def __init__(
+        self,
+        name: str,
+        line_start: int,
+        line_end: int,
+        execution_items: list[ExecutionItem],
+        control_flow: ControlFlow | None = None,
+    ) -> None:
         self.name = name
         self.line_start = line_start
         self.line_end = line_end
-        self.branches = branches
-        self.total_eis = len(branches)
+        self.execution_items = execution_items
+        self.total_eis = len(execution_items)
+        self.control_flow = control_flow
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result: dict[str, Any] = {
             "name": self.name,
             "line_start": self.line_start,
             "line_end": self.line_end,
             "total_eis": self.total_eis,
-            "branches": [branch.to_dict() for branch in self.branches],
+            "execution_items": [
+                execution_item.to_dict() for execution_item in self.execution_items
+            ],
         }
 
+        if self.control_flow is not None and not self.control_flow.is_empty():
+            result["control_flow"] = self.control_flow.to_dict()
 
-def create_function_entry_branch(
-        callable_id: str,
-        line_num: int,
-        target_line: int | None = None,
-) -> Branch:
-    return Branch(
+        return result
+
+
+def _enum_value(value: Any) -> Any:
+    return value.value if hasattr(value, "value") else value
+
+
+def create_function_entry_ei(
+    callable_id: str,
+    line_num: int,
+    target_line: int | None = None,
+) -> ExecutionItem:
+    return ExecutionItem(
         id=generate_function_entry_ei_id(callable_id),
         line=line_num,
         condition=f"enters function {callable_id}",
@@ -295,15 +368,17 @@ def create_function_entry_branch(
     )
 
 
-def get_first_ei_line(node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef) -> int:
+def get_first_ei_line(
+    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+) -> int:
     if not getattr(node, "body", None):
         return node.lineno
 
     first_stmt = node.body[0]
     if (
-            isinstance(first_stmt, ast.Expr)
-            and isinstance(first_stmt.value, ast.Constant)
-            and isinstance(first_stmt.value.value, str)
+        isinstance(first_stmt, ast.Expr)
+        and isinstance(first_stmt.value, ast.Constant)
+        and isinstance(first_stmt.value.value, str)
     ):
         if len(node.body) > 1:
             return node.body[1].lineno
@@ -322,8 +397,8 @@ def _implicit_return_ei_id(callable_id: str) -> str:
 
 
 def _redirect_implicit_return_outcome(
-        outcome: StatementOutcome | ConditionalTarget | DisruptiveOutcome,
-        sink_id: str,
+    outcome: StatementOutcome | ConditionalTarget | DisruptiveOutcome,
+    sink_id: str,
 ) -> bool:
     if not outcome.is_terminal:
         return False
@@ -337,12 +412,14 @@ def _redirect_implicit_return_outcome(
     return True
 
 
-def _redirect_explicit_implicit_returns(branches: list[Branch], callable_id: str) -> bool:
+def _redirect_explicit_implicit_returns(
+    execution_items: list[ExecutionItem], callable_id: str
+) -> bool:
     sink_id = _implicit_return_ei_id(callable_id)
     referenced = False
 
-    for branch in branches:
-        for outcome in _iter_resolvable_outcomes(branch):
+    for ei in execution_items:
+        for outcome in _iter_resolvable_outcomes(ei):
             if _redirect_implicit_return_outcome(outcome, sink_id):
                 referenced = True
 
@@ -350,18 +427,18 @@ def _redirect_explicit_implicit_returns(branches: list[Branch], callable_id: str
 
 
 def _append_implicit_return_sink_if_referenced(
-        branches: list[Branch],
-        callable_id: str,
-        sink_line: int,
+    execution_items: list[ExecutionItem],
+    callable_id: str,
+    sink_line: int,
 ) -> None:
     sink_id = _implicit_return_ei_id(callable_id)
 
-    if any(branch.id == sink_id for branch in branches):
+    if any(ei.id == sink_id for ei in execution_items):
         return
 
     referenced = False
-    for branch in branches:
-        for outcome in _iter_resolvable_outcomes(branch):
+    for ei in execution_items:
+        for outcome in _iter_resolvable_outcomes(ei):
             if outcome.target_ei == sink_id:
                 referenced = True
                 break
@@ -371,8 +448,8 @@ def _append_implicit_return_sink_if_referenced(
     if not referenced:
         return
 
-    branches.append(
-        Branch(
+    execution_items.append(
+        ExecutionItem(
             id=sink_id,
             line=sink_line,
             condition="implicit return",
@@ -388,31 +465,37 @@ def _append_implicit_return_sink_if_referenced(
     )
 
 
-def _iter_resolvable_outcomes(branch: Branch) -> list[StatementOutcome | ConditionalTarget | DisruptiveOutcome]:
+def _iter_resolvable_outcomes(
+    ei: ExecutionItem,
+) -> list[StatementOutcome | ConditionalTarget | DisruptiveOutcome]:
     outcomes: list[StatementOutcome | ConditionalTarget | DisruptiveOutcome] = []
 
-    if branch.statement_outcome is not None:
-        outcomes.append(branch.statement_outcome)
+    if ei.statement_outcome is not None:
+        outcomes.append(ei.statement_outcome)
 
-    if branch.conditional_targets:
-        outcomes.extend(branch.conditional_targets)
+    if ei.conditional_targets:
+        outcomes.extend(ei.conditional_targets)
 
-    if branch.disruptive_outcomes:
-        outcomes.extend(branch.disruptive_outcomes)
+    if ei.disruptive_outcomes:
+        outcomes.extend(ei.disruptive_outcomes)
 
     return outcomes
 
 
-def _iter_skippable_outcomes(branch: Branch) -> list[StatementOutcome | ConditionalTarget | DisruptiveOutcome]:
-    return _iter_resolvable_outcomes(branch)
+def _iter_skippable_outcomes(
+    ei: ExecutionItem,
+) -> list[StatementOutcome | ConditionalTarget | DisruptiveOutcome]:
+    return _iter_resolvable_outcomes(ei)
 
 
-def _resolve_branch_target_line(branches: list[Branch], branch: Branch) -> None:
-    for outcome in _iter_resolvable_outcomes(branch):
+def _resolve_ei_target_line(
+    execution_items: list[ExecutionItem], ei: ExecutionItem
+) -> None:
+    for outcome in _iter_resolvable_outcomes(ei):
         if outcome.target_line is None:
             continue
 
-        for candidate in branches:
+        for candidate in execution_items:
             if candidate.line == outcome.target_line:
                 outcome.target_ei = candidate.id
                 break
@@ -420,11 +503,13 @@ def _resolve_branch_target_line(branches: list[Branch], branch: Branch) -> None:
         outcome.target_line = None
 
 
-def _resolve_same_line_if_target(branches: list[Branch], branch: Branch, condition: bool) -> str | None:
-    for candidate in branches:
-        if candidate.line != branch.line:
+def _resolve_same_line_if_target(
+    execution_items: list[ExecutionItem], ei: ExecutionItem, condition: bool
+) -> str | None:
+    for candidate in execution_items:
+        if candidate.line != ei.line:
             continue
-        if candidate.id == branch.id:
+        if candidate.id == ei.id:
             continue
         if candidate.stmt_type != "If":
             continue
@@ -439,42 +524,42 @@ def _resolve_same_line_if_target(branches: list[Branch], branch: Branch, conditi
     return None
 
 
-def _resolve_conditional_targets(branches: list[Branch]) -> None:
-    for branch in branches:
-        if not branch.conditional_targets:
+def _resolve_conditional_targets(execution_items: list[ExecutionItem]) -> None:
+    for ei in execution_items:
+        if not ei.conditional_targets:
             continue
 
-        for target in branch.conditional_targets:
+        for target in ei.conditional_targets:
             if target.is_terminal or target.target_line is None:
                 continue
 
             if (
-                    branch.stmt_type == "If"
-                    and branch.description.startswith("evaluates ")
-                    and target.target_line == branch.line
+                ei.stmt_type == "If"
+                and ei.description.startswith("evaluates ")
+                and target.target_line == ei.line
             ):
                 sibling_target = _resolve_same_line_if_target(
-                    branches,
-                    branch,
+                    execution_items,
+                    ei,
                     target.condition_result,
                 )
                 if sibling_target:
                     target.target_ei = sibling_target
                     continue
 
-            for candidate in branches:
+            for candidate in execution_items:
                 if candidate.line == target.target_line:
                     target.target_ei = candidate.id
                     break
 
 
-def _resolve_skip_eis(branches: list[Branch]) -> None:
+def _resolve_skip_eis(execution_items: list[ExecutionItem]) -> None:
     line_to_eis: dict[int, list[str]] = {}
-    for branch in branches:
-        line_to_eis.setdefault(branch.line, []).append(branch.id)
+    for ei in execution_items:
+        line_to_eis.setdefault(ei.line, []).append(ei.id)
 
-    for branch in branches:
-        for outcome in _iter_skippable_outcomes(branch):
+    for ei in execution_items:
+        for outcome in _iter_skippable_outcomes(ei):
             if not outcome.skips_lines:
                 continue
 
@@ -483,18 +568,17 @@ def _resolve_skip_eis(branches: list[Branch]) -> None:
                 resolved_ids.extend(line_to_eis.get(line_num, []))
 
             seen: set[str] = set()
-            outcome.skips_eis = [ei for ei in resolved_ids if not (ei in seen or seen.add(ei))]
+            outcome.skips_eis = [
+                ei for ei in resolved_ids if not (ei in seen or seen.add(ei))
+            ]
 
 
-def _is_forbidden_successor(current: Branch, candidate: Branch) -> bool:
+def _is_forbidden_successor(current: ExecutionItem, candidate: ExecutionItem) -> bool:
     owner = candidate.owner_info
     current_owner = current.owner_info
 
     predicates = [
-        owner is not None
-        and owner.stmt_type == "Try"
-        and owner.region == "except",
-
+        owner is not None and owner.stmt_type == "Try" and owner.region == "except",
         current_owner is not None
         and owner is not None
         and current_owner.stmt_type == "If"
@@ -507,15 +591,15 @@ def _is_forbidden_successor(current: Branch, candidate: Branch) -> bool:
     return any(predicates)
 
 
-def _is_excluded_successor(current: Branch, candidate: Branch) -> bool:
+def _is_excluded_successor(current: ExecutionItem, candidate: ExecutionItem) -> bool:
     if current.constraint is None:
         return False
     return candidate.id in (current.constraint.excludes or [])
 
 
 def _is_skipped_successor(
-        candidate: Branch,
-        outcome: StatementOutcome | ConditionalTarget | DisruptiveOutcome | None = None,
+    candidate: ExecutionItem,
+    outcome: StatementOutcome | ConditionalTarget | DisruptiveOutcome | None = None,
 ) -> bool:
     if outcome is None:
         return False
@@ -523,23 +607,23 @@ def _is_skipped_successor(
 
 
 def _same_statement_successor(
-        branches: list[Branch],
-        index: int,
-        branch: Branch,
-) -> Branch | None:
-    outcome = branch.statement_outcome
+    execution_items: list[ExecutionItem],
+    index: int,
+    ei: ExecutionItem,
+) -> ExecutionItem | None:
+    outcome = ei.statement_outcome
     if outcome is None:
         return None
 
-    for candidate in branches[index + 1:]:
-        if candidate.line != branch.line:
+    for candidate in execution_items[index + 1 :]:
+        if candidate.line != ei.line:
             break
 
         if _is_skipped_successor(candidate, outcome):
             continue
-        if _is_excluded_successor(branch, candidate):
+        if _is_excluded_successor(ei, candidate):
             continue
-        if _is_forbidden_successor(branch, candidate):
+        if _is_forbidden_successor(ei, candidate):
             continue
 
         # Prefer same-line normal statement outcomes first.
@@ -547,14 +631,16 @@ def _same_statement_successor(
             return candidate
 
         # If there are no more same-line normal outcomes, allow a same-line
-        # disruptive/terminal branch as the final step.
+        # disruptive/terminal EI as the final step.
         if candidate.disruptive_outcomes:
             return candidate
 
     return None
 
 
-def _assign_fallthrough_next_eis(branches: list[Branch], callable_id: str) -> None:
+def _assign_fallthrough_next_eis(
+    execution_items: list[ExecutionItem], callable_id: str
+) -> None:
     """
     Final safe fallthrough for normal statement outcomes.
 
@@ -566,25 +652,25 @@ def _assign_fallthrough_next_eis(branches: list[Branch], callable_id: str) -> No
     """
     implicit_return_sink = _implicit_return_ei_id(callable_id)
 
-    for index, branch in enumerate(branches):
-        outcome = branch.statement_outcome
+    for index, ei in enumerate(execution_items):
+        outcome = ei.statement_outcome
         if outcome is None:
             continue
 
         if outcome.target_ei or outcome.is_terminal:
             continue
 
-        same_stmt = _same_statement_successor(branches, index, branch)
+        same_stmt = _same_statement_successor(execution_items, index, ei)
         if same_stmt is not None:
             outcome.target_ei = same_stmt.id
             continue
 
-        for candidate in branches[index + 1:]:
+        for candidate in execution_items[index + 1 :]:
             if _is_skipped_successor(candidate, outcome):
                 continue
-            if _is_excluded_successor(branch, candidate):
+            if _is_excluded_successor(ei, candidate):
                 continue
-            if _is_forbidden_successor(branch, candidate):
+            if _is_forbidden_successor(ei, candidate):
                 continue
             outcome.target_ei = candidate.id
             break
@@ -598,15 +684,15 @@ def _assign_fallthrough_next_eis(branches: list[Branch], callable_id: str) -> No
 # ============================================================================
 
 
-def create_statement_anchor_branch(
-        callable_id: str,
-        ei_num: int,
-        line_num: int,
-        target_ei: str,
-        decorators: list[dict[str, Any]],
-        owner_info: OwnerInfo | None = None,
-) -> Branch:
-    return Branch(
+def create_statement_anchor_ei(
+    callable_id: str,
+    ei_num: int,
+    line_num: int,
+    target_ei: str,
+    decorators: list[dict[str, Any]],
+    owner_info: OwnerInfo | None = None,
+) -> ExecutionItem:
+    return ExecutionItem(
         id=generate_ei_id(callable_id, ei_num),
         line=line_num,
         condition="statement anchor",
@@ -640,16 +726,19 @@ def _owner_info_from_context(context: StatementContext) -> OwnerInfo | None:
 
 
 def enumerate_function_eis(
-        func_node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
-        source_lines: list[str],
-        callable_id: str,
+    func_node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+    source_lines: list[str],
+    callable_id: str,
 ) -> FunctionResult:
-    branches: list[Branch] = []
+    execution_items: list[ExecutionItem] = []
+    control_flow = ControlFlow()
     ei_counter = 1
 
     if re.compile(FUNC_ID_EXPR).match(callable_id):
         first_ei_line = get_first_ei_line(func_node)
-        branches.append(create_function_entry_branch(callable_id, func_node.lineno, first_ei_line))
+        execution_items.append(
+            create_function_entry_ei(callable_id, func_node.lineno, first_ei_line)
+        )
 
     statement_contexts = get_statement_contexts(func_node)
 
@@ -674,8 +763,8 @@ def enumerate_function_eis(
             first_real_ei_num = ei_counter + 1
             first_real_ei_id = generate_ei_id(callable_id, first_real_ei_num)
 
-            branches.append(
-                create_statement_anchor_branch(
+            execution_items.append(
+                create_statement_anchor_ei(
                     callable_id=callable_id,
                     ei_num=anchor_ei_num,
                     line_num=stmt.lineno,
@@ -687,52 +776,64 @@ def enumerate_function_eis(
             ei_counter += 1
 
         for decomposed in outcomes:
-            ei_id = generate_ei_id(callable_id, ei_counter)
-            skips_lines: list[int] = []
-            if decomposed.statement_outcome is not None:
-                skips_lines = decomposed.statement_outcome.skips_lines
+            match decomposed.decomposition:
+                case ExecutionStatementDecomposition() as decomposition:
+                    ei_id = generate_ei_id(callable_id, ei_counter)
 
-            condition, result, constraint = enrich_outcome_with_constraint(
-                decomposed.description,
-                decomposed.call_node,
-                stmt,
-                ei_id,
-                stmt.lineno,
-                skips_lines,
-            )
+                    condition, result, constraint = enrich_outcome_with_constraint(
+                        decomposed.description,
+                        decomposed.candidate_node,
+                        stmt,
+                        ei_id,
+                        stmt.lineno,
+                    )
 
-            branches.append(
-                Branch(
-                    id=ei_id,
-                    line=stmt.lineno,
-                    condition=condition,
-                    description=decomposed.description,
-                    constraint=constraint,
-                    stmt_type=type(stmt).__name__,
-                    decorators=[],
-                    statement_outcome=decomposed.statement_outcome,
-                    conditional_targets=decomposed.conditional_targets,
-                    disruptive_outcomes=decomposed.disruptive_outcomes,
-                    owner_info=owner_info,
-                )
-            )
-            ei_counter += 1
+                    execution_items.append(
+                        ExecutionItem(
+                            id=ei_id,
+                            line=stmt.lineno,
+                            condition=condition,
+                            description=decomposed.description,
+                            constraint=constraint,
+                            stmt_type=type(stmt).__name__,
+                            decorators=[],
+                            statement_outcome=decomposition.statement_outcome,
+                            conditional_targets=decomposition.conditional_targets,
+                            disruptive_outcomes=decomposition.disruptive_outcomes,
+                            owner_info=owner_info,
+                        )
+                    )
+                    ei_counter += 1
 
-    for branch in branches:
-        _resolve_branch_target_line(branches, branch)
+                case ControlStatementDecomposition() as decomposition:
+                    control_flow.regions.extend(decomposition.regions)
+                    control_flow.routes.extend(decomposition.routes)
+                    control_flow.policies.extend(decomposition.policies)
 
-    _resolve_conditional_targets(branches)
-    _resolve_skip_eis(branches)
+                case _:
+                    raise TypeError(
+                        f"Unsupported decomposition type in Stage 2: "
+                        f"{type(decomposed.decomposition).__name__}"
+                    )
 
-    _redirect_explicit_implicit_returns(branches, callable_id)
-    _assign_fallthrough_next_eis(branches, callable_id)
-    _append_implicit_return_sink_if_referenced(branches, callable_id, func_node.end_lineno)
+    for ei in execution_items:
+        _resolve_ei_target_line(execution_items, ei)
+
+    _resolve_conditional_targets(execution_items)
+    _resolve_skip_eis(execution_items)
+
+    _redirect_explicit_implicit_returns(execution_items, callable_id)
+    _assign_fallthrough_next_eis(execution_items, callable_id)
+    _append_implicit_return_sink_if_referenced(
+        execution_items, callable_id, func_node.end_lineno
+    )
 
     return FunctionResult(
         name=getattr(func_node, "name", "<class>"),
         line_start=func_node.lineno,
         line_end=func_node.end_lineno,
-        branches=branches,
+        execution_items=execution_items,
+        control_flow=control_flow if not control_flow.is_empty() else None,
     )
 
 
@@ -750,7 +851,7 @@ def _matches_target(entry: UnitIndexEntry, target_name: str | None) -> bool:
 
 
 def enumerate_implicit_constructor_eis(entry: UnitIndexEntry) -> FunctionResult:
-    branch = Branch(
+    ei = ExecutionItem(
         id=generate_function_entry_ei_id(entry.id),
         line=entry.lineno,
         condition="implicit constructor entry",
@@ -768,14 +869,14 @@ def enumerate_implicit_constructor_eis(entry: UnitIndexEntry) -> FunctionResult:
         name=entry.name,
         line_start=entry.lineno,
         line_end=entry.end_lineno,
-        branches=[branch],
+        execution_items=[ei],
     )
 
 
 def enumerate_unit_from_index(
-        filepath: Path,
-        unit_index: UnitIndex,
-        function_name: str | None = None,
+    filepath: Path,
+    unit_index: UnitIndex,
+    function_name: str | None = None,
 ) -> list[FunctionResult]:
     source = filepath.read_text(encoding="utf-8")
     source_lines = source.split("\n")
@@ -792,17 +893,19 @@ def enumerate_unit_from_index(
             continue
 
         if (
-                entry.kind == "method"
-                and entry.synthetic
-                and entry.implicit
-                and entry.implicit_kind == "default_constructor"
+            entry.kind == "method"
+            and entry.synthetic
+            and entry.implicit
+            and entry.implicit_kind == "default_constructor"
         ):
             result = enumerate_implicit_constructor_eis(entry)
-            populate_constraint_relationships(result.branches)
+            populate_constraint_relationships(result.execution_items)
             results.append(result)
             continue
 
-        node = ast_index.nodes_by_fqn_and_line.get((entry.fully_qualified_name, entry.lineno))
+        node = ast_index.nodes_by_fqn_and_line.get(
+            (entry.fully_qualified_name, entry.lineno)
+        )
         if node is None:
             continue
 
@@ -815,7 +918,7 @@ def enumerate_unit_from_index(
         else:
             continue
 
-        populate_constraint_relationships(result.branches)
+        populate_constraint_relationships(result.execution_items)
         results.append(result)
 
     return results
@@ -842,10 +945,10 @@ def format_outcome_map_text(result: FunctionResult) -> str:
     lines.append("")
     lines.append("Execution Items:")
 
-    for branch in result.branches:
-        lines.append(f"\n{branch.id} (Line {branch.line}):")
-        lines.append(f"  Condition: {branch.condition}")
-        lines.append(f"  Description: {branch.description}")
+    for ei in result.execution_items:
+        lines.append(f"\n{ei.id} (Line {ei.line}):")
+        lines.append(f"  Condition: {ei.condition}")
+        lines.append(f"  Description: {ei.description}")
 
     return "\n".join(lines)
 
@@ -867,9 +970,16 @@ def main() -> int:
     )
 
     parser.add_argument("file", type=Path, help="Python source file")
-    parser.add_argument("--unit-index", required=True, type=Path, help="Structured stage 1 project index JSON")
+    parser.add_argument(
+        "--unit-index",
+        required=True,
+        type=Path,
+        help="Structured stage 1 project index JSON",
+    )
     parser.add_argument("--function", "-f", help="Specific function name to enumerate")
-    parser.add_argument("--text", action="store_true", help="Output human readable text instead of YAML")
+    parser.add_argument(
+        "--text", action="store_true", help="Output human readable text instead of YAML"
+    )
     parser.add_argument("--output", "-o", type=Path, help="Save output to file")
 
     args = parser.parse_args()
@@ -891,7 +1001,9 @@ def main() -> int:
 
     if not results:
         if args.function:
-            print(f"Error: Function '{args.function}' not found in indexed entries for {args.file}")
+            print(
+                f"Error: Function '{args.function}' not found in indexed entries for {args.file}"
+            )
         else:
             print(f"Error: No analyzable indexed entries found in {args.file}")
         return 1
@@ -901,7 +1013,9 @@ def main() -> int:
     else:
         data = format_for_yaml(results)
         data["module"] = unit.fully_qualified_name
-        output = yaml.dump(data, sort_keys=False, allow_unicode=True, width=float("inf"))
+        output = yaml.dump(
+            data, sort_keys=False, allow_unicode=True, width=float("inf")
+        )
 
     if args.output:
         args.output.write_text(output, encoding="utf-8")

@@ -5,7 +5,7 @@ description = "Common/shared code for pybastion"
 authors = [
     { name = "Steve Storck", email = "steve973@gmail.com" }
 ]
-readme = "README.md"
+readme = "../README.md"
 license = "MIT"
 requires-python = ">=3.11,<4.0"
 classifiers = [
