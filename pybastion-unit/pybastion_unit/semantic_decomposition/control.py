@@ -73,6 +73,49 @@ def _direct_loop_disruptive_exit_routes(
     return routes
 
 
+def _nested_if_loop_disruptive_exit_routes(
+    *,
+    owner_id: str,
+    body: list[ast.stmt],
+    decision_region_id: str,
+    decision_line: int,
+    loop_exit_line: int | None,
+) -> list[ControlRoute]:
+    routes: list[ControlRoute] = []
+
+    for child in body:
+        if not isinstance(child, ast.If):
+            continue
+
+        true_region_id = _region_id(_if_control_id(child), "true_body")
+        false_region_id = _region_id(_if_control_id(child), "false_body")
+
+        routes.extend(
+            _direct_loop_disruptive_exit_routes(
+                owner_id=owner_id,
+                source_region_id=true_region_id,
+                body=child.body,
+                decision_region_id=decision_region_id,
+                decision_line=decision_line,
+                loop_exit_line=loop_exit_line,
+            )
+        )
+
+        if child.orelse:
+            routes.extend(
+                _direct_loop_disruptive_exit_routes(
+                    owner_id=owner_id,
+                    source_region_id=false_region_id,
+                    body=child.orelse,
+                    decision_region_id=decision_region_id,
+                    decision_line=decision_line,
+                    loop_exit_line=loop_exit_line,
+                )
+            )
+
+    return routes
+
+
 def _build_if_conditional_targets(
     test: ast.AST,
     *,
@@ -784,6 +827,16 @@ class ForDecomposer(ControlOwnerDecomposer):
             )
         )
 
+        routes.extend(
+            _nested_if_loop_disruptive_exit_routes(
+                owner_id=owner_id,
+                body=stmt.body,
+                decision_region_id=condition_region_id,
+                decision_line=stmt.lineno,
+                loop_exit_line=continuation_target,
+            )
+        )
+
         return ControlStatementDecomposition(
             description=f"{source_construct} statement at line {stmt.lineno}",
             owner_kind=_loop_owner_kind(stmt),
@@ -1005,6 +1058,16 @@ class WhileDecomposer(ControlOwnerDecomposer):
             _direct_loop_disruptive_exit_routes(
                 owner_id=owner_id,
                 source_region_id=body_region_id,
+                body=stmt.body,
+                decision_region_id=condition_region_id,
+                decision_line=stmt.lineno,
+                loop_exit_line=continuation_target,
+            )
+        )
+
+        routes.extend(
+            _nested_if_loop_disruptive_exit_routes(
+                owner_id=owner_id,
                 body=stmt.body,
                 decision_region_id=condition_region_id,
                 decision_line=stmt.lineno,

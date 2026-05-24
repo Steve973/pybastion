@@ -86,10 +86,9 @@ def _owner_for_region_kind(
         and region.get("source_construct") == source_construct
     ]
 
-    assert len(matches) == 1, (
-        f"expected one {kind!r} region for {source_construct!r}, "
-        f"found {len(matches)}"
-    )
+    assert (
+        len(matches) == 1
+    ), f"expected one {kind!r} region for {source_construct!r}, found {len(matches)}"
 
     return matches[0]
 
@@ -281,3 +280,44 @@ def test_loop_direct_disruptions_emit_continue_and_break_routes(
     assert len(break_routes) == 1
     assert break_routes[0].get("exit_kind") == "break"
     assert break_routes[0].get("target_line") == entry["line_end"]
+
+
+def test_nested_loop_disruptions_use_nested_if_region_as_source(
+    inventory: dict[str, Any],
+) -> None:
+    entry = _entry_by_name(inventory, "fixture_full_control_flow_probe")
+
+    item_lt_zero_owner = _condition_owner(entry, "item < 0")
+    item_eq_zero_owner = _condition_owner(entry, "item == 0")
+    total_eq_seventy_owner = _condition_owner(entry, "total == 70")
+
+    continue_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("kind") == "loop_continue"
+        and route.get("source_region_id") == f"{item_lt_zero_owner}:true_body"
+    ]
+
+    for_break_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("kind") == "loop_break"
+        and route.get("source_region_id") == f"{item_eq_zero_owner}:true_body"
+    ]
+
+    while_break_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("kind") == "loop_break"
+        and route.get("source_region_id") == f"{total_eq_seventy_owner}:true_body"
+    ]
+
+    assert len(continue_routes) == 1
+    assert continue_routes[0].get("target_region_id").endswith(":iterator")
+    assert continue_routes[0].get("exit_kind") == "continue"
+
+    assert len(for_break_routes) == 1
+    assert for_break_routes[0].get("exit_kind") == "break"
+
+    assert len(while_break_routes) == 1
+    assert while_break_routes[0].get("exit_kind") == "break"
