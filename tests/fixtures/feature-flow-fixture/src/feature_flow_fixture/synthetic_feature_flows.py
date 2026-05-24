@@ -333,3 +333,30 @@ def fixture_loop_direct_disruptions(items: list[int]) -> int:
         break
 
     return total
+
+
+def fixture_if_direct_return_raise(value: int) -> int:
+    if value > 0:
+        return value
+    else:
+        raise ValueError("value must be positive")
+
+
+def fixture_match_direct_return_raise(value: int) -> int:
+    match value:
+        case 0:
+            return 0
+        case _:
+            raise ValueError("unsupported value")
+
+
+def fixture_loop_direct_return_raise(items: list[int]) -> int:
+    for item in items:
+        if item < 0:
+            break
+        return item
+
+    while True:
+        raise RuntimeError("no usable item")
+
+    return -1

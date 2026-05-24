@@ -73,6 +73,45 @@ def _direct_loop_disruptive_exit_routes(
     return routes
 
 
+def _direct_region_disruptive_exit_routes(
+    *,
+    owner_id: str,
+    source_region_id: str,
+    body: list[ast.stmt],
+) -> list[ControlRoute]:
+    routes: list[ControlRoute] = []
+
+    for index, child in enumerate(body):
+        match child:
+            case ast.Return():
+                routes.append(
+                    ControlRoute(
+                        id=_route_id(owner_id, f"return:{child.lineno}:{index}"),
+                        owner_id=owner_id,
+                        kind=ControlRouteKind.FUNCTION_RETURN,
+                        source_region_id=source_region_id,
+                        target_line=child.lineno,
+                        exit_kind=ExitKind.RETURN,
+                        synthetic=True,
+                    )
+                )
+
+            case ast.Raise():
+                routes.append(
+                    ControlRoute(
+                        id=_route_id(owner_id, f"raise:{child.lineno}:{index}"),
+                        owner_id=owner_id,
+                        kind=ControlRouteKind.RAISE,
+                        source_region_id=source_region_id,
+                        target_line=child.lineno,
+                        exit_kind=ExitKind.RAISE,
+                        synthetic=True,
+                    )
+                )
+
+    return routes
+
+
 def _nested_if_loop_disruptive_exit_routes(
     *,
     owner_id: str,
@@ -376,6 +415,23 @@ class IfDecomposer(ControlOwnerDecomposer):
                 )
             )
 
+        routes.extend(
+            _direct_region_disruptive_exit_routes(
+                owner_id=owner_id,
+                source_region_id=true_region_id,
+                body=stmt.body,
+            )
+        )
+
+        if stmt.orelse:
+            routes.extend(
+                _direct_region_disruptive_exit_routes(
+                    owner_id=owner_id,
+                    source_region_id=false_region_id,
+                    body=stmt.orelse,
+                )
+            )
+
         return ControlStatementDecomposition(
             description=f"if statement at line {stmt.lineno}",
             owner_kind=ControlOwnerKind.IF,
@@ -550,6 +606,14 @@ class MatchDecomposer(ControlOwnerDecomposer):
                     source_region_id=case_region_id,
                     target_line=fallthrough_target,
                     exit_kind=ExitKind.NORMAL,
+                )
+            )
+
+            routes.extend(
+                _direct_region_disruptive_exit_routes(
+                    owner_id=owner_id,
+                    source_region_id=case_region_id,
+                    body=case.body,
                 )
             )
 
@@ -837,6 +901,14 @@ class ForDecomposer(ControlOwnerDecomposer):
             )
         )
 
+        routes.extend(
+            _direct_region_disruptive_exit_routes(
+                owner_id=owner_id,
+                source_region_id=body_region_id,
+                body=stmt.body,
+            )
+        )
+
         return ControlStatementDecomposition(
             description=f"{source_construct} statement at line {stmt.lineno}",
             owner_kind=_loop_owner_kind(stmt),
@@ -1072,6 +1144,14 @@ class WhileDecomposer(ControlOwnerDecomposer):
                 decision_region_id=condition_region_id,
                 decision_line=stmt.lineno,
                 loop_exit_line=continuation_target,
+            )
+        )
+
+        routes.extend(
+            _direct_region_disruptive_exit_routes(
+                owner_id=owner_id,
+                source_region_id=body_region_id,
+                body=stmt.body,
             )
         )
 

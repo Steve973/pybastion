@@ -86,9 +86,10 @@ def _owner_for_region_kind(
         and region.get("source_construct") == source_construct
     ]
 
-    assert (
-        len(matches) == 1
-    ), f"expected one {kind!r} region for {source_construct!r}, found {len(matches)}"
+    assert len(matches) == 1, (
+        f"expected one {kind!r} region for {source_construct!r}, "
+        f"found {len(matches)}"
+    )
 
     return matches[0]
 
@@ -321,3 +322,66 @@ def test_nested_loop_disruptions_use_nested_if_region_as_source(
 
     assert len(while_break_routes) == 1
     assert while_break_routes[0].get("exit_kind") == "break"
+
+
+def test_if_direct_return_raise_emit_disruptive_region_routes(
+    inventory: dict[str, Any],
+) -> None:
+    entry = _entry_by_name(inventory, "fixture_if_direct_return_raise")
+
+    value_gt_zero_owner = _condition_owner(entry, "value > 0")
+
+    return_routes = [
+        route
+        for route in _route_by_kind(entry, "function_return")
+        if route.get("source_region_id") == f"{value_gt_zero_owner}:true_body"
+    ]
+    raise_routes = [
+        route
+        for route in _route_by_kind(entry, "raise")
+        if route.get("source_region_id") == f"{value_gt_zero_owner}:false_body"
+    ]
+
+    assert len(return_routes) == 1
+    assert return_routes[0].get("exit_kind") == "return"
+
+    assert len(raise_routes) == 1
+    assert raise_routes[0].get("exit_kind") == "raise"
+
+
+def test_match_direct_return_raise_emit_disruptive_case_routes(
+    inventory: dict[str, Any],
+) -> None:
+    entry = _entry_by_name(inventory, "fixture_match_direct_return_raise")
+
+    return_routes = _route_by_kind(entry, "function_return")
+    raise_routes = _route_by_kind(entry, "raise")
+
+    assert len(return_routes) == 1
+    assert return_routes[0].get("source_region_id", "").startswith("match:")
+    assert return_routes[0].get("source_region_id", "").endswith(":case_body:1")
+    assert return_routes[0].get("exit_kind") == "return"
+
+    assert len(raise_routes) == 1
+    assert raise_routes[0].get("source_region_id", "").startswith("match:")
+    assert raise_routes[0].get("source_region_id", "").endswith(":case_body:2")
+    assert raise_routes[0].get("exit_kind") == "raise"
+
+
+def test_loop_direct_return_raise_emit_disruptive_body_routes(
+    inventory: dict[str, Any],
+) -> None:
+    entry = _entry_by_name(inventory, "fixture_loop_direct_return_raise")
+
+    return_routes = _route_by_kind(entry, "function_return")
+    raise_routes = _route_by_kind(entry, "raise")
+
+    assert len(return_routes) == 1
+    assert return_routes[0].get("source_region_id", "").startswith("for:")
+    assert return_routes[0].get("source_region_id", "").endswith(":loop_body")
+    assert return_routes[0].get("exit_kind") == "return"
+
+    assert len(raise_routes) == 1
+    assert raise_routes[0].get("source_region_id", "").startswith("while:")
+    assert raise_routes[0].get("source_region_id", "").endswith(":loop_body")
+    assert raise_routes[0].get("exit_kind") == "raise"

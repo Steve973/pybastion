@@ -89,6 +89,7 @@ class ControlRouteKind(StrEnum):
     RESUME_PRIOR_OUTCOME = "resume_prior_outcome"
     FUNCTION_RETURN = "function_return"
     TERMINAL = "terminal"
+    RAISE = "raise"
     OTHER = "other"
 
 
