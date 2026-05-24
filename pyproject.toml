@@ -47,3 +47,20 @@ pybastion-integration = "pybastion_integration.cli:main"
 [build-system]
 requires = ["poetry-core>=2.4.0,<3.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests/unit",
+    "tests/integration",
+]
+python_files = [
+    "test_*.py",
+    "*_test.py",
+]
+python_functions = [
+    "test_*",
+]
+markers = [
+    "unit: isolated tests for individual functions/classes",
+    "integration: tests that run the analysis pipeline or touch filesystem/process boundaries",
+]

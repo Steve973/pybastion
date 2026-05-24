@@ -88,12 +88,219 @@ def _build_if_conditional_targets(
     return targets
 
 
+def _control_id(kind: str, stmt: ast.AST) -> str:
+    return f"{kind}:{getattr(stmt, 'lineno', 'unknown')}"
+
+
+def _if_control_id(stmt: ast.If) -> str:
+    return _control_id("if", stmt)
+
+
+def _match_control_id(stmt: ast.Match) -> str:
+    return _control_id("match", stmt)
+
+
+def _for_control_id(stmt: ast.For | ast.AsyncFor) -> str:
+    return _control_id("async_for" if isinstance(stmt, ast.AsyncFor) else "for", stmt)
+
+
+def _while_control_id(stmt: ast.While) -> str:
+    return _control_id("while", stmt)
+
+
+def _with_control_id(stmt: ast.With | ast.AsyncWith) -> str:
+    return _control_id(
+        "async_with" if isinstance(stmt, ast.AsyncWith) else "with", stmt
+    )
+
+
+def _loop_owner_kind(stmt: ast.For | ast.AsyncFor) -> ControlOwnerKind:
+    return (
+        ControlOwnerKind.ASYNC_FOR
+        if isinstance(stmt, ast.AsyncFor)
+        else ControlOwnerKind.FOR
+    )
+
+
+def _with_owner_kind(stmt: ast.With | ast.AsyncWith) -> ControlOwnerKind:
+    return (
+        ControlOwnerKind.ASYNC_WITH
+        if isinstance(stmt, ast.AsyncWith)
+        else ControlOwnerKind.WITH
+    )
+
+
+def _with_mechanism_kind(stmt: ast.With | ast.AsyncWith) -> PostExecutionMechanismKind:
+    return (
+        PostExecutionMechanismKind.ASYNC_CONTEXT_MANAGER_EXIT
+        if isinstance(stmt, ast.AsyncWith)
+        else PostExecutionMechanismKind.CONTEXT_MANAGER_EXIT
+    )
+
+
+def _with_binding_scope(stmt: ast.With | ast.AsyncWith) -> PostExecutionBindingScope:
+    return (
+        PostExecutionBindingScope.ASYNC_WITH_BODY
+        if isinstance(stmt, ast.AsyncWith)
+        else PostExecutionBindingScope.WITH_BODY
+    )
+
+
+def _continuation_target(
+    context: DecompositionContext,
+    skipped_lines: list[int],
+) -> int | None:
+    return select_target_from_chain(context.next_stmt_lines, skipped_lines)
+
+
+def _body_has_disruptive_terminal(body: list[ast.stmt]) -> bool:
+    return any(
+        isinstance(stmt, (ast.Return, ast.Raise, ast.Break, ast.Continue))
+        for stmt in body
+    )
+
+
 class IfDecomposer(ControlOwnerDecomposer):
     @classmethod
     def statement_parts(
         cls, stmt: ast.If, context: DecompositionContext
     ) -> list[StatementPart]:
         return [StatementPart(stmt.test)]
+
+    @classmethod
+    def control_decomposition(
+        cls, stmt: ast.If, context: DecompositionContext
+    ) -> ControlStatementDecomposition:
+        owner_id = _if_control_id(stmt)
+
+        condition_region_id = _region_id(owner_id, "condition")
+        true_region_id = _region_id(owner_id, "true_body")
+        false_region_id = _region_id(owner_id, "false_body")
+
+        true_target = _stmt_list_start(stmt.body)
+        false_body_target = _stmt_list_start(stmt.orelse)
+        skipped_lines = body_lines(stmt.body) + body_lines(stmt.orelse)
+        continuation_target = _continuation_target(context, skipped_lines)
+
+        condition = ast.unparse(stmt.test)
+
+        regions: list[ControlRegion] = [
+            ControlRegion(
+                id=condition_region_id,
+                owner_id=owner_id,
+                kind=ControlRegionKind.CONDITION,
+                start_line=stmt.lineno,
+                end_line=stmt.lineno,
+                source_construct="if",
+                metadata={"condition": condition},
+            ),
+            ControlRegion(
+                id=true_region_id,
+                owner_id=owner_id,
+                kind=ControlRegionKind.TRUE_BODY,
+                start_line=_stmt_list_start(stmt.body),
+                end_line=_stmt_list_end(stmt.body),
+                source_construct="if",
+            ),
+        ]
+
+        routes: list[ControlRoute] = [
+            ControlRoute(
+                id=_route_id(owner_id, "enter_condition"),
+                owner_id=owner_id,
+                kind=ControlRouteKind.ENTER,
+                target_region_id=condition_region_id,
+                target_line=stmt.lineno,
+            ),
+            ControlRoute(
+                id=_route_id(owner_id, "condition_true"),
+                owner_id=owner_id,
+                kind=ControlRouteKind.CONDITIONAL_TRUE,
+                source_region_id=condition_region_id,
+                target_region_id=true_region_id,
+                target_line=true_target,
+                condition=condition,
+                condition_result=True,
+            ),
+        ]
+
+        if stmt.orelse:
+            regions.append(
+                ControlRegion(
+                    id=false_region_id,
+                    owner_id=owner_id,
+                    kind=ControlRegionKind.FALSE_BODY,
+                    start_line=_stmt_list_start(stmt.orelse),
+                    end_line=_stmt_list_end(stmt.orelse),
+                    source_construct="else",
+                )
+            )
+            routes.append(
+                ControlRoute(
+                    id=_route_id(owner_id, "condition_false"),
+                    owner_id=owner_id,
+                    kind=ControlRouteKind.CONDITIONAL_FALSE,
+                    source_region_id=condition_region_id,
+                    target_region_id=false_region_id,
+                    target_line=false_body_target,
+                    condition=condition,
+                    condition_result=False,
+                )
+            )
+
+            if not _body_has_disruptive_terminal(stmt.orelse):
+                routes.append(
+                    ControlRoute(
+                        id=_route_id(owner_id, "false_body_completion"),
+                        owner_id=owner_id,
+                        kind=ControlRouteKind.NORMAL_COMPLETION,
+                        source_region_id=false_region_id,
+                        target_line=continuation_target,
+                        exit_kind=ExitKind.NORMAL,
+                    )
+                )
+        else:
+            routes.append(
+                ControlRoute(
+                    id=_route_id(owner_id, "condition_false_fallthrough"),
+                    owner_id=owner_id,
+                    kind=ControlRouteKind.CONDITIONAL_FALSE,
+                    source_region_id=condition_region_id,
+                    target_line=continuation_target,
+                    condition=condition,
+                    condition_result=False,
+                    exit_kind=(
+                        ExitKind.NORMAL
+                        if continuation_target is not None
+                        else ExitKind.IMPLICIT_RETURN
+                    ),
+                    implicit=continuation_target is None,
+                )
+            )
+
+        if not _body_has_disruptive_terminal(stmt.body):
+            routes.append(
+                ControlRoute(
+                    id=_route_id(owner_id, "true_body_completion"),
+                    owner_id=owner_id,
+                    kind=ControlRouteKind.NORMAL_COMPLETION,
+                    source_region_id=true_region_id,
+                    target_line=continuation_target,
+                    exit_kind=ExitKind.NORMAL,
+                )
+            )
+
+        return ControlStatementDecomposition(
+            description=f"if statement at line {stmt.lineno}",
+            owner_kind=ControlOwnerKind.IF,
+            control_id=owner_id,
+            line=stmt.lineno,
+            end_line=stmt.end_lineno,
+            regions=regions,
+            routes=routes,
+            policies=[],
+            source_construct="if",
+        )
 
     @classmethod
     def semantic_eis(
@@ -148,6 +355,9 @@ class IfDecomposer(ControlOwnerDecomposer):
             else:
                 current = None
 
+        results.append(
+            DecomposerResult(decomposition=cls.control_decomposition(stmt, context))
+        )
         return results
 
 
@@ -173,6 +383,129 @@ class MatchDecomposer(ControlOwnerDecomposer):
             isinstance(case.pattern, ast.MatchAs)
             and case.pattern.name is None
             and case.guard is None
+        )
+
+    @classmethod
+    def control_decomposition(
+        cls, stmt: ast.Match, context: DecompositionContext
+    ) -> ControlStatementDecomposition:
+        owner_id = _match_control_id(stmt)
+        condition_region_id = _region_id(owner_id, "subject")
+
+        all_case_lines: list[int] = []
+        for case in stmt.cases:
+            all_case_lines.extend(body_lines(case.body))
+
+        fallthrough_target = _continuation_target(context, all_case_lines)
+
+        regions: list[ControlRegion] = [
+            ControlRegion(
+                id=condition_region_id,
+                owner_id=owner_id,
+                kind=ControlRegionKind.CONDITION,
+                start_line=stmt.lineno,
+                end_line=stmt.lineno,
+                source_construct="match",
+                metadata={"subject": ast.unparse(stmt.subject)},
+            )
+        ]
+
+        routes: list[ControlRoute] = [
+            ControlRoute(
+                id=_route_id(owner_id, "enter_subject"),
+                owner_id=owner_id,
+                kind=ControlRouteKind.ENTER,
+                target_region_id=condition_region_id,
+                target_line=stmt.lineno,
+            )
+        ]
+
+        prior_failures: list[str] = []
+        has_unconditional_case = False
+
+        for index, case in enumerate(stmt.cases, start=1):
+            case_region_id = _region_id(owner_id, f"case_body:{index}")
+            case_label = cls._case_label(index, case)
+            case_target = _stmt_list_start(case.body) or fallthrough_target
+            success_condition = cls._join_and([*prior_failures, case_label])
+
+            regions.append(
+                ControlRegion(
+                    id=case_region_id,
+                    owner_id=owner_id,
+                    kind=ControlRegionKind.CASE_BODY,
+                    start_line=_stmt_list_start(case.body),
+                    end_line=_stmt_list_end(case.body),
+                    ordinal=index,
+                    source_construct="case",
+                    metadata={"case_label": case_label},
+                )
+            )
+
+            routes.append(
+                ControlRoute(
+                    id=_route_id(owner_id, f"match_case:{index}"),
+                    owner_id=owner_id,
+                    kind=ControlRouteKind.MATCH_CASE,
+                    source_region_id=condition_region_id,
+                    target_region_id=case_region_id,
+                    target_line=case_target,
+                    condition=success_condition,
+                    condition_result=True,
+                    metadata={"case_label": case_label},
+                )
+            )
+
+            routes.append(
+                ControlRoute(
+                    id=_route_id(owner_id, f"case_body_completion:{index}"),
+                    owner_id=owner_id,
+                    kind=ControlRouteKind.NORMAL_COMPLETION,
+                    source_region_id=case_region_id,
+                    target_line=fallthrough_target,
+                    exit_kind=ExitKind.NORMAL,
+                )
+            )
+
+            if cls._is_unconditional_wildcard(case):
+                has_unconditional_case = True
+                break
+
+            prior_failures.append(f"not ({case_label})")
+
+        if not has_unconditional_case:
+            routes.append(
+                ControlRoute(
+                    id=_route_id(owner_id, "match_fallthrough"),
+                    owner_id=owner_id,
+                    kind=ControlRouteKind.MATCH_FALLTHROUGH,
+                    source_region_id=condition_region_id,
+                    target_line=fallthrough_target,
+                    condition=(
+                        cls._join_and(prior_failures)
+                        if prior_failures
+                        else "no match cases"
+                    ),
+                    condition_result=False,
+                    exit_kind=(
+                        ExitKind.NORMAL
+                        if fallthrough_target is not None
+                        else ExitKind.IMPLICIT_RETURN
+                    ),
+                    implicit=fallthrough_target is None,
+                )
+            )
+
+        return ControlStatementDecomposition(
+            description=f"match statement at line {stmt.lineno}",
+            owner_kind=ControlOwnerKind.MATCH,
+            control_id=owner_id,
+            line=stmt.lineno,
+            end_line=stmt.end_lineno,
+            regions=regions,
+            routes=routes,
+            policies=[],
+            source_construct="match",
         )
 
     @classmethod
@@ -268,7 +601,8 @@ class MatchDecomposer(ControlOwnerDecomposer):
                     description=f"evaluates match {subject}",
                     conditional_targets=conditional_targets,
                 )
-            )
+            ),
+            DecomposerResult(decomposition=cls.control_decomposition(stmt, context)),
         ]
 
 
@@ -278,6 +612,135 @@ class ForDecomposer(ControlOwnerDecomposer):
         cls, stmt: ast.For, context: DecompositionContext
     ) -> list[StatementPart]:
         return [StatementPart(stmt.iter)]
+
+    @classmethod
+    def control_decomposition(
+        cls, stmt: ast.For | ast.AsyncFor, context: DecompositionContext
+    ) -> ControlStatementDecomposition:
+        owner_id = _for_control_id(stmt)
+        source_construct = "async for" if isinstance(stmt, ast.AsyncFor) else "for"
+
+        condition_region_id = _region_id(owner_id, "iterator")
+        body_region_id = _region_id(owner_id, "loop_body")
+        else_region_id = _region_id(owner_id, "loop_else")
+
+        loop_body_lines = body_lines(stmt.body)
+        loop_else_lines = body_lines(stmt.orelse)
+        continuation_target = _continuation_target(
+            context, loop_body_lines + loop_else_lines
+        )
+        body_target = _stmt_list_start(stmt.body)
+        else_target = _stmt_list_start(stmt.orelse)
+
+        target = ast.unparse(stmt.target)
+        iter_expr = ast.unparse(stmt.iter)
+        loop_expr = f"{source_construct} {target} in {iter_expr}"
+
+        regions: list[ControlRegion] = [
+            ControlRegion(
+                id=condition_region_id,
+                owner_id=owner_id,
+                kind=ControlRegionKind.CONDITION,
+                start_line=stmt.lineno,
+                end_line=stmt.lineno,
+                source_construct=source_construct,
+                metadata={"target": target, "iter": iter_expr},
+            ),
+            ControlRegion(
+                id=body_region_id,
+                owner_id=owner_id,
+                kind=ControlRegionKind.LOOP_BODY,
+                start_line=_stmt_list_start(stmt.body),
+                end_line=_stmt_list_end(stmt.body),
+                source_construct=source_construct,
+            ),
+        ]
+
+        exhausted_target_region_id: str | None = None
+        exhausted_target_line = continuation_target
+        if stmt.orelse:
+            exhausted_target_region_id = else_region_id
+            exhausted_target_line = else_target
+            regions.append(
+                ControlRegion(
+                    id=else_region_id,
+                    owner_id=owner_id,
+                    kind=ControlRegionKind.LOOP_ELSE,
+                    start_line=_stmt_list_start(stmt.orelse),
+                    end_line=_stmt_list_end(stmt.orelse),
+                    source_construct="else",
+                )
+            )
+
+        routes: list[ControlRoute] = [
+            ControlRoute(
+                id=_route_id(owner_id, "enter_iterator"),
+                owner_id=owner_id,
+                kind=ControlRouteKind.ENTER,
+                target_region_id=condition_region_id,
+                target_line=stmt.lineno,
+            ),
+            ControlRoute(
+                id=_route_id(owner_id, "loop_iteration"),
+                owner_id=owner_id,
+                kind=ControlRouteKind.LOOP_ITERATION,
+                source_region_id=condition_region_id,
+                target_region_id=body_region_id,
+                target_line=body_target,
+                condition=f"{loop_expr} has another iteration",
+                condition_result=True,
+            ),
+            ControlRoute(
+                id=_route_id(owner_id, "loop_exhausted"),
+                owner_id=owner_id,
+                kind=ControlRouteKind.LOOP_EXHAUSTED,
+                source_region_id=condition_region_id,
+                target_region_id=exhausted_target_region_id,
+                target_line=exhausted_target_line,
+                condition=f"{loop_expr} has no more iterations",
+                condition_result=False,
+                exit_kind=(
+                    ExitKind.NORMAL
+                    if exhausted_target_line is not None
+                    else ExitKind.IMPLICIT_RETURN
+                ),
+                implicit=exhausted_target_line is None,
+            ),
+            ControlRoute(
+                id=_route_id(owner_id, "body_next_iteration"),
+                owner_id=owner_id,
+                kind=ControlRouteKind.LOOP_ITERATION,
+                source_region_id=body_region_id,
+                target_region_id=condition_region_id,
+                target_line=stmt.lineno,
+                exit_kind=ExitKind.NORMAL,
+                synthetic=True,
+            ),
+        ]
+
+        if stmt.orelse:
+            routes.append(
+                ControlRoute(
+                    id=_route_id(owner_id, "else_completion"),
+                    owner_id=owner_id,
+                    kind=ControlRouteKind.NORMAL_COMPLETION,
+                    source_region_id=else_region_id,
+                    target_line=continuation_target,
+                    exit_kind=ExitKind.NORMAL,
+                )
+            )
+
+        return ControlStatementDecomposition(
+            description=f"{source_construct} statement at line {stmt.lineno}",
+            owner_kind=_loop_owner_kind(stmt),
+            control_id=owner_id,
+            line=stmt.lineno,
+            end_line=stmt.end_lineno,
+            regions=regions,
+            routes=routes,
+            policies=[],
+            source_construct=source_construct,
+        )
 
     @classmethod
     def semantic_eis(
@@ -355,7 +818,8 @@ class ForDecomposer(ControlOwnerDecomposer):
                     description=f"evaluates whether {loop_expr} has another iteration",
                     conditional_targets=conditional_targets,
                 )
-            )
+            ),
+            DecomposerResult(decomposition=cls.control_decomposition(stmt, context)),
         ]
 
 
@@ -369,6 +833,131 @@ class WhileDecomposer(ControlOwnerDecomposer):
         cls, stmt: ast.While, context: DecompositionContext
     ) -> list[StatementPart]:
         return [StatementPart(stmt.test)]
+
+    @classmethod
+    def control_decomposition(
+        cls, stmt: ast.While, context: DecompositionContext
+    ) -> ControlStatementDecomposition:
+        owner_id = _while_control_id(stmt)
+
+        condition_region_id = _region_id(owner_id, "condition")
+        body_region_id = _region_id(owner_id, "loop_body")
+        else_region_id = _region_id(owner_id, "loop_else")
+
+        loop_body_lines = body_lines(stmt.body)
+        loop_else_lines = body_lines(stmt.orelse)
+        continuation_target = _continuation_target(
+            context, loop_body_lines + loop_else_lines
+        )
+
+        condition = ast.unparse(stmt.test)
+        body_target = _stmt_list_start(stmt.body)
+        exhausted_target_region_id: str | None = None
+        exhausted_target_line = continuation_target
+
+        regions: list[ControlRegion] = [
+            ControlRegion(
+                id=condition_region_id,
+                owner_id=owner_id,
+                kind=ControlRegionKind.CONDITION,
+                start_line=stmt.lineno,
+                end_line=stmt.lineno,
+                source_construct="while",
+                metadata={"condition": condition},
+            ),
+            ControlRegion(
+                id=body_region_id,
+                owner_id=owner_id,
+                kind=ControlRegionKind.LOOP_BODY,
+                start_line=_stmt_list_start(stmt.body),
+                end_line=_stmt_list_end(stmt.body),
+                source_construct="while",
+            ),
+        ]
+
+        if stmt.orelse:
+            exhausted_target_region_id = else_region_id
+            exhausted_target_line = _stmt_list_start(stmt.orelse)
+            regions.append(
+                ControlRegion(
+                    id=else_region_id,
+                    owner_id=owner_id,
+                    kind=ControlRegionKind.LOOP_ELSE,
+                    start_line=_stmt_list_start(stmt.orelse),
+                    end_line=_stmt_list_end(stmt.orelse),
+                    source_construct="else",
+                )
+            )
+
+        routes: list[ControlRoute] = [
+            ControlRoute(
+                id=_route_id(owner_id, "enter_condition"),
+                owner_id=owner_id,
+                kind=ControlRouteKind.ENTER,
+                target_region_id=condition_region_id,
+                target_line=stmt.lineno,
+            ),
+            ControlRoute(
+                id=_route_id(owner_id, "condition_true"),
+                owner_id=owner_id,
+                kind=ControlRouteKind.LOOP_ITERATION,
+                source_region_id=condition_region_id,
+                target_region_id=body_region_id,
+                target_line=body_target,
+                condition=condition,
+                condition_result=True,
+            ),
+            ControlRoute(
+                id=_route_id(owner_id, "condition_false"),
+                owner_id=owner_id,
+                kind=ControlRouteKind.LOOP_EXHAUSTED,
+                source_region_id=condition_region_id,
+                target_region_id=exhausted_target_region_id,
+                target_line=exhausted_target_line,
+                condition=condition,
+                condition_result=False,
+                exit_kind=(
+                    ExitKind.NORMAL
+                    if exhausted_target_line is not None
+                    else ExitKind.IMPLICIT_RETURN
+                ),
+                implicit=exhausted_target_line is None,
+            ),
+            ControlRoute(
+                id=_route_id(owner_id, "body_next_iteration"),
+                owner_id=owner_id,
+                kind=ControlRouteKind.LOOP_ITERATION,
+                source_region_id=body_region_id,
+                target_region_id=condition_region_id,
+                target_line=stmt.lineno,
+                exit_kind=ExitKind.NORMAL,
+                synthetic=True,
+            ),
+        ]
+
+        if stmt.orelse:
+            routes.append(
+                ControlRoute(
+                    id=_route_id(owner_id, "else_completion"),
+                    owner_id=owner_id,
+                    kind=ControlRouteKind.NORMAL_COMPLETION,
+                    source_region_id=else_region_id,
+                    target_line=continuation_target,
+                    exit_kind=ExitKind.NORMAL,
+                )
+            )
+
+        return ControlStatementDecomposition(
+            description=f"while statement at line {stmt.lineno}",
+            owner_kind=ControlOwnerKind.WHILE,
+            control_id=owner_id,
+            line=stmt.lineno,
+            end_line=stmt.end_lineno,
+            regions=regions,
+            routes=routes,
+            policies=[],
+            source_construct="while",
+        )
 
     @classmethod
     def semantic_eis(
@@ -405,6 +994,7 @@ class WhileDecomposer(ControlOwnerDecomposer):
                     ),
                 )
             ),
+            DecomposerResult(decomposition=cls.control_decomposition(stmt, context)),
         ]
 
 
@@ -678,6 +1268,107 @@ class WithDecomposer(ControlOwnerDecomposer):
         return [StatementPart(item.context_expr) for item in stmt.items]
 
     @classmethod
+    def control_decomposition(
+        cls, stmt: ast.With | ast.AsyncWith, context: DecompositionContext
+    ) -> ControlStatementDecomposition:
+        owner_id = _with_control_id(stmt)
+        source_construct = "async with" if isinstance(stmt, ast.AsyncWith) else "with"
+
+        body_region_id = _region_id(owner_id, "body")
+        post_region_id = _region_id(owner_id, "post_execution")
+        continuation_target = _continuation_target(context, body_lines(stmt.body))
+        contexts = ", ".join(ast.unparse(item.context_expr) for item in stmt.items)
+
+        regions: list[ControlRegion] = [
+            ControlRegion(
+                id=body_region_id,
+                owner_id=owner_id,
+                kind=ControlRegionKind.BODY,
+                start_line=_stmt_list_start(stmt.body),
+                end_line=_stmt_list_end(stmt.body),
+                source_construct=source_construct,
+                metadata={"contexts": contexts},
+            ),
+            ControlRegion(
+                id=post_region_id,
+                owner_id=owner_id,
+                kind=ControlRegionKind.POST_EXECUTION,
+                start_line=stmt.lineno,
+                end_line=stmt.lineno,
+                source_construct=f"{source_construct} exit",
+                synthetic=True,
+            ),
+        ]
+
+        routes: list[ControlRoute] = [
+            ControlRoute(
+                id=_route_id(owner_id, "enter_body"),
+                owner_id=owner_id,
+                kind=ControlRouteKind.ENTER,
+                target_region_id=body_region_id,
+                target_line=_stmt_list_start(stmt.body),
+            ),
+            ControlRoute(
+                id=_route_id(owner_id, "post_execution_entry"),
+                owner_id=owner_id,
+                kind=ControlRouteKind.POST_EXECUTION_ENTRY,
+                source_region_id=body_region_id,
+                target_region_id=post_region_id,
+                target_line=stmt.lineno,
+                preserves_prior_outcome=True,
+                synthetic=True,
+            ),
+            ControlRoute(
+                id=_route_id(owner_id, "resume_after_exit"),
+                owner_id=owner_id,
+                kind=ControlRouteKind.RESUME_PRIOR_OUTCOME,
+                source_region_id=post_region_id,
+                target_line=continuation_target,
+                preserves_prior_outcome=True,
+                synthetic=True,
+            ),
+        ]
+
+        policies: list[PostExecutionPolicy] = [
+            PostExecutionPolicy(
+                owner_id=owner_id,
+                mechanism_kind=_with_mechanism_kind(stmt),
+                binding_mode=PostExecutionBindingMode.STRUCTURAL,
+                binding_scope=_with_binding_scope(stmt),
+                trigger_event=PostExecutionTriggerEvent.SCOPE_EXIT,
+                region_id=body_region_id,
+                target_region_id=post_region_id,
+                target_line=stmt.lineno,
+                applies_to=[
+                    ExitKind.NORMAL,
+                    ExitKind.RETURN,
+                    ExitKind.RAISE,
+                    ExitKind.BREAK,
+                    ExitKind.CONTINUE,
+                    ExitKind.HANDLED_EXCEPTION,
+                    ExitKind.UNHANDLED_EXCEPTION,
+                    ExitKind.IMPLICIT_RETURN,
+                    ExitKind.TERMINAL,
+                ],
+                preserves_prior_outcome=True,
+                source_construct=source_construct,
+                detail=f"invoke context manager exit for {contexts}",
+            )
+        ]
+
+        return ControlStatementDecomposition(
+            description=f"{source_construct} statement at line {stmt.lineno}",
+            owner_kind=_with_owner_kind(stmt),
+            control_id=owner_id,
+            line=stmt.lineno,
+            end_line=stmt.end_lineno,
+            regions=regions,
+            routes=routes,
+            policies=policies,
+            source_construct=source_construct,
+        )
+
+    @classmethod
     def semantic_eis(
         cls, stmt: ast.With, source_lines: list[str], context: DecompositionContext
     ) -> list[DecomposerResult]:
@@ -705,6 +1396,7 @@ class WithDecomposer(ControlOwnerDecomposer):
                     ],
                 )
             ),
+            DecomposerResult(decomposition=cls.control_decomposition(stmt, context)),
         ]
 
 

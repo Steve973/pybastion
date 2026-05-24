@@ -235,3 +235,87 @@ def fixture_mixed_control(values: list[str], fallback: str) -> str:
         return "failed"
 
     return result
+
+
+def fixture_full_control_flow_probe(
+    value: int,
+    items: list[int],
+    mapping: dict[str, int],
+    path,
+) -> int:
+    total = 0
+
+    if value > 10:
+        total += value
+    elif value == 10:
+        total += 100
+    else:
+        total -= value
+
+    match value:
+        case 0:
+            total += 1
+        case 1 | 2:
+            total += 2
+        case other if other < 0:
+            total -= 10
+        case _:
+            total += 5
+
+    for item in items:
+        if item < 0:
+            continue
+        if item == 0:
+            break
+        total += item
+    else:
+        total += 50
+
+    while total < 100:
+        total += 10
+        if total == 70:
+            break
+    else:
+        total += 7
+
+    try:
+        with path.open("r") as handle:
+            raw = handle.read()
+
+        if raw.strip():
+            total += len(raw)
+        else:
+            total -= 1
+
+    except FileNotFoundError:
+        total = -404
+    except OSError:
+        total = -1
+    else:
+        total += mapping.get("bonus", 0)
+    finally:
+        total += 3
+
+    return total
+
+
+def fixture_if_normal_completion_probe(value: int) -> int:
+    total = 0
+
+    if value > 0:
+        total += 1
+    else:
+        total -= 1
+
+    return total
+
+
+def fixture_if_partial_disruption_probe(value: int) -> int:
+    total = 0
+
+    if value > 0:
+        if value == 10:
+            return 10
+        total += 1
+
+    return total
