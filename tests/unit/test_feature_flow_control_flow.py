@@ -231,7 +231,6 @@ def test_if_partial_disruption_probe_keeps_outer_completion_but_drops_nested_com
     inventory: dict[str, Any],
 ) -> None:
     entry = _entry_by_name(inventory, "fixture_if_partial_disruption_probe")
-
     outer_owner_id = _condition_owner(entry, "value > 0")
     nested_owner_id = _condition_owner(entry, "value == 10")
 
@@ -258,7 +257,6 @@ def test_loop_direct_disruptions_emit_continue_and_break_routes(
     inventory: dict[str, Any],
 ) -> None:
     entry = _entry_by_name(inventory, "fixture_loop_direct_disruptions")
-
     for_owner_id = _owner_for_region_kind(entry, "condition", "for")
     while_owner_id = _owner_for_region_kind(entry, "condition", "while")
 
@@ -287,7 +285,6 @@ def test_nested_loop_disruptions_use_nested_if_region_as_source(
     inventory: dict[str, Any],
 ) -> None:
     entry = _entry_by_name(inventory, "fixture_full_control_flow_probe")
-
     item_lt_zero_owner = _condition_owner(entry, "item < 0")
     item_eq_zero_owner = _condition_owner(entry, "item == 0")
     total_eq_seventy_owner = _condition_owner(entry, "total == 70")
@@ -328,7 +325,6 @@ def test_if_direct_return_raise_emit_disruptive_region_routes(
     inventory: dict[str, Any],
 ) -> None:
     entry = _entry_by_name(inventory, "fixture_if_direct_return_raise")
-
     value_gt_zero_owner = _condition_owner(entry, "value > 0")
 
     return_routes = [
@@ -353,7 +349,6 @@ def test_match_direct_return_raise_emit_disruptive_case_routes(
     inventory: dict[str, Any],
 ) -> None:
     entry = _entry_by_name(inventory, "fixture_match_direct_return_raise")
-
     return_routes = _route_by_kind(entry, "function_return")
     raise_routes = _route_by_kind(entry, "raise")
 
@@ -372,9 +367,21 @@ def test_loop_direct_return_raise_emit_disruptive_body_routes(
     inventory: dict[str, Any],
 ) -> None:
     entry = _entry_by_name(inventory, "fixture_loop_direct_return_raise")
-
     return_routes = _route_by_kind(entry, "function_return")
     raise_routes = _route_by_kind(entry, "raise")
+    for_owner_id = _owner_for_region_kind(entry, "condition", "for")
+    while_owner_id = _owner_for_region_kind(entry, "condition", "while")
+
+    _assert_owner_lacks_route_suffix(
+        entry,
+        for_owner_id,
+        ":body_next_iteration",
+    )
+    _assert_owner_lacks_route_suffix(
+        entry,
+        while_owner_id,
+        ":body_next_iteration",
+    )
 
     assert len(return_routes) == 1
     assert return_routes[0].get("source_region_id", "").startswith("for:")

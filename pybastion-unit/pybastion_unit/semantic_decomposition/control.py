@@ -598,16 +598,17 @@ class MatchDecomposer(ControlOwnerDecomposer):
                 )
             )
 
-            routes.append(
-                ControlRoute(
-                    id=_route_id(owner_id, f"case_body_completion:{index}"),
-                    owner_id=owner_id,
-                    kind=ControlRouteKind.NORMAL_COMPLETION,
-                    source_region_id=case_region_id,
-                    target_line=fallthrough_target,
-                    exit_kind=ExitKind.NORMAL,
+            if not _body_has_disruptive_terminal(case.body):
+                routes.append(
+                    ControlRoute(
+                        id=_route_id(owner_id, f"case_body_completion:{index}"),
+                        owner_id=owner_id,
+                        kind=ControlRouteKind.NORMAL_COMPLETION,
+                        source_region_id=case_region_id,
+                        target_line=fallthrough_target,
+                        exit_kind=ExitKind.NORMAL,
+                    )
                 )
-            )
 
             routes.extend(
                 _direct_region_disruptive_exit_routes(
@@ -856,16 +857,6 @@ class ForDecomposer(ControlOwnerDecomposer):
                 ),
                 implicit=exhausted_target_line is None,
             ),
-            ControlRoute(
-                id=_route_id(owner_id, "body_next_iteration"),
-                owner_id=owner_id,
-                kind=ControlRouteKind.LOOP_ITERATION,
-                source_region_id=body_region_id,
-                target_region_id=condition_region_id,
-                target_line=stmt.lineno,
-                exit_kind=ExitKind.NORMAL,
-                synthetic=True,
-            ),
         ]
 
         if stmt.orelse:
@@ -908,6 +899,20 @@ class ForDecomposer(ControlOwnerDecomposer):
                 body=stmt.body,
             )
         )
+
+        if not _body_has_disruptive_terminal(stmt.body):
+            routes.append(
+                ControlRoute(
+                    id=_route_id(owner_id, "body_next_iteration"),
+                    owner_id=owner_id,
+                    kind=ControlRouteKind.LOOP_ITERATION,
+                    source_region_id=body_region_id,
+                    target_region_id=condition_region_id,
+                    target_line=stmt.lineno,
+                    exit_kind=ExitKind.NORMAL,
+                    synthetic=True,
+                )
+            )
 
         return ControlStatementDecomposition(
             description=f"{source_construct} statement at line {stmt.lineno}",
@@ -1102,16 +1107,6 @@ class WhileDecomposer(ControlOwnerDecomposer):
                 ),
                 implicit=exhausted_target_line is None,
             ),
-            ControlRoute(
-                id=_route_id(owner_id, "body_next_iteration"),
-                owner_id=owner_id,
-                kind=ControlRouteKind.LOOP_ITERATION,
-                source_region_id=body_region_id,
-                target_region_id=condition_region_id,
-                target_line=stmt.lineno,
-                exit_kind=ExitKind.NORMAL,
-                synthetic=True,
-            ),
         ]
 
         if stmt.orelse:
@@ -1154,6 +1149,20 @@ class WhileDecomposer(ControlOwnerDecomposer):
                 body=stmt.body,
             )
         )
+
+        if not _body_has_disruptive_terminal(stmt.body):
+            routes.append(
+                ControlRoute(
+                    id=_route_id(owner_id, "body_next_iteration"),
+                    owner_id=owner_id,
+                    kind=ControlRouteKind.LOOP_ITERATION,
+                    source_region_id=body_region_id,
+                    target_region_id=condition_region_id,
+                    target_line=stmt.lineno,
+                    exit_kind=ExitKind.NORMAL,
+                    synthetic=True,
+                )
+            )
 
         return ControlStatementDecomposition(
             description=f"while statement at line {stmt.lineno}",
