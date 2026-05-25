@@ -41,9 +41,9 @@ from pybastion_integration import config
 from pybastion_integration.utils.inventory_index import (
     CallableContext,
     InventoryIndex,
-    branch_constraint,
-    branch_description,
-    branch_statement_outcome,
+    execution_items_constraint,
+    execution_items_description,
+    execution_items_statement_outcome,
     build_ei_details_index,
     discover_inventory_files,
     load_all_inventories,
@@ -354,19 +354,19 @@ def analyze_target_outcomes(target_context: CallableContext | None) -> dict[str,
     if target_context is None:
         return {
             "has_exceptions": False,
-            "exception_branches": [],
-            "success_branches": [],
-            "total_branches": 0,
+            "exception_execution_items": [],
+            "success_execution_items": [],
+            "total_execution_items": 0,
         }
 
-    exception_branches: list[dict[str, Any]] = []
-    success_branches: list[dict[str, Any]] = []
+    exception_execution_items: list[dict[str, Any]] = []
+    success_execution_items: list[dict[str, Any]] = []
 
-    for branch in target_context.branches:
-        description = branch_description(branch).lower()
-        statement_outcome = branch_statement_outcome(branch)
-        terminates_via = statement_outcome.get("terminates_via") or branch.get("terminates_via")
-        is_terminal = bool(statement_outcome.get("is_terminal", branch.get("is_terminal", False)))
+    for ei in target_context.execution_items:
+        description = execution_items_description(ei).lower()
+        statement_outcome = execution_items_statement_outcome(ei)
+        terminates_via = statement_outcome.get("terminates_via") or ei.get("terminates_via")
+        is_terminal = bool(statement_outcome.get("is_terminal", ei.get("is_terminal", False)))
 
         is_exception = (
                 "exception propagates" in description
@@ -375,15 +375,15 @@ def analyze_target_outcomes(target_context: CallableContext | None) -> dict[str,
         )
 
         if is_exception:
-            exception_branches.append(branch)
+            exception_execution_items.append(ei)
         elif "returns" in description or not is_terminal:
-            success_branches.append(branch)
+            success_execution_items.append(ei)
 
     return {
-        "has_exceptions": len(exception_branches) > 0,
-        "exception_branches": exception_branches,
-        "success_branches": success_branches,
-        "total_branches": len(target_context.branches),
+        "has_exceptions": len(exception_execution_items) > 0,
+        "exception_execution_items": exception_execution_items,
+        "success_execution_items": success_execution_items,
+        "total_execution_items": len(target_context.execution_items),
     }
 
 
@@ -395,16 +395,16 @@ def categorize_path(
     has_validation_failure = False
     has_empty_iteration = False
     has_boundary_condition = False
-    has_alternative_branch = False
+    has_alternative_execution_item = False
     has_exception_path = False
 
     for ei_id in path_eis:
         ei = ei_details.get(ei_id, {})
-        description = branch_description(ei).lower()
+        description = execution_items_description(ei).lower()
         condition = str(ei.get("condition") or "").lower()
-        constraint = branch_constraint(ei)
+        constraint = execution_items_constraint(ei)
         constraint_type = constraint.get("constraint_type")
-        statement_outcome = branch_statement_outcome(ei)
+        statement_outcome = execution_items_statement_outcome(ei)
         terminates_via = statement_outcome.get("terminates_via") or ei.get("terminates_via")
 
         if "validation" in description or "invalid" in description:
@@ -418,7 +418,7 @@ def categorize_path(
             has_boundary_condition = True
 
         if constraint_type == "condition":
-            has_alternative_branch = True
+            has_alternative_execution_item = True
 
         if terminates_via in {"raise", "exception"} or "raises" in description:
             has_exception_path = True
@@ -429,9 +429,9 @@ def categorize_path(
     elif has_empty_iteration or has_boundary_condition:
         category = "edge_cases"
         subcategory = "empty_collection" if has_empty_iteration else "boundary_condition"
-    elif has_alternative_branch:
+    elif has_alternative_execution_item:
         category = "alternative_flows"
-        subcategory = "conditional_branch"
+        subcategory = "conditional_execution_items"
     else:
         category = "happy_path"
         subcategory = "success"
@@ -499,24 +499,24 @@ def find_representative_paths(paths: list[dict[str, Any]]) -> list[dict[str, Any
 
 
 def build_synthetic_error_representative(target_outcomes: dict[str, Any]) -> dict[str, Any] | None:
-    exception_branches = target_outcomes.get("exception_branches", [])
-    if not exception_branches:
+    exception_execution_items = target_outcomes.get("exception_execution_items", [])
+    if not exception_execution_items:
         return None
 
     primary = next(
         (
-            branch
-            for branch in exception_branches
+            ei
+            for ei in exception_execution_items
             if (
-                (branch_statement_outcome(branch).get("terminates_via") or branch.get("terminates_via"))
+                (execution_items_statement_outcome(ei).get("terminates_via") or ei.get("terminates_via"))
                 == "raise"
-                and branch.get("condition")
+                and ei.get("condition")
         )
         ),
-        exception_branches[0],
+        exception_execution_items[0],
     )
 
-    constraint = branch_constraint(primary)
+    constraint = execution_items_constraint(primary)
 
     return {
         "path_id": "PATH_SYNTHETIC_ERROR",
@@ -1058,7 +1058,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.verbose:
         print(f"Callables indexed: {len(inventory_index.callable_contexts)}")
-        print(f"EI branches indexed: {len(ei_details)}")
+        print(f"EIs indexed: {len(ei_details)}")
         print(f"Graph nodes: {cfg.number_of_nodes()}")
         print(f"Graph edges: {cfg.number_of_edges()}")
         print(f"Inventory seam sources: {len(seams)}")

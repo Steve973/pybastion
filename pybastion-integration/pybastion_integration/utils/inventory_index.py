@@ -31,7 +31,7 @@ class CallableContext:
     unit_name: str
     unit_fqn: str
     entry: dict[str, Any]
-    branches: list[dict[str, Any]]
+    execution_items: list[dict[str, Any]]
     integration_by_ei: dict[str, list[dict[str, Any]]]
 
 
@@ -129,7 +129,7 @@ def index_inventory(inventory: dict[str, Any]) -> InventoryIndex:
             children = entry.get("children", []) or []
 
             ainfo = analysis_info(entry)
-            branches = ainfo.get("branches", []) or []
+            execution_items = ainfo.get("execution_items", []) or []
             integration_candidates = ainfo.get("integration_candidates", []) or []
 
             callable_fqn = build_callable_fqn(
@@ -158,17 +158,17 @@ def index_inventory(inventory: dict[str, Any]) -> InventoryIndex:
                     unit_name=unit_name,
                     unit_fqn=unit_fqn,
                     entry=entry,
-                    branches=branches,
+                    execution_items=execution_items,
                     integration_by_ei=dict(integration_by_ei),
                 )
 
                 callable_contexts[entry_id] = context
                 fqn_to_callable_id[callable_fqn] = entry_id
 
-                for branch in branches:
-                    branch_id = branch.get("id")
-                    if branch_id:
-                        ei_to_callable_id[branch_id] = entry_id
+                for ei in execution_items:
+                    ei_id = ei.get("id")
+                    if ei_id:
+                        ei_to_callable_id[ei_id] = entry_id
 
             recurse(children, [*ancestors, name])
 
@@ -225,10 +225,10 @@ def build_ei_details_index(
     ei_index: dict[str, dict[str, Any]] = {}
 
     for context in inventory_index.callable_contexts.values():
-        for branch in context.branches:
-            branch_id = branch.get("id")
-            if branch_id:
-                ei_index[branch_id] = branch
+        for ei in context.execution_items:
+            ei_id = ei.get("id")
+            if ei_id:
+                ei_index[ei_id] = ei
 
     return ei_index
 
@@ -242,18 +242,18 @@ def build_callable_entry_index(
     }
 
 
-def branch_description(branch: dict[str, Any]) -> str:
+def execution_items_description(execution_items: dict[str, Any]) -> str:
     return str(
-        branch.get("description")
-        or branch.get("outcome")
-        or branch.get("condition")
+        execution_items.get("description")
+        or execution_items.get("outcome")
+        or execution_items.get("condition")
         or ""
     )
 
 
-def branch_statement_outcome(branch: dict[str, Any]) -> dict[str, Any]:
-    return branch.get("statement_outcome") or {}
+def execution_items_statement_outcome(execution_items: dict[str, Any]) -> dict[str, Any]:
+    return execution_items.get("statement_outcome") or {}
 
 
-def branch_constraint(branch: dict[str, Any]) -> dict[str, Any]:
-    return branch.get("constraint") or {}
+def execution_items_constraint(execution_items: dict[str, Any]) -> dict[str, Any]:
+    return execution_items.get("constraint") or {}
