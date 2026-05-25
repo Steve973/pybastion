@@ -434,3 +434,15 @@ def fixture_try_handler_else_normal_completion(value: str) -> int:
     else:
         result = parsed
     return result
+
+
+def fixture_try_finally_normal_resume_target(value: int) -> int:
+    result = value
+
+    try:
+        result += 1
+    finally:
+        result += 10
+
+    result += 100
+    return result

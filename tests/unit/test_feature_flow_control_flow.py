@@ -86,10 +86,9 @@ def _owner_for_region_kind(
         and region.get("source_construct") == source_construct
     ]
 
-    assert len(matches) == 1, (
-        f"expected one {kind!r} region for {source_construct!r}, "
-        f"found {len(matches)}"
-    )
+    assert (
+        len(matches) == 1
+    ), f"expected one {kind!r} region for {source_construct!r}, found {len(matches)}"
 
     return matches[0]
 
@@ -923,3 +922,45 @@ def test_loop_transfer_routes_are_not_duplicated_per_source(
                 key not in seen
             ), f"duplicate loop transfer route in {entry.get('name')}: {route}"
             seen.add(key)
+
+
+def test_if_body_with_terminal_with_does_not_emit_normal_completion(
+    inventory: dict[str, Any],
+) -> None:
+    entry = _entry_by_name(inventory, "fixture_with_direct_return_raise")
+
+    mode_raise_owner_id = _condition_owner(entry, "mode == 'raise'")
+
+    _assert_owner_lacks_route_suffix(
+        entry,
+        mode_raise_owner_id,
+        ":true_body_completion",
+    )
+
+
+def test_try_finally_normal_resume_has_continuation_target(
+    inventory: dict[str, Any],
+) -> None:
+    entry = _entry_by_name(inventory, "fixture_try_finally_normal_resume_target")
+
+    try_owner_ids = [
+        region["owner_id"]
+        for region in _regions(entry)
+        if region.get("kind") == "post_execution"
+        and region.get("source_construct") == "finally"
+    ]
+
+    assert len(try_owner_ids) == 1
+    try_owner_id = try_owner_ids[0]
+
+    resume_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == try_owner_id
+        and route.get("kind") == "resume_prior_outcome"
+        and route.get("source_region_id") == f"{try_owner_id}:post_execution"
+    ]
+
+    assert len(resume_routes) == 1
+    assert resume_routes[0].get("preserves_prior_outcome") is True
+    assert resume_routes[0].get("target_line") == entry["line_end"] - 1

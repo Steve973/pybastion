@@ -314,11 +314,71 @@ def _continuation_target(
     return select_target_from_chain(context.next_stmt_lines, skipped_lines)
 
 
-def _body_has_disruptive_terminal(body: list[ast.stmt]) -> bool:
-    return any(
-        isinstance(stmt, (ast.Return, ast.Raise, ast.Break, ast.Continue))
-        for stmt in body
-    )
+def _body_cannot_complete_normally(body: list[ast.stmt]) -> bool:
+    if not body:
+        return False
+
+    return _stmt_cannot_complete_normally(body[-1])
+
+
+def _stmt_cannot_complete_normally(stmt: ast.stmt) -> bool:
+    match stmt:
+        case ast.Return() | ast.Raise() | ast.Break() | ast.Continue():
+            return True
+
+        case ast.If():
+            if not stmt.orelse:
+                return False
+
+            return _body_cannot_complete_normally(
+                stmt.body
+            ) and _body_cannot_complete_normally(stmt.orelse)
+
+        case ast.Match():
+            has_unconditional_case = any(
+                isinstance(case.pattern, ast.MatchAs)
+                and case.pattern.name is None
+                and case.guard is None
+                for case in stmt.cases
+            )
+
+            if not has_unconditional_case:
+                return False
+
+            return all(_body_cannot_complete_normally(case.body) for case in stmt.cases)
+
+        case ast.Try():
+            protected_cannot_complete = _body_cannot_complete_normally(stmt.body)
+
+            handlers_cannot_complete = all(
+                _body_cannot_complete_normally(handler.body)
+                for handler in stmt.handlers
+            )
+
+            else_cannot_complete = (
+                _body_cannot_complete_normally(stmt.orelse) if stmt.orelse else False
+            )
+
+            finally_cannot_complete = (
+                _body_cannot_complete_normally(stmt.finalbody)
+                if stmt.finalbody
+                else False
+            )
+
+            return finally_cannot_complete or (
+                protected_cannot_complete
+                and handlers_cannot_complete
+                and (else_cannot_complete if stmt.orelse else True)
+            )
+
+        case ast.With() | ast.AsyncWith():
+            return _body_cannot_complete_normally(stmt.body)
+
+        case ast.For() | ast.AsyncFor() | ast.While():
+            return False
+
+        case _:
+            return False
 
 
 class IfDecomposer(ControlOwnerDecomposer):
@@ -409,7 +469,7 @@ class IfDecomposer(ControlOwnerDecomposer):
                 )
             )
 
-            if not _body_has_disruptive_terminal(stmt.orelse):
+            if not _body_cannot_complete_normally(stmt.orelse):
                 routes.append(
                     ControlRoute(
                         id=_route_id(owner_id, "false_body_completion"),
@@ -439,7 +499,7 @@ class IfDecomposer(ControlOwnerDecomposer):
                 )
             )
 
-        if not _body_has_disruptive_terminal(stmt.body):
+        if not _body_cannot_complete_normally(stmt.body):
             routes.append(
                 ControlRoute(
                     id=_route_id(owner_id, "true_body_completion"),
@@ -634,7 +694,7 @@ class MatchDecomposer(ControlOwnerDecomposer):
                 )
             )
 
-            if not _body_has_disruptive_terminal(case.body):
+            if not _body_cannot_complete_normally(case.body):
                 routes.append(
                     ControlRoute(
                         id=_route_id(owner_id, f"case_body_completion:{index}"),
@@ -926,7 +986,7 @@ class ForDecomposer(ControlOwnerDecomposer):
             )
         )
 
-        if not _body_has_disruptive_terminal(stmt.body):
+        if not _body_cannot_complete_normally(stmt.body):
             routes.append(
                 ControlRoute(
                     id=_route_id(owner_id, "body_next_iteration"),
@@ -1166,7 +1226,7 @@ class WhileDecomposer(ControlOwnerDecomposer):
             )
         )
 
-        if not _body_has_disruptive_terminal(stmt.body):
+        if not _body_cannot_complete_normally(stmt.body):
             routes.append(
                 ControlRoute(
                     id=_route_id(owner_id, "body_next_iteration"),
@@ -1318,7 +1378,7 @@ class TryDecomposer(ControlOwnerDecomposer):
         for index, handler in enumerate(stmt.handlers):
             handler_region_id = _region_id(owner_id, f"exception_handler:{index}")
 
-            if not _body_has_disruptive_terminal(handler.body):
+            if not _body_cannot_complete_normally(handler.body):
                 routes.append(
                     ControlRoute(
                         id=_route_id(owner_id, f"handler_completion:{index}"),
@@ -1391,7 +1451,7 @@ class TryDecomposer(ControlOwnerDecomposer):
                 )
             )
 
-            if not _body_has_disruptive_terminal(stmt.body):
+            if not _body_cannot_complete_normally(stmt.body):
                 routes.append(
                     ControlRoute(
                         id=_route_id(owner_id, "protected_normal_to_else"),
@@ -1404,7 +1464,7 @@ class TryDecomposer(ControlOwnerDecomposer):
                     )
                 )
 
-            if not _body_has_disruptive_terminal(stmt.orelse):
+            if not _body_cannot_complete_normally(stmt.orelse):
                 routes.append(
                     ControlRoute(
                         id=_route_id(owner_id, "else_completion"),
@@ -1447,6 +1507,7 @@ class TryDecomposer(ControlOwnerDecomposer):
                     owner_id=owner_id,
                     kind=ControlRouteKind.RESUME_PRIOR_OUTCOME,
                     source_region_id=finally_region_id,
+                    target_line=continuation_target,
                     preserves_prior_outcome=True,
                     synthetic=True,
                 )
