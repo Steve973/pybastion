@@ -11,8 +11,7 @@
       "PermitUnused",
       "CalledThroughAbstraction"
     ],
-    "abstraction_dispatch_decorators": [
-    ],
+    "abstraction_dispatch_decorators": [],
     "collapsible_operation_decorators": [
       "MechanicalOperation",
       "UtilityOperation"
@@ -114,6 +113,30 @@
       "summary_code": "l",
       "include_when": {
         "low_signal": true
+      }
+    },
+    {
+      "id": "edge_type_counts",
+      "report_key": "edge_type_counts",
+      "summary_code": "e",
+      "section_header": "=== Edge Type Counts ===",
+      "description": "Graph edge counts grouped by edge_type.",
+      "include_in_console_summary": true,
+      "source": {
+        "kind": "analysis",
+        "analysis_id": "edge_type_counts"
+      }
+    },
+    {
+      "id": "control_flow_route_coverage",
+      "report_key": "control_flow_route_coverage",
+      "summary_code": "c",
+      "section_header": "=== Control Flow Route Coverage ===",
+      "description": "Control route IDs compared against derived EI-level route coverage.",
+      "include_in_console_summary": true,
+      "source": {
+        "kind": "analysis",
+        "analysis_id": "control_flow_route_coverage"
       }
     },
     {

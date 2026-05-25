@@ -64,14 +64,16 @@ def is_callable_entry(entry: dict[str, Any]) -> bool:
     if not isinstance(analysis_info, dict):
         return False
 
-    branches = analysis_info.get("branches")
-    return isinstance(branches, list)
+    execution_items = analysis_info.get("execution_items")
+    return isinstance(execution_items, list)
 
 
-def target_eis_for_branch(branch: dict[str, Any]) -> list[dict[str, Any]]:
+def target_eis_for_execution_item(
+    execution_item: dict[str, Any],
+) -> list[dict[str, Any]]:
     targets: list[dict[str, Any]] = []
 
-    statement_outcome = branch.get("statement_outcome") or {}
+    statement_outcome = execution_item.get("statement_outcome") or {}
     if isinstance(statement_outcome, dict):
         target_ei = statement_outcome.get("target_ei")
         if target_ei:
@@ -83,7 +85,7 @@ def target_eis_for_branch(branch: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
 
-    for conditional in branch.get("conditional_targets", []) or []:
+    for conditional in execution_item.get("conditional_targets", []) or []:
         if not isinstance(conditional, dict):
             continue
 
@@ -99,7 +101,7 @@ def target_eis_for_branch(branch: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
 
-    for disruptive in branch.get("disruptive_outcomes", []) or []:
+    for disruptive in execution_item.get("disruptive_outcomes", []) or []:
         if not isinstance(disruptive, dict):
             continue
 
@@ -117,17 +119,19 @@ def target_eis_for_branch(branch: dict[str, Any]) -> list[dict[str, Any]]:
     return targets
 
 
-def branch_is_terminal(branch: dict[str, Any]) -> bool:
-    outcome = branch.get("statement_outcome") or {}
+def execution_item_is_terminal(execution_item: dict[str, Any]) -> bool:
+    outcome = execution_item.get("statement_outcome") or {}
     if isinstance(outcome, dict) and outcome.get("is_terminal"):
         return True
 
-    terminates_via = outcome.get("terminates_via") if isinstance(outcome, dict) else None
+    terminates_via = (
+        outcome.get("terminates_via") if isinstance(outcome, dict) else None
+    )
     if terminates_via in {"return", "implicit-return", "yield", "raise", "exception"}:
         return True
 
-    stmt_type = branch.get("stmt_type")
-    description = str(branch.get("description") or "")
+    stmt_type = execution_item.get("stmt_type")
+    description = str(execution_item.get("description") or "")
 
     if stmt_type == "Raise":
         return True
@@ -152,35 +156,35 @@ def check_callable(
     callable_fqn = str(entry.get("fully_qualified_name", callable_name))
 
     analysis_info = entry.get("analysis_info") or {}
-    branches = analysis_info.get("branches") or []
+    execution_items = analysis_info.get("execution_items") or []
 
-    if not isinstance(branches, list):
+    if not isinstance(execution_items, list):
         errors.append(
             {
-                "kind": "invalid_branches",
+                "kind": "invalid_execution_items",
                 "inventory": str(inventory_path),
                 "unit": unit_name,
                 "unit_fqn": unit_fqn,
                 "callable_id": callable_id,
                 "callable_fqn": callable_fqn,
-                "message": "analysis_info.branches is not a list",
+                "message": "analysis_info.execution_items is not a list",
             }
         )
         return errors
 
-    branch_ids = {
-        str(branch.get("id"))
-        for branch in branches
-        if isinstance(branch, dict) and branch.get("id")
+    execution_item_ids = {
+        str(ei.get("id"))
+        for ei in execution_items
+        if isinstance(ei, dict) and ei.get("id")
     }
 
-    for branch in branches:
-        if not isinstance(branch, dict):
+    for ei in execution_items:
+        if not isinstance(ei, dict):
             continue
 
-        ei_id = str(branch.get("id", "unknown"))
-        terminal = branch_is_terminal(branch)
-        targets = target_eis_for_branch(branch)
+        ei_id = str(ei.get("id", "unknown"))
+        terminal = execution_item_is_terminal(ei)
+        targets = target_eis_for_execution_item(ei)
 
         if not terminal and not targets:
             errors.append(
@@ -192,9 +196,9 @@ def check_callable(
                     "callable_id": callable_id,
                     "callable_fqn": callable_fqn,
                     "ei_id": ei_id,
-                    "line": branch.get("line"),
-                    "stmt_type": branch.get("stmt_type"),
-                    "description": branch.get("description"),
+                    "line": ei.get("line"),
+                    "stmt_type": ei.get("stmt_type"),
+                    "description": ei.get("description"),
                     "message": (
                         "Non-terminal EI has no explicit target_ei in "
                         "statement_outcome, conditional_targets, or disruptive_outcomes"
@@ -206,7 +210,7 @@ def check_callable(
         for target in targets:
             target_ei = str(target["target_ei"])
 
-            if target_ei not in branch_ids:
+            if target_ei not in execution_item_ids:
                 errors.append(
                     {
                         "kind": "target_ei_not_in_callable",
@@ -218,12 +222,12 @@ def check_callable(
                         "ei_id": ei_id,
                         "target_ei": target_ei,
                         "target_source": target["source"],
-                        "line": branch.get("line"),
-                        "stmt_type": branch.get("stmt_type"),
-                        "description": branch.get("description"),
+                        "line": ei.get("line"),
+                        "stmt_type": ei.get("stmt_type"),
+                        "description": ei.get("description"),
                         "message": (
                             "EI target_ei does not exist in the same callable's "
-                            "branch set"
+                            "execution item set"
                         ),
                     }
                 )

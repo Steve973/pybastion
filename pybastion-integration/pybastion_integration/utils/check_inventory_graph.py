@@ -69,6 +69,10 @@ def is_ei_like(node_id: Any) -> bool:
     return isinstance(node_id, str) and "_E" in node_id and node_id.startswith("U")
 
 
+def is_execution_instance_node(node_data: dict[str, Any]) -> bool:
+    return node_data.get("category") == "execution_instance"
+
+
 def callable_prefix_from_ei(ei_id: str) -> str | None:
     m = re.match(
         r"^(U[0-9A-F]{10}(?:_F\d{3}(?:\.F\d{3})*|_C\d{3}(?:\.C\d{3})*_M\d{3}(?:\.F\d{3})*))_E\d{4}",
@@ -181,7 +185,7 @@ def analyze_integration_point_graph_coverage(cfg: nx.DiGraph) -> dict[str, Any]:
                 "execution_instance",
                 "collapsed_internal_operation",
                 "external_call",
-                "external_placeholder"
+                "external_placeholder",
             }:
                 bad_call_targets.append(
                     {
@@ -218,19 +222,23 @@ def analyze_integration_point_graph_coverage(cfg: nx.DiGraph) -> dict[str, Any]:
 
     return {
         "count": (
-                len(missing_call_edges)
-                + len(bad_call_targets)
-                + len(paths_not_ending_at_integration_ei)
-                + len(same_unit_integration_points)
+            len(missing_call_edges)
+            + len(bad_call_targets)
+            + len(paths_not_ending_at_integration_ei)
+            + len(same_unit_integration_points)
         ),
         "integration_point_count": len(integration_points),
         "missing_call_edges_count": len(missing_call_edges),
         "missing_call_edges": missing_call_edges,
         "missing_call_edges_by_kind": dict(sorted(missing_call_edges_by_kind.items())),
-        "missing_call_edges_by_suppressed_by": dict(sorted(missing_call_edges_by_suppressed_by.items())),
+        "missing_call_edges_by_suppressed_by": dict(
+            sorted(missing_call_edges_by_suppressed_by.items())
+        ),
         "bad_call_targets_count": len(bad_call_targets),
         "bad_call_targets": bad_call_targets,
-        "paths_not_ending_at_integration_ei_count": len(paths_not_ending_at_integration_ei),
+        "paths_not_ending_at_integration_ei_count": len(
+            paths_not_ending_at_integration_ei
+        ),
         "paths_not_ending_at_integration_ei": paths_not_ending_at_integration_ei,
         "same_unit_integration_points_count": len(same_unit_integration_points),
         "same_unit_integration_points": same_unit_integration_points,
@@ -238,10 +246,10 @@ def analyze_integration_point_graph_coverage(cfg: nx.DiGraph) -> dict[str, Any]:
 
 
 def classify_placeholder_reason(
-        *,
-        integration_target: Any,
-        integration_resolved_target: Any,
-        target_node_id: Hashable,
+    *,
+    integration_target: Any,
+    integration_resolved_target: Any,
+    target_node_id: Hashable,
 ) -> str:
     target = str(integration_resolved_target or integration_target or "")
     target_node_id_str = str(target_node_id)
@@ -330,7 +338,9 @@ def analyze_interunit_placeholder_targets(cfg: nx.DiGraph) -> dict[str, Any]:
 
 
 def classify_interunit_placeholder_reason(item: dict[str, Any]) -> str:
-    target = item.get("integration_resolved_target") or item.get("integration_target") or ""
+    target = (
+        item.get("integration_resolved_target") or item.get("integration_target") or ""
+    )
 
     if "." not in target:
         return "unknown"
@@ -396,7 +406,9 @@ def analyze_collapsed_node_health(cfg: nx.DiGraph) -> dict[str, Any]:
         "collapsed_without_return": collapsed_without_return,
         "collapsed_without_incoming_call_count": len(collapsed_without_incoming_call),
         "collapsed_without_incoming_call": collapsed_without_incoming_call,
-        "collapsed_missing_target_callable_count": len(collapsed_missing_target_callable),
+        "collapsed_missing_target_callable_count": len(
+            collapsed_missing_target_callable
+        ),
         "collapsed_missing_target_callable": collapsed_missing_target_callable,
     }
 
@@ -529,8 +541,12 @@ def analyze_callable_call_cycles(cfg: nx.DiGraph) -> dict[str, Any]:
                         {
                             "from_callable_id": src,
                             "to_callable_id": dst,
-                            "from_callable_fqn": call_graph.nodes[src].get("callable_fqn"),
-                            "to_callable_fqn": call_graph.nodes[dst].get("callable_fqn"),
+                            "from_callable_fqn": call_graph.nodes[src].get(
+                                "callable_fqn"
+                            ),
+                            "to_callable_fqn": call_graph.nodes[dst].get(
+                                "callable_fqn"
+                            ),
                             "count": call_graph[src][dst].get("count", 0),
                         }
                     )
@@ -543,7 +559,9 @@ def analyze_callable_call_cycles(cfg: nx.DiGraph) -> dict[str, Any]:
             }
         )
 
-    multi_node_sccs.sort(key=lambda item: (-item["size"], item["members"][0]["callable_fqn"] or ""))
+    multi_node_sccs.sort(
+        key=lambda item: (-item["size"], item["members"][0]["callable_fqn"] or "")
+    )
 
     return {
         "callable_count": call_graph.number_of_nodes(),
@@ -565,9 +583,10 @@ def analyze_external_seams(results: list[dict[str, Any]]) -> dict[str, Any]:
         coverage = result.get("coverage") or {}
         callers = coverage.get("callers", []) or []
         internal_callers = [
-            caller for caller in callers
+            caller
+            for caller in callers
             if caller.get("caller_callable_id")
-               and caller.get("caller_callable_id") != result.get("callable_id")
+            and caller.get("caller_callable_id") != result.get("callable_id")
         ]
 
         external_seams.append(
@@ -636,18 +655,37 @@ def callable_marker_names(cfg: nx.DiGraph, callable_id: str) -> set[str]:
 
 
 def externally_reachable_via_marker(
-        cfg: nx.DiGraph,
-        callable_id: str,
-        config: CheckerConfig,
+    cfg: nx.DiGraph,
+    callable_id: str,
+    config: CheckerConfig,
 ) -> bool:
     if not callable_id:
         return False
-    return bool(callable_marker_names(cfg, callable_id) & config.external_method_decorators)
+    return bool(
+        callable_marker_names(cfg, callable_id) & config.external_method_decorators
+    )
 
 
 def load_cfg(cfg_path: Path) -> nx.DiGraph:
-    with open(cfg_path, "rb") as f:
-        return pickle.load(f)
+    suffixes = {suffix.lower() for suffix in cfg_path.suffixes}
+
+    if ".pickle" in suffixes or ".pkl" in suffixes:
+        with open(cfg_path, "rb") as f:
+            return pickle.load(f)
+
+    if ".yaml" in suffixes or ".yml" in suffixes:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            payload = yaml.safe_load(f)
+
+        if not isinstance(payload, dict):
+            raise ValueError(f"Graph YAML is not a mapping: {cfg_path}")
+
+        return nx.node_link_graph(payload, edges="links")
+
+    raise ValueError(
+        f"Unsupported graph format for {cfg_path}. "
+        "Expected .pickle, .pkl, .yaml, or .yml"
+    )
 
 
 def discover_inventory_files(inventories_root: Path) -> list[Path]:
@@ -656,12 +694,16 @@ def discover_inventory_files(inventories_root: Path) -> list[Path]:
     return sorted(set(inventory_files))
 
 
-def build_callable_fqn(unit_fqn: str, ancestor_names: list[str], entry_name: str) -> str:
+def build_callable_fqn(
+    unit_fqn: str, ancestor_names: list[str], entry_name: str
+) -> str:
     parts = [unit_fqn, *ancestor_names, entry_name]
     return ".".join(part for part in parts if part)
 
 
-def index_inventory_execution_paths(inventory_paths: list[Path]) -> dict[str, dict[str, Any]]:
+def index_inventory_execution_paths(
+    inventory_paths: list[Path],
+) -> dict[str, dict[str, Any]]:
     indexed: dict[str, dict[str, Any]] = {}
 
     for path in inventory_paths:
@@ -677,7 +719,7 @@ def index_inventory_execution_paths(inventory_paths: list[Path]) -> dict[str, di
             for entry in entries:
                 kind = entry.get("kind", "unknown")
                 name = entry.get("name", "unknown")
-                children = entry.get("children", []) or []
+                children = entry.get("entries") or entry.get("children", []) or []
 
                 if kind not in CALLABLE_KINDS:
                     recurse(children, [*ancestors, name])
@@ -695,8 +737,9 @@ def index_inventory_execution_paths(inventory_paths: list[Path]) -> dict[str, di
                     "callable_fqn": callable_fqn,
                     "unit_name": unit_name,
                     "unit_fqn": unit_fqn,
-                    "branches": ainfo.get("branches", []) or [],
-                    "integration_candidates": ainfo.get("integration_candidates", []) or [],
+                    "execution_items": ainfo.get("execution_items", []) or [],
+                    "integration_candidates": ainfo.get("integration_candidates", [])
+                    or [],
                     "decorators": sinfo.get("decorators", []) or [],
                     "is_executable": entry.get("is_executable", True),
                     "is_contract_method": hinfo.get("is_contract_method", False),
@@ -713,6 +756,9 @@ def collect_callables_from_graph(cfg: nx.DiGraph) -> dict[str, dict[str, Any]]:
     callables: dict[str, dict[str, Any]] = {}
 
     for node_id, node_data in cfg.nodes(data=True):
+        if not is_execution_instance_node(node_data):
+            continue
+
         callable_id = node_data.get("callable_id")
         if not callable_id:
             continue
@@ -751,7 +797,7 @@ def find_entry_ei(cfg: nx.DiGraph, callable_id: str) -> str | None:
     eis = [
         node_id
         for node_id, data in cfg.nodes(data=True)
-        if data.get("callable_id") == callable_id
+        if data.get("callable_id") == callable_id and is_execution_instance_node(data)
     ]
     if not eis:
         return None
@@ -761,9 +807,14 @@ def find_entry_ei(cfg: nx.DiGraph, callable_id: str) -> str | None:
 def find_success_exit_eis(cfg: nx.DiGraph, callable_id: str) -> list[str]:
     exits: list[str] = []
     for node_id, node_data in cfg.nodes(data=True):
+        if not is_execution_instance_node(node_data):
+            continue
         if node_data.get("callable_id") != callable_id:
             continue
-        if node_data.get("is_terminal") and node_data.get("terminates_via") in SUCCESS_EXIT_TERMINATORS:
+        if (
+            node_data.get("is_terminal")
+            and node_data.get("terminates_via") in SUCCESS_EXIT_TERMINATORS
+        ):
             exits.append(node_id)
     return sorted(exits, key=_ei_sort_key)
 
@@ -771,9 +822,14 @@ def find_success_exit_eis(cfg: nx.DiGraph, callable_id: str) -> list[str]:
 def find_exception_exit_eis(cfg: nx.DiGraph, callable_id: str) -> list[str]:
     exits: list[str] = []
     for node_id, node_data in cfg.nodes(data=True):
+        if not is_execution_instance_node(node_data):
+            continue
         if node_data.get("callable_id") != callable_id:
             continue
-        if node_data.get("is_terminal") and node_data.get("terminates_via") in EXCEPTION_EXIT_TERMINATORS:
+        if (
+            node_data.get("is_terminal")
+            and node_data.get("terminates_via") in EXCEPTION_EXIT_TERMINATORS
+        ):
             exits.append(node_id)
     return sorted(exits, key=_ei_sort_key)
 
@@ -795,15 +851,17 @@ def has_incoming_callable_call_edges(cfg: nx.DiGraph, callable_id: str) -> bool:
 
 
 def find_first_failed_recorded_hop(
-        cfg: nx.DiGraph,
-        start_node: str,
-        target_node: str,
-        recorded_path: list[str],
+    cfg: nx.DiGraph,
+    start_node: str,
+    target_node: str,
+    recorded_path: list[str],
 ) -> dict[str, Any] | None:
     if not recorded_path:
         return {"from": start_node, "to": target_node, "reason": "empty_recorded_path"}
 
-    if recorded_path[0] != start_node and not nx.has_path(cfg, start_node, recorded_path[0]):
+    if recorded_path[0] != start_node and not nx.has_path(
+        cfg, start_node, recorded_path[0]
+    ):
         return {
             "from": start_node,
             "to": recorded_path[0],
@@ -814,7 +872,9 @@ def find_first_failed_recorded_hop(
         if not nx.has_path(cfg, current, nxt):
             return {"from": current, "to": nxt, "reason": "recorded_hop_not_reachable"}
 
-    if recorded_path[-1] != target_node and not nx.has_path(cfg, recorded_path[-1], target_node):
+    if recorded_path[-1] != target_node and not nx.has_path(
+        cfg, recorded_path[-1], target_node
+    ):
         return {
             "from": recorded_path[-1],
             "to": target_node,
@@ -825,22 +885,26 @@ def find_first_failed_recorded_hop(
 
 
 def path_contains_recorded_execution_path(
-        cfg: nx.DiGraph,
-        start_node: str,
-        target_node: str,
-        recorded_path: list[str],
+    cfg: nx.DiGraph,
+    start_node: str,
+    target_node: str,
+    recorded_path: list[str],
 ) -> bool:
     if not recorded_path:
         return False
 
-    if recorded_path[0] != start_node and not nx.has_path(cfg, start_node, recorded_path[0]):
+    if recorded_path[0] != start_node and not nx.has_path(
+        cfg, start_node, recorded_path[0]
+    ):
         return False
 
     for current, nxt in zip(recorded_path, recorded_path[1:]):
         if not nx.has_path(cfg, current, nxt):
             return False
 
-    if recorded_path[-1] != target_node and not nx.has_path(cfg, recorded_path[-1], target_node):
+    if recorded_path[-1] != target_node and not nx.has_path(
+        cfg, recorded_path[-1], target_node
+    ):
         return False
 
     return True
@@ -893,8 +957,8 @@ def check_callable_integrity(cfg: nx.DiGraph, callable_id: str) -> dict[str, Any
 
 
 def decorator_names_for_callable(
-        callable_info: dict[str, Any],
-        inventory_info: dict[str, Any] | None = None,
+    callable_info: dict[str, Any],
+    inventory_info: dict[str, Any] | None = None,
 ) -> set[str]:
     decorators = callable_info.get("decorators") or []
     if inventory_info:
@@ -912,9 +976,9 @@ def decorator_names_for_callable(
 
 
 def is_collapsible_operation_callable(
-        callable_info: dict[str, Any],
-        inventory_info: dict[str, Any] | None,
-        config: CheckerConfig,
+    callable_info: dict[str, Any],
+    inventory_info: dict[str, Any] | None,
+    config: CheckerConfig,
 ) -> bool:
     return bool(
         decorator_names_for_callable(callable_info, inventory_info)
@@ -923,9 +987,9 @@ def is_collapsible_operation_callable(
 
 
 def low_signal_category(
-        callable_info: dict[str, Any],
-        inventory_info: dict[str, Any] | None,
-        config: CheckerConfig,
+    callable_info: dict[str, Any],
+    inventory_info: dict[str, Any] | None,
+    config: CheckerConfig,
 ) -> str | None:
     name = (callable_info.get("callable_name") or "").strip()
     if name in config.low_signal_dunder_names:
@@ -941,13 +1005,15 @@ def low_signal_category(
 
 
 def check_return_edges(
-        cfg: nx.DiGraph,
-        callable_id: str,
-        inventory_info: dict[str, Any] | None,
-        callable_info: dict[str, Any],
-        config: CheckerConfig,
+    cfg: nx.DiGraph,
+    callable_id: str,
+    inventory_info: dict[str, Any] | None,
+    callable_info: dict[str, Any],
+    config: CheckerConfig,
 ) -> dict[str, Any]:
-    collapsible = is_collapsible_operation_callable(callable_info, inventory_info, config)
+    collapsible = is_collapsible_operation_callable(
+        callable_info, inventory_info, config
+    )
 
     if collapsible:
         collapsed_nodes: list[str] = []
@@ -982,11 +1048,11 @@ def check_return_edges(
             "callable_id": callable_id,
             "has_exits": bool(exit_info),
             "exits": exit_info,
-            "all_exits_have_returns": all(
-                item["has_return_edges"] for item in exit_info
-            )
-            if exit_info
-            else False,
+            "all_exits_have_returns": (
+                all(item["has_return_edges"] for item in exit_info)
+                if exit_info
+                else False
+            ),
         }
 
     success_exits = find_success_exit_eis(cfg, callable_id)
@@ -1012,9 +1078,9 @@ def check_return_edges(
         "callable_id": callable_id,
         "has_exits": bool(exit_info),
         "exits": exit_info,
-        "all_exits_have_returns": all(item["has_return_edges"] for item in exit_info)
-        if exit_info
-        else False,
+        "all_exits_have_returns": (
+            all(item["has_return_edges"] for item in exit_info) if exit_info else False
+        ),
     }
 
 
@@ -1082,8 +1148,8 @@ def check_call_coverage(cfg: nx.DiGraph, callable_id: str) -> dict[str, Any]:
 
 
 def check_execution_paths(
-        cfg: nx.DiGraph,
-        inventory_index: dict[str, dict[str, Any]],
+    cfg: nx.DiGraph,
+    inventory_index: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     failures: list[dict[str, Any]] = []
     checked = 0
@@ -1139,9 +1205,9 @@ def check_execution_paths(
 
 
 def diagnose_all_callables(
-        cfg: nx.DiGraph,
-        inventory_index: dict[str, dict[str, Any]],
-        config: CheckerConfig,
+    cfg: nx.DiGraph,
+    inventory_index: dict[str, dict[str, Any]],
+    config: CheckerConfig,
 ) -> list[dict[str, Any]]:
     callables = collect_callables_from_graph(cfg)
     results: list[dict[str, Any]] = []
@@ -1163,7 +1229,9 @@ def diagnose_all_callables(
         is_executable = inventory_info.get("is_executable", True)
         is_contract_method = inventory_info.get("is_contract_method", False)
 
-        low_signal_category_name = low_signal_category(callable_info, inventory_info, config)
+        low_signal_category_name = low_signal_category(
+            callable_info, inventory_info, config
+        )
         low_signal = low_signal_category_name is not None
         has_incoming_callable_calls = has_incoming_callable_call_edges(cfg, callable_id)
         externally_reachable = externally_reachable_via_marker(cfg, callable_id, config)
@@ -1201,6 +1269,8 @@ def analyze_broken_callable(cfg: nx.DiGraph, callable_id: str) -> dict[str, Any]
         reachable_from_entry = nx.descendants(cfg, entry) | {entry}
 
     for node_id, node_data in cfg.nodes(data=True):
+        if not is_execution_instance_node(node_data):
+            continue
         if node_data.get("callable_id") != callable_id:
             continue
         outgoing = []
@@ -1244,6 +1314,8 @@ def analyze_broken_callable(cfg: nx.DiGraph, callable_id: str) -> dict[str, Any]
 def diagnose_callable_detail(cfg: nx.DiGraph, callable_id: str) -> dict[str, Any]:
     callable_nodes = []
     for node_id, node_data in cfg.nodes(data=True):
+        if not is_execution_instance_node(node_data):
+            continue
         if node_data.get("callable_id") == callable_id:
             callable_nodes.append(
                 {
@@ -1331,9 +1403,9 @@ def is_private_module_helper(result: dict[str, Any]) -> bool:
     return True
 
 
-def count_same_unit_branch_references(
-        result: dict[str, Any],
-        inventory_info: dict[str, Any],
+def count_same_unit_execution_item_references(
+    result: dict[str, Any],
+    inventory_info: dict[str, Any],
 ) -> int:
     helper_name = (result.get("callable_name") or "").strip()
     if not helper_name:
@@ -1342,14 +1414,14 @@ def count_same_unit_branch_references(
     pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(helper_name)}\s*\(")
     hits = 0
 
-    for branch in inventory_info.get("branches", []) or []:
+    for execution_item in inventory_info.get("execution_items", []) or []:
         texts: list[str] = []
 
-        desc = branch.get("description")
+        desc = execution_item.get("description")
         if isinstance(desc, str):
             texts.append(desc)
 
-        constraint = branch.get("constraint") or {}
+        constraint = execution_item.get("constraint") or {}
         expr = constraint.get("expr")
         if isinstance(expr, str):
             texts.append(expr)
@@ -1358,7 +1430,7 @@ def count_same_unit_branch_references(
         if isinstance(op_target, str):
             texts.append(op_target)
 
-        for target in branch.get("conditional_targets", []) or []:
+        for target in execution_item.get("conditional_targets", []) or []:
             cond = target.get("target_condition")
             if isinstance(cond, str):
                 texts.append(cond)
@@ -1376,9 +1448,9 @@ def count_same_unit_branch_references(
     return hits
 
 
-def find_same_unit_branch_references(
-        result: dict[str, Any],
-        inventory_index: dict[str, dict[str, Any]],
+def find_same_unit_execution_item_references(
+    result: dict[str, Any],
+    inventory_index: dict[str, dict[str, Any]],
 ) -> list[str]:
     target_name = (result.get("callable_name") or "").strip()
     if not target_name:
@@ -1403,14 +1475,14 @@ def find_same_unit_branch_references(
             continue
 
         matched = False
-        for branch in other_info.get("branches", []) or []:
+        for execution_item in other_info.get("execution_items", []) or []:
             texts: list[str] = []
 
-            desc = branch.get("description")
+            desc = execution_item.get("description")
             if isinstance(desc, str):
                 texts.append(desc)
 
-            constraint = branch.get("constraint") or {}
+            constraint = execution_item.get("constraint") or {}
             expr = constraint.get("expr")
             if isinstance(expr, str):
                 texts.append(expr)
@@ -1419,7 +1491,9 @@ def find_same_unit_branch_references(
             if isinstance(op_target, str):
                 texts.append(op_target)
 
-            for conditional_target in branch.get("conditional_targets", []) or []:
+            for conditional_target in (
+                execution_item.get("conditional_targets", []) or []
+            ):
                 target_condition = conditional_target.get("target_condition")
                 if isinstance(target_condition, str):
                     texts.append(target_condition)
@@ -1440,8 +1514,8 @@ def find_same_unit_branch_references(
 
 
 def build_private_helper_suspect_items(
-        results: list[dict[str, Any]],
-        inventory_index: dict[str, dict[str, Any]],
+    results: list[dict[str, Any]],
+    inventory_index: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     suspects: list[dict[str, Any]] = []
 
@@ -1459,7 +1533,7 @@ def build_private_helper_suspect_items(
 
         helper_fqn = result.get("callable_fqn", "") or ""
         helper_module = helper_fqn.rsplit(".", 1)[0] if "." in helper_fqn else ""
-        branch_ref_count = 0
+        execution_item_ref_count = 0
 
         for other_callable_id, other_info in inventory_index.items():
             other_fqn = other_info.get("callable_fqn", "") or ""
@@ -1469,16 +1543,20 @@ def build_private_helper_suspect_items(
             if other_callable_id == result.get("callable_id"):
                 continue
 
-            branch_ref_count += count_same_unit_branch_references(result, other_info)
+            execution_item_ref_count += count_same_unit_execution_item_references(
+                result, other_info
+            )
 
-        if branch_ref_count > 0:
+        if execution_item_ref_count > 0:
             enriched = dict(result)
-            enriched["same_unit_branch_reference_count"] = branch_ref_count
+            enriched["same_unit_execution_item_reference_count"] = (
+                execution_item_ref_count
+            )
             suspects.append(enriched)
 
     suspects.sort(
         key=lambda item: (
-            -item["same_unit_branch_reference_count"],
+            -item["same_unit_execution_item_reference_count"],
             item.get("callable_fqn", "") or "",
         )
     )
@@ -1486,8 +1564,8 @@ def build_private_helper_suspect_items(
 
 
 def build_same_unit_reference_suspect_items(
-        results: list[dict[str, Any]],
-        inventory_index: dict[str, dict[str, Any]],
+    results: list[dict[str, Any]],
+    inventory_index: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     suspects: list[dict[str, Any]] = []
 
@@ -1499,7 +1577,9 @@ def build_same_unit_reference_suspect_items(
         if (result.get("coverage") or {}).get("is_called", False):
             continue
 
-        referenced_by = find_same_unit_branch_references(result, inventory_index)
+        referenced_by = find_same_unit_execution_item_references(
+            result, inventory_index
+        )
         if not referenced_by:
             continue
 
@@ -1517,7 +1597,9 @@ def build_same_unit_reference_suspect_items(
     return suspects
 
 
-def build_missing_return_edge_items(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def build_missing_return_edge_items(
+    results: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
 
     for result in results:
@@ -1546,9 +1628,9 @@ def build_low_signal_items(results: list[dict[str, Any]]) -> list[dict[str, Any]
 
 
 def build_enriched_results(
-        results: list[dict[str, Any]],
-        private_helper_items: list[dict[str, Any]],
-        same_unit_reference_items: list[dict[str, Any]],
+    results: list[dict[str, Any]],
+    private_helper_items: list[dict[str, Any]],
+    same_unit_reference_items: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     private_ids = {item["callable_id"] for item in private_helper_items}
     same_unit_ids = {item["callable_id"] for item in same_unit_reference_items}
@@ -1556,13 +1638,17 @@ def build_enriched_results(
     enriched_results: list[dict[str, Any]] = []
     for item in results:
         enriched = dict(item)
-        enriched["is_called"] = bool((item.get("coverage") or {}).get("is_called", False))
+        enriched["is_called"] = bool(
+            (item.get("coverage") or {}).get("is_called", False)
+        )
         enriched["has_missing_return_edges"] = bool(
             (item.get("returns") or {}).get("has_exits", False)
             and not (item.get("returns") or {}).get("all_exits_have_returns", False)
         )
         enriched["private_helper_suspect"] = item.get("callable_id") in private_ids
-        enriched["same_unit_reference_suspect"] = item.get("callable_id") in same_unit_ids
+        enriched["same_unit_reference_suspect"] = (
+            item.get("callable_id") in same_unit_ids
+        )
         enriched_results.append(enriched)
 
     return enriched_results
@@ -1573,7 +1659,9 @@ def callable_module(item: dict[str, Any]) -> str:
     return fqn.rsplit(".", 1)[0] if "." in fqn else fqn
 
 
-def group_items(items: list[dict[str, Any]], key_name: str) -> dict[str, list[dict[str, Any]]]:
+def group_items(
+    items: list[dict[str, Any]], key_name: str
+) -> dict[str, list[dict[str, Any]]]:
     grouped: dict[str, list[dict[str, Any]]] = {}
 
     for item in items:
@@ -1588,7 +1676,9 @@ def group_items(items: list[dict[str, Any]], key_name: str) -> dict[str, list[di
     return dict(sorted(grouped.items(), key=lambda kv: (-len(kv[1]), kv[0])))
 
 
-def apply_grouping(items: list[dict[str, Any]], section: dict[str, Any]) -> dict[str, Any]:
+def apply_grouping(
+    items: list[dict[str, Any]], section: dict[str, Any]
+) -> dict[str, Any]:
     primary = section.get("group_by")
     secondary = section.get("secondary_group_by")
 
@@ -1636,11 +1726,11 @@ def section_match(item: dict[str, Any], include_when: dict[str, Any]) -> bool:
 
 
 def build_section_payloads(
-        cfg: nx.DiGraph,
-        results: list[dict[str, Any]],
-        config: CheckerConfig,
-        private_helper_items: list[dict[str, Any]],
-        same_unit_reference_items: list[dict[str, Any]],
+    cfg: nx.DiGraph,
+    results: list[dict[str, Any]],
+    config: CheckerConfig,
+    private_helper_items: list[dict[str, Any]],
+    same_unit_reference_items: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     missing_return_items = build_missing_return_edge_items(results)
     low_signal_items = build_low_signal_items(results)
@@ -1691,9 +1781,7 @@ def build_section_payloads(
             items = special_items_by_id[section_id]
         else:
             items = [
-                item
-                for item in enriched_results
-                if section_match(item, include_when)
+                item for item in enriched_results if section_match(item, include_when)
             ]
 
         section_payloads[report_key] = {
@@ -1716,7 +1804,9 @@ def build_low_signal_bins(results: list[dict[str, Any]]) -> dict[str, Any]:
     return dict(counts)
 
 
-def parse_summary_codes(summary_value: str | None, config: CheckerConfig) -> tuple[set[str], bool]:
+def parse_summary_codes(
+    summary_value: str | None, config: CheckerConfig
+) -> tuple[set[str], bool]:
     if not summary_value:
         return set(), False
 
@@ -1740,10 +1830,10 @@ def parse_summary_codes(summary_value: str | None, config: CheckerConfig) -> tup
 
 
 def should_include_section_in_console_summary(
-        section_config: dict[str, Any],
-        section_payload: dict[str, Any],
-        requested_codes: set[str],
-        low_signal_additive: bool,
+    section_config: dict[str, Any],
+    section_payload: dict[str, Any],
+    requested_codes: set[str],
+    low_signal_additive: bool,
 ) -> bool:
     if int(section_payload.get("count", 0) or 0) <= 0:
         return False
@@ -1774,11 +1864,11 @@ def format_section_header_with_count(section_header: str, count: int) -> str:
 
 
 def render_console_summary(
-        config: CheckerConfig,
-        section_payloads: dict[str, dict[str, Any]],
-        path_check: dict[str, Any],
-        requested_codes: set[str],
-        low_signal_additive: bool,
+    config: CheckerConfig,
+    section_payloads: dict[str, dict[str, Any]],
+    path_check: dict[str, Any],
+    requested_codes: set[str],
+    low_signal_additive: bool,
 ) -> None:
     print("\n=== Diagnostic Summary ===")
     print(f"Recorded execution paths checked: {path_check['checked_paths']}")
@@ -1791,10 +1881,10 @@ def render_console_summary(
             continue
 
         if should_include_section_in_console_summary(
-                section_config=section,
-                section_payload=payload,
-                requested_codes=requested_codes,
-                low_signal_additive=low_signal_additive,
+            section_config=section,
+            section_payload=payload,
+            requested_codes=requested_codes,
+            low_signal_additive=low_signal_additive,
         ):
             print(
                 format_section_header_with_count(
@@ -1804,9 +1894,121 @@ def render_console_summary(
             )
 
 
+def analyze_edge_type_counts(cfg: nx.DiGraph) -> dict[str, Any]:
+    counts: Counter[str] = Counter()
+
+    for _, _, edge_data in cfg.edges(data=True):
+        counts[str(edge_data.get("edge_type") or "unknown")] += 1
+
+    return {
+        "count": cfg.number_of_edges(),
+        "edge_type_counts": dict(sorted(counts.items())),
+        "total_edges": cfg.number_of_edges(),
+        "total_nodes": cfg.number_of_nodes(),
+        "is_multigraph": cfg.is_multigraph(),
+    }
+
+
+def analyze_control_flow_route_coverage(cfg: nx.DiGraph) -> dict[str, Any]:
+    contained_eis_by_region_node: dict[Hashable, set[Hashable]] = {}
+
+    for src, dst, edge_data in cfg.edges(data=True):
+        if edge_data.get("edge_type") != "control_region_contains_execution_item":
+            continue
+        contained_eis_by_region_node.setdefault(src, set()).add(dst)
+
+    control_routes_by_id: dict[str, dict[str, Any]] = {}
+    route_target_edge_count: Counter[str] = Counter()
+    for src, dst, edge_data in cfg.edges(data=True):
+        if edge_data.get("edge_type") != "control_route":
+            continue
+
+        route_id = edge_data.get("route_id")
+        if not route_id:
+            continue
+
+        route_id_str = str(route_id)
+        route_target_edge_count[route_id_str] += 1
+        control_routes_by_id.setdefault(
+            route_id_str,
+            {
+                "route_id": route_id_str,
+                "route_kind": edge_data.get("route_kind"),
+                "owner_id": edge_data.get("owner_id"),
+                "source": src,
+                "target": dst,
+                "source_category": (
+                    cfg.nodes[src].get("category") if cfg.has_node(src) else None
+                ),
+                "target_category": (
+                    cfg.nodes[dst].get("category") if cfg.has_node(dst) else None
+                ),
+                "source_execution_item_count": len(
+                    contained_eis_by_region_node.get(src, set())
+                ),
+                "target_execution_item_count": len(
+                    contained_eis_by_region_node.get(dst, set())
+                ),
+                "target_line": edge_data.get("target_line"),
+                "resolved_target_kind": edge_data.get("resolved_target_kind"),
+            },
+        )
+
+    derived_route_ids: set[str] = set()
+    derived_terminal_route_ids: set[str] = set()
+    for _, _, edge_data in cfg.edges(data=True):
+        edge_type = edge_data.get("edge_type")
+        route_id = edge_data.get("route_id")
+        if not route_id:
+            continue
+        route_id_str = str(route_id)
+        if edge_type == "derived_control_route_execution_item":
+            derived_route_ids.add(route_id_str)
+        elif edge_type == "derived_control_route_execution_item_terminal":
+            derived_route_ids.add(route_id_str)
+            derived_terminal_route_ids.add(route_id_str)
+
+    missing = [
+        route
+        for route_id, route in sorted(control_routes_by_id.items())
+        if route_id not in derived_route_ids
+    ]
+
+    missing_by_kind: Counter[str] = Counter(
+        str(route.get("route_kind") or "unknown") for route in missing
+    )
+
+    missing_with_source_execution_items = [
+        route for route in missing if route.get("source_execution_item_count", 0) > 0
+    ]
+    missing_with_source_execution_items_by_kind: Counter[str] = Counter(
+        str(route.get("route_kind") or "unknown")
+        for route in missing_with_source_execution_items
+    )
+
+    return {
+        "count": len(missing_with_source_execution_items),
+        "problem_count": len(missing_with_source_execution_items),
+        "control_route_id_count": len(control_routes_by_id),
+        "control_route_edge_count": sum(route_target_edge_count.values()),
+        "derived_route_id_count": len(derived_route_ids),
+        "derived_terminal_route_id_count": len(derived_terminal_route_ids),
+        "missing_derived_route_id_count": len(missing),
+        "missing_derived_routes_by_kind": dict(sorted(missing_by_kind.items())),
+        "missing_derived_routes_with_source_execution_items_count": len(
+            missing_with_source_execution_items
+        ),
+        "missing_derived_routes_with_source_execution_items_by_kind": dict(
+            sorted(missing_with_source_execution_items_by_kind.items())
+        ),
+        "missing_derived_routes_with_source_execution_items": missing_with_source_execution_items,
+        "missing_derived_routes_sample": missing[:100],
+    }
+
+
 def build_analysis_registry(
-        cfg: nx.DiGraph,
-        results: list[dict[str, Any]],
+    cfg: nx.DiGraph,
+    results: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     return {
         "structural_health": build_structural_health_report(cfg, results),
@@ -1815,14 +2017,18 @@ def build_analysis_registry(
         "edge_target_health": analyze_edge_target_health(cfg),
         "callable_call_cycles": analyze_callable_call_cycles(cfg),
         "external_seams": analyze_external_seams(results),
-        "integration_point_graph_coverage": analyze_integration_point_graph_coverage(cfg),
+        "integration_point_graph_coverage": analyze_integration_point_graph_coverage(
+            cfg
+        ),
         "interunit_placeholder_targets": analyze_interunit_placeholder_targets(cfg),
+        "edge_type_counts": analyze_edge_type_counts(cfg),
+        "control_flow_route_coverage": analyze_control_flow_route_coverage(cfg),
     }
 
 
 def normalize_analysis_section_payload(
-        section: dict[str, Any],
-        analysis_payload: dict[str, Any],
+    section: dict[str, Any],
+    analysis_payload: dict[str, Any],
 ) -> dict[str, Any]:
     count = analysis_payload.get("count")
     if count is None:
@@ -1864,18 +2070,24 @@ def print_analysis_payload(section: dict[str, Any]) -> None:
     count = section.get("count", 0)
     print(f"Count: {count}")
 
-    print(yaml.dump(analysis_payload, sort_keys=False, allow_unicode=True, width=float('inf')))
+    print(
+        yaml.dump(
+            analysis_payload, sort_keys=False, allow_unicode=True, width=float("inf")
+        )
+    )
 
 
 def build_structural_health_report(
-        cfg: nx.DiGraph,
-        results: list[dict[str, Any]],
+    cfg: nx.DiGraph,
+    results: list[dict[str, Any]],
 ) -> dict[str, Any]:
     ei_validation = validate_ei_ids(cfg)
     collapsed_health = analyze_collapsed_node_health(cfg)
     edge_target_health = analyze_edge_target_health(cfg)
     callable_cycles = analyze_callable_call_cycles(cfg)
     external_seams = analyze_external_seams(results)
+    edge_type_counts = analyze_edge_type_counts(cfg)
+    control_flow_route_coverage = analyze_control_flow_route_coverage(cfg)
 
     return {
         "ei_validation": ei_validation,
@@ -1883,22 +2095,26 @@ def build_structural_health_report(
         "edge_target_health": edge_target_health,
         "callable_call_cycles": callable_cycles,
         "external_seams": external_seams,
+        "edge_type_counts": edge_type_counts,
+        "control_flow_route_coverage": control_flow_route_coverage,
         "problem_count": (
-                ei_validation["ei_regex_mismatch_count"]
-                + ei_validation["callables_missing_entryish_ei_count"]
-                + collapsed_health["collapsed_without_return_count"]
-                + collapsed_health["collapsed_without_incoming_call_count"]
-                + collapsed_health["collapsed_missing_target_callable_count"]
-                + edge_target_health["bad_call_targets_count"]
-                + edge_target_health["bad_return_targets_count"]
-                + callable_cycles["multi_node_scc_count"]
+            ei_validation["ei_regex_mismatch_count"]
+            + ei_validation["callables_missing_entryish_ei_count"]
+            + collapsed_health["collapsed_without_return_count"]
+            + collapsed_health["collapsed_without_incoming_call_count"]
+            + collapsed_health["collapsed_missing_target_callable_count"]
+            + edge_target_health["bad_call_targets_count"]
+            + edge_target_health["bad_return_targets_count"]
+            + callable_cycles["multi_node_scc_count"]
         ),
     }
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Diagnostics for inventory-first EI graphs")
-    parser.add_argument("cfg", type=Path, help="Path to graph pickle")
+    parser = argparse.ArgumentParser(
+        description="Diagnostics for inventory-first EI graphs"
+    )
+    parser.add_argument("cfg", type=Path, help="Path to graph pickle or node-link YAML")
     parser.add_argument(
         "--inventories-root",
         type=Path,
@@ -1924,10 +2140,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--summary",
         metavar="CODES",
-        default="aghiprst",
+        default="aceghiprst",
         help=(
             "Console summary sections. Codes: "
             "a=abstraction, "
+            "c=control-flow-route-coverage, "
+            "e=edge-type-counts, "
             "g=general, "
             "h=structural-health, "
             "i=integration-point-graph, "
@@ -1941,7 +2159,9 @@ def main(argv: list[str] | None = None) -> int:
             "Any other value makes summary output include-only for the specified codes."
         ),
     )
-    parser.add_argument("--write-report", type=Path, help="Write YAML report to this path")
+    parser.add_argument(
+        "--write-report", type=Path, help="Write YAML report to this path"
+    )
     args = parser.parse_args(argv)
 
     print(f"Loading CFG from {args.cfg}...")
@@ -1949,18 +2169,26 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  {cfg.number_of_nodes()} nodes, {cfg.number_of_edges()} edges")
 
     if not args.inventories_root.exists():
-        print(f"ERROR: inventories root not found: {args.inventories_root}", file=sys.stderr)
+        print(
+            f"ERROR: inventories root not found: {args.inventories_root}",
+            file=sys.stderr,
+        )
         return 1
 
     if not args.checker_config.exists():
-        print(f"ERROR: checker config not found: {args.checker_config}", file=sys.stderr)
+        print(
+            f"ERROR: checker config not found: {args.checker_config}", file=sys.stderr
+        )
         return 1
 
     checker_config = load_checker_config(args.checker_config)
 
     inventory_paths = discover_inventory_files(args.inventories_root)
     if not inventory_paths:
-        print(f"ERROR: no inventory files found under {args.inventories_root}", file=sys.stderr)
+        print(
+            f"ERROR: no inventory files found under {args.inventories_root}",
+            file=sys.stderr,
+        )
         return 1
 
     inventory_index = index_inventory_execution_paths(inventory_paths)
@@ -1969,7 +2197,9 @@ def main(argv: list[str] | None = None) -> int:
     results = diagnose_all_callables(cfg, inventory_index, checker_config)
     path_check = check_execution_paths(cfg, inventory_index)
     private_helper_items = build_private_helper_suspect_items(results, inventory_index)
-    same_unit_reference_items = build_same_unit_reference_suspect_items(results, inventory_index)
+    same_unit_reference_items = build_same_unit_reference_suspect_items(
+        results, inventory_index
+    )
     section_payloads = build_section_payloads(
         cfg,
         results,
@@ -2004,25 +2234,44 @@ def main(argv: list[str] | None = None) -> int:
     if args.broken_callable_id:
         broken_detail = analyze_broken_callable(cfg, args.broken_callable_id)
         print("\n=== Broken Callable Analysis ===")
-        print(yaml.dump(broken_detail, sort_keys=False, allow_unicode=True, width=float("inf")))
+        print(
+            yaml.dump(
+                broken_detail, sort_keys=False, allow_unicode=True, width=float("inf")
+            )
+        )
 
     if args.write_report:
+        edge_type_counts = analyze_edge_type_counts(cfg)
+        control_flow_route_coverage = analyze_control_flow_route_coverage(cfg)
+
         report = {
             "summary": {
                 "total_callables": len(results),
                 "broken_callables": len([r for r in results if r["is_broken"]]),
                 "execution_paths_checked": path_check["checked_paths"],
                 "execution_path_failures": path_check["failure_count"],
+                "graph_nodes": cfg.number_of_nodes(),
+                "graph_edges": cfg.number_of_edges(),
+                "graph_is_multigraph": cfg.is_multigraph(),
+                "control_routes_missing_derived_ei_with_source_eis": (
+                    control_flow_route_coverage[
+                        "missing_derived_routes_with_source_execution_items_count"
+                    ]
+                ),
             },
             "checker_config_path": str(args.checker_config),
             "execution_path_check": path_check,
+            "edge_type_counts": edge_type_counts,
+            "control_flow_route_coverage": control_flow_route_coverage,
             "low_signal_bins": low_signal_bins,
             "results": results,
             "sections": section_payloads,
         }
         args.write_report.parent.mkdir(parents=True, exist_ok=True)
         with open(args.write_report, "w", encoding="utf-8") as f:
-            yaml.dump(report, f, sort_keys=False, allow_unicode=True, width=float("inf"))
+            yaml.dump(
+                report, f, sort_keys=False, allow_unicode=True, width=float("inf")
+            )
         print(f"Wrote report to {args.write_report}")
 
     return 0
