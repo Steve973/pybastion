@@ -57,6 +57,7 @@ DEFAULT_SEAM_TYPES: tuple[str, ...] = ("interunit", "boundary")
 # Graph loading and indexing
 # =============================================================================
 
+
 def infer_graph_format(path: Path, explicit_format: str | None) -> str:
     if explicit_format:
         return explicit_format
@@ -147,6 +148,7 @@ def make_edge_id(source: str, target: str, edge: dict[str, Any]) -> str:
 # Classification helpers
 # =============================================================================
 
+
 def classification_kind(candidate: dict[str, Any] | None) -> str:
     if not candidate:
         return "unknown"
@@ -154,10 +156,10 @@ def classification_kind(candidate: dict[str, Any] | None) -> str:
     classification = candidate.get("classification")
     if isinstance(classification, dict):
         return (
-                classification.get("kind")
-                or classification.get("type")
-                or candidate.get("kind")
-                or "unknown"
+            classification.get("kind")
+            or classification.get("type")
+            or candidate.get("kind")
+            or "unknown"
         )
 
     if isinstance(classification, str):
@@ -192,7 +194,9 @@ def candidate_signature(candidate: dict[str, Any] | None) -> str | None:
     return candidate.get("signature")
 
 
-def candidate_execution_paths(candidate: dict[str, Any] | None, source_ei: str) -> list[list[str]]:
+def candidate_execution_paths(
+    candidate: dict[str, Any] | None, source_ei: str
+) -> list[list[str]]:
     if not candidate:
         return [[source_ei]]
 
@@ -206,7 +210,9 @@ def candidate_execution_paths(candidate: dict[str, Any] | None, source_ei: str) 
     return normalized or [[source_ei]]
 
 
-def outgoing_call_edges_by_source_ei(cfg: nx.DiGraph) -> dict[str, list[dict[str, Any]]]:
+def outgoing_call_edges_by_source_ei(
+    cfg: nx.DiGraph,
+) -> dict[str, list[dict[str, Any]]]:
     result: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     for edge in graph_edges(cfg):
@@ -217,10 +223,10 @@ def outgoing_call_edges_by_source_ei(cfg: nx.DiGraph) -> dict[str, list[dict[str
 
 
 def choose_matching_graph_edge(
-        *,
-        source_ei: str,
-        candidate: dict[str, Any],
-        outgoing_edges_by_source_ei: dict[str, list[dict[str, Any]]],
+    *,
+    source_ei: str,
+    candidate: dict[str, Any],
+    outgoing_edges_by_source_ei: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any] | None:
     edges = outgoing_edges_by_source_ei.get(source_ei, [])
     if not edges:
@@ -251,18 +257,17 @@ def choose_matching_graph_edge(
 
 
 def target_context_for_edge(
-        *,
-        edge: dict[str, Any] | None,
-        inventory_index: InventoryIndex,
-        nodes_by_id: dict[str, dict[str, Any]],
+    *,
+    edge: dict[str, Any] | None,
+    inventory_index: InventoryIndex,
+    nodes_by_id: dict[str, dict[str, Any]],
 ) -> tuple[CallableContext | None, dict[str, Any]]:
     if edge is None:
         return None, {}
 
     target_node = nodes_by_id.get(edge["to"], {})
-    target_callable_id = (
-        edge.get("target_callable_id")
-        or target_node.get("callable_id")
+    target_callable_id = edge.get("target_callable_id") or target_node.get(
+        "callable_id"
     )
 
     if not target_callable_id:
@@ -272,22 +277,22 @@ def target_context_for_edge(
 
 
 def should_include_inventory_candidate(
-        *,
-        candidate: dict[str, Any],
-        seam_types: set[str],
+    *,
+    candidate: dict[str, Any],
+    seam_types: set[str],
 ) -> tuple[bool, str]:
     seam_kind = normalized_seam_kind(classification_kind(candidate))
     return seam_kind in seam_types, seam_kind
 
 
 def discover_inventory_seams(
-        *,
-        cfg: nx.DiGraph,
-        inventory_index: InventoryIndex,
-        nodes_by_id: dict[str, dict[str, Any]],
-        seam_types: set[str],
-        include_same_unit: bool,
-        include_collapsed: bool,
+    *,
+    cfg: nx.DiGraph,
+    inventory_index: InventoryIndex,
+    nodes_by_id: dict[str, dict[str, Any]],
+    seam_types: set[str],
+    include_same_unit: bool,
+    include_collapsed: bool,
 ) -> list[SeamSource]:
     outgoing_edges_by_source_ei = outgoing_call_edges_by_source_ei(cfg)
     seams: list[SeamSource] = []
@@ -350,6 +355,7 @@ def discover_inventory_seams(
 # Path categorization
 # =============================================================================
 
+
 def analyze_target_outcomes(target_context: CallableContext | None) -> dict[str, Any]:
     if target_context is None:
         return {
@@ -365,13 +371,17 @@ def analyze_target_outcomes(target_context: CallableContext | None) -> dict[str,
     for ei in target_context.execution_items:
         description = execution_items_description(ei).lower()
         statement_outcome = execution_items_statement_outcome(ei)
-        terminates_via = statement_outcome.get("terminates_via") or ei.get("terminates_via")
-        is_terminal = bool(statement_outcome.get("is_terminal", ei.get("is_terminal", False)))
+        terminates_via = statement_outcome.get("terminates_via") or ei.get(
+            "terminates_via"
+        )
+        is_terminal = bool(
+            statement_outcome.get("is_terminal", ei.get("is_terminal", False))
+        )
 
         is_exception = (
-                "exception propagates" in description
-                or "raises" in description
-                or terminates_via in {"raise", "exception"}
+            "exception propagates" in description
+            or "raises" in description
+            or terminates_via in {"raise", "exception"}
         )
 
         if is_exception:
@@ -388,9 +398,9 @@ def analyze_target_outcomes(target_context: CallableContext | None) -> dict[str,
 
 
 def categorize_path(
-        path_eis: list[str],
-        ei_details: dict[str, dict[str, Any]],
-        target_outcomes: dict[str, Any],
+    path_eis: list[str],
+    ei_details: dict[str, dict[str, Any]],
+    target_outcomes: dict[str, Any],
 ) -> dict[str, Any]:
     has_validation_failure = False
     has_empty_iteration = False
@@ -405,7 +415,9 @@ def categorize_path(
         constraint = execution_items_constraint(ei)
         constraint_type = constraint.get("constraint_type")
         statement_outcome = execution_items_statement_outcome(ei)
-        terminates_via = statement_outcome.get("terminates_via") or ei.get("terminates_via")
+        terminates_via = statement_outcome.get("terminates_via") or ei.get(
+            "terminates_via"
+        )
 
         if "validation" in description or "invalid" in description:
             has_validation_failure = True
@@ -425,10 +437,14 @@ def categorize_path(
 
     if has_exception_path or has_validation_failure:
         category = "error_handling"
-        subcategory = "validation_failure" if has_validation_failure else "exception_path"
+        subcategory = (
+            "validation_failure" if has_validation_failure else "exception_path"
+        )
     elif has_empty_iteration or has_boundary_condition:
         category = "edge_cases"
-        subcategory = "empty_collection" if has_empty_iteration else "boundary_condition"
+        subcategory = (
+            "empty_collection" if has_empty_iteration else "boundary_condition"
+        )
     elif has_alternative_execution_item:
         category = "alternative_flows"
         subcategory = "conditional_execution_items"
@@ -490,7 +506,9 @@ def find_representative_paths(paths: list[dict[str, Any]]) -> list[dict[str, Any
                 representatives.append(
                     {
                         **path,
-                        "represents_count": len(group_paths) // 3 if len(group_paths) > 3 else 1,
+                        "represents_count": (
+                            len(group_paths) // 3 if len(group_paths) > 3 else 1
+                        ),
                         "representative_of": f"{category}/{subcategory}",
                     }
                 )
@@ -498,7 +516,9 @@ def find_representative_paths(paths: list[dict[str, Any]]) -> list[dict[str, Any
     return representatives
 
 
-def build_synthetic_error_representative(target_outcomes: dict[str, Any]) -> dict[str, Any] | None:
+def build_synthetic_error_representative(
+    target_outcomes: dict[str, Any],
+) -> dict[str, Any] | None:
     exception_execution_items = target_outcomes.get("exception_execution_items", [])
     if not exception_execution_items:
         return None
@@ -508,10 +528,13 @@ def build_synthetic_error_representative(target_outcomes: dict[str, Any]) -> dic
             ei
             for ei in exception_execution_items
             if (
-                (execution_items_statement_outcome(ei).get("terminates_via") or ei.get("terminates_via"))
+                (
+                    execution_items_statement_outcome(ei).get("terminates_via")
+                    or ei.get("terminates_via")
+                )
                 == "raise"
                 and ei.get("condition")
-        )
+            )
         ),
         exception_execution_items[0],
     )
@@ -549,6 +572,7 @@ def build_synthetic_error_representative(target_outcomes: dict[str, Any]) -> dic
 # Fixture identification
 # =============================================================================
 
+
 def outgoing_call_edges_by_source(cfg: nx.DiGraph) -> dict[str, list[dict[str, Any]]]:
     result: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
@@ -560,12 +584,16 @@ def outgoing_call_edges_by_source(cfg: nx.DiGraph) -> dict[str, list[dict[str, A
 
 
 def fixture_from_candidate(
-        candidate: dict[str, Any],
-        ei_id: str,
-        reason: str,
+    candidate: dict[str, Any],
+    ei_id: str,
+    reason: str,
 ) -> dict[str, Any]:
     kind = normalized_seam_kind(classification_kind(candidate))
-    target = candidate_target(candidate) or candidate.get("target") or candidate.get("operation_target")
+    target = (
+        candidate_target(candidate)
+        or candidate.get("target")
+        or candidate.get("operation_target")
+    )
 
     return {
         "type": kind,
@@ -579,13 +607,13 @@ def fixture_from_candidate(
 
 
 def identify_fixtures_for_path(
-        *,
-        path_eis: list[str],
-        seam_ei_id: str,
-        seam_candidate_id: str | None,
-        source_context: CallableContext,
-        outgoing_call_edges: dict[str, list[dict[str, Any]]],
-        nodes_by_id: dict[str, dict[str, Any]],
+    *,
+    path_eis: list[str],
+    seam_ei_id: str,
+    seam_candidate_id: str | None,
+    source_context: CallableContext,
+    outgoing_call_edges: dict[str, list[dict[str, Any]]],
+    nodes_by_id: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
     fixtures: list[dict[str, Any]] = []
     seen: set[tuple[str | None, str | None, str | None]] = set()
@@ -622,7 +650,11 @@ def identify_fixtures_for_path(
             if target_node.get("category") != "collapsed_internal_operation":
                 continue
 
-            key = (edge.get("target_callable_id"), ei_id, target_node.get("callable_fqn"))
+            key = (
+                edge.get("target_callable_id"),
+                ei_id,
+                target_node.get("callable_fqn"),
+            )
             if key in seen:
                 continue
 
@@ -631,7 +663,8 @@ def identify_fixtures_for_path(
                     "type": "mechanical_operation",
                     "ei_id": ei_id,
                     "integration_id": None,
-                    "mock_target": edge.get("operation_target") or target_node.get("callable_name"),
+                    "mock_target": edge.get("operation_target")
+                    or target_node.get("callable_name"),
                     "mock_target_fqn": target_node.get("callable_fqn"),
                     "callable_id": target_node.get("callable_id"),
                     "signature": edge.get("signature"),
@@ -643,7 +676,9 @@ def identify_fixtures_for_path(
     return fixtures
 
 
-def merge_fixture_lists(fixtures_by_path: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+def merge_fixture_lists(
+    fixtures_by_path: list[list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
     merged: list[dict[str, Any]] = []
     seen: set[tuple[str | None, str | None, str | None]] = set()
 
@@ -662,7 +697,9 @@ def merge_fixture_lists(fixtures_by_path: list[list[dict[str, Any]]]) -> list[di
     return merged
 
 
-def mark_fixture_eis(path_eis: list[str], fixtures: list[dict[str, Any]], seam_ei_id: str) -> list[str]:
+def mark_fixture_eis(
+    path_eis: list[str], fixtures: list[dict[str, Any]], seam_ei_id: str
+) -> list[str]:
     fixture_eis = {fixture.get("ei_id") for fixture in fixtures if fixture.get("ei_id")}
 
     marked: list[str] = []
@@ -680,6 +717,7 @@ def mark_fixture_eis(path_eis: list[str], fixtures: list[dict[str, Any]], seam_e
 # =============================================================================
 # Seam discovery
 # =============================================================================
+
 
 @dataclass(slots=True)
 class SeamSource:
@@ -715,18 +753,19 @@ def seam_identity(seam: SeamSource) -> str:
 # Spec generation
 # =============================================================================
 
+
 def make_spec_id(seam_id: str, counter: int) -> str:
     h = hashlib.sha256(seam_id.encode("utf-8")).hexdigest()[:8].upper()
     return f"ITEST_{counter:04d}_{h}"
 
 
 def build_spec(
-        *,
-        seam: SeamSource,
-        nodes_by_id: dict[str, dict[str, Any]],
-        outgoing_call_edges: dict[str, list[dict[str, Any]]],
-        ei_details: dict[str, dict[str, Any]],
-        counter: int,
+    *,
+    seam: SeamSource,
+    nodes_by_id: dict[str, dict[str, Any]],
+    outgoing_call_edges: dict[str, list[dict[str, Any]]],
+    ei_details: dict[str, dict[str, Any]],
+    counter: int,
 ) -> dict[str, Any]:
     seam_id = seam_identity(seam)
     spec_id = make_spec_id(seam_id, counter)
@@ -750,8 +789,7 @@ def build_spec(
 
     if target_outcomes.get("has_exceptions"):
         has_error_representative = any(
-            path["category"] == "error_handling"
-            for path in representative_paths
+            path["category"] == "error_handling" for path in representative_paths
         )
         if not has_error_representative:
             synthetic = build_synthetic_error_representative(target_outcomes)
@@ -760,9 +798,13 @@ def build_spec(
 
     path_summary = {
         "happy_path": sum(1 for p in categorized if p["category"] == "happy_path"),
-        "error_handling": sum(1 for p in categorized if p["category"] == "error_handling"),
+        "error_handling": sum(
+            1 for p in categorized if p["category"] == "error_handling"
+        ),
         "edge_cases": sum(1 for p in categorized if p["category"] == "edge_cases"),
-        "alternative_flows": sum(1 for p in categorized if p["category"] == "alternative_flows"),
+        "alternative_flows": sum(
+            1 for p in categorized if p["category"] == "alternative_flows"
+        ),
     }
 
     fixtures_by_path: list[list[dict[str, Any]]] = []
@@ -807,11 +849,11 @@ def build_spec(
         target_context.callable_fqn
         if target_context is not None
         else (
-                target_node.get("fully_qualified")
-                or target_node.get("qualified_name")
-                or candidate.get("resolved_target")
-                or candidate.get("target")
-                or candidate.get("operation_target")
+            target_node.get("fully_qualified")
+            or target_node.get("qualified_name")
+            or candidate.get("resolved_target")
+            or candidate.get("target")
+            or candidate.get("operation_target")
         )
     )
 
@@ -825,10 +867,10 @@ def build_spec(
         target_context.callable_name
         if target_context is not None
         else (
-                target_node.get("name")
-                or candidate.get("target")
-                or candidate.get("operation_target")
-                or candidate.get("resolved_target")
+            target_node.get("name")
+            or candidate.get("target")
+            or candidate.get("operation_target")
+            or candidate.get("resolved_target")
         )
     )
 
@@ -839,13 +881,17 @@ def build_spec(
         "spec_kind": "seam",
         "integration_point": {
             "id": seam_candidate_id,
-            "source_kind": "graph_backed" if seam.edge is not None else "inventory_only",
+            "source_kind": (
+                "graph_backed" if seam.edge is not None else "inventory_only"
+            ),
             "edge_id": edge.get("id"),
             "seam_kind": seam.seam_kind,
             "classification": candidate.get("classification"),
             "target_raw": candidate.get("target") or edge.get("operation_target"),
-            "resolved_target": candidate.get("resolved_target") or edge.get("resolved_target"),
-            "operation_target": candidate.get("operation_target") or edge.get("operation_target"),
+            "resolved_target": candidate.get("resolved_target")
+            or edge.get("resolved_target"),
+            "operation_target": candidate.get("operation_target")
+            or edge.get("operation_target"),
             "ei_id": candidate.get("ei_id") or seam.source_ei,
             "call_signature": candidate.get("signature") or edge.get("signature"),
         },
@@ -874,7 +920,11 @@ def build_spec(
             "callable_id": target_callable_id,
             "name": target_name,
             "fully_qualified": target_fqn,
-            "kind": target_context.callable_kind if target_context is not None else target_node.get("category"),
+            "kind": (
+                target_context.callable_kind
+                if target_context is not None
+                else target_node.get("category")
+            ),
             "signature": (
                 signature_info(target_context.entry).get("signature")
                 if target_context is not None
@@ -890,6 +940,7 @@ def build_spec(
 # =============================================================================
 # Main
 # =============================================================================
+
 
 def config_stage_output(stage: int) -> Path | None:
     getter = getattr(config, "get_stage_output", None)
@@ -998,16 +1049,24 @@ def main(argv: list[str] | None = None) -> int:
     output_path = args.output or config_stage_output(2)
 
     if input_path is None:
-        print("ERROR: --input is required when config.get_stage_output(1) is unavailable", file=sys.stderr)
+        print(
+            "ERROR: --input is required when config.get_stage_output(1) is unavailable",
+            file=sys.stderr,
+        )
         return 1
 
     if output_path is None:
-        print("ERROR: --output is required when config.get_stage_output(2) is unavailable", file=sys.stderr)
+        print(
+            "ERROR: --output is required when config.get_stage_output(2) is unavailable",
+            file=sys.stderr,
+        )
         return 1
 
     if inventories_root is None:
-        print("ERROR: --inventories-root is required when config.get_inventories_root() is unavailable",
-              file=sys.stderr)
+        print(
+            "ERROR: --inventories-root is required when config.get_inventories_root() is unavailable",
+            file=sys.stderr,
+        )
         return 1
 
     input_path = Path(input_path)
@@ -1031,7 +1090,9 @@ def main(argv: list[str] | None = None) -> int:
 
     inventory_paths = discover_inventory_files(inventories_root)
     if not inventory_paths:
-        print(f"ERROR: No inventory files found under {inventories_root}", file=sys.stderr)
+        print(
+            f"ERROR: No inventory files found under {inventories_root}", file=sys.stderr
+        )
         return 1
 
     if args.verbose:
@@ -1133,7 +1194,9 @@ def main(argv: list[str] | None = None) -> int:
     with open(output_path, "w", encoding="utf-8") as f:
         yaml.dump(output_data, f, **yaml_dump_options())
 
-    print(f"\n✓ Generated {len(specs)} integration seam test specification(s) → {output_path}")
+    print(
+        f"\n✓ Generated {len(specs)} integration seam test specification(s) → {output_path}"
+    )
     print(f"  Inventory seam sources:    {len(seams)}")
     print(f"  Graph-backed seams:        {graph_backed_seams}")
     print(f"  Inventory-only seams:      {inventory_only_seams}")
@@ -1148,7 +1211,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"    {seam_kind}: {count}")
 
         print("\n  Path categories:")
-        for category, count in sorted(category_counts.items(), key=lambda item: -item[1]):
+        for category, count in sorted(
+            category_counts.items(), key=lambda item: -item[1]
+        ):
             print(f"    {category}: {count}")
 
         print("\n  Fixture types:")

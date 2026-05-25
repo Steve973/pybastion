@@ -102,9 +102,9 @@ def load_inventory(path: Path) -> dict[str, Any] | None:
 
 
 def build_callable_fqn(
-        unit_fqn: str,
-        ancestor_names: list[str],
-        entry_name: str,
+    unit_fqn: str,
+    ancestor_names: list[str],
+    entry_name: str,
 ) -> str:
     parts = [unit_fqn, *ancestor_names, entry_name]
     return ".".join(part for part in parts if part)
@@ -220,7 +220,7 @@ def load_inventory_index(inventories_root: Path) -> InventoryIndex:
 
 
 def build_ei_details_index(
-        inventory_index: InventoryIndex,
+    inventory_index: InventoryIndex,
 ) -> dict[str, dict[str, Any]]:
     ei_index: dict[str, dict[str, Any]] = {}
 
@@ -234,7 +234,7 @@ def build_ei_details_index(
 
 
 def build_callable_entry_index(
-        inventory_index: InventoryIndex,
+    inventory_index: InventoryIndex,
 ) -> dict[str, dict[str, Any]]:
     return {
         callable_id: context.entry
@@ -251,7 +251,9 @@ def execution_items_description(execution_items: dict[str, Any]) -> str:
     )
 
 
-def execution_items_statement_outcome(execution_items: dict[str, Any]) -> dict[str, Any]:
+def execution_items_statement_outcome(
+    execution_items: dict[str, Any],
+) -> dict[str, Any]:
     return execution_items.get("statement_outcome") or {}
 
 
