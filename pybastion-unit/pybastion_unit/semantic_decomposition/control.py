@@ -30,49 +30,8 @@ from .decomp_types import DecompositionContext, StatementPart
 from .expressions import enumerate_truth_conditions
 
 
-def _direct_loop_disruptive_exit_routes(
-    *,
-    owner_id: str,
-    source_region_id: str,
-    body: list[ast.stmt],
-    decision_region_id: str,
-    decision_line: int,
-    loop_exit_line: int | None,
-) -> list[ControlRoute]:
-    routes: list[ControlRoute] = []
-
-    for index, child in enumerate(body):
-        match child:
-            case ast.Continue():
-                routes.append(
-                    ControlRoute(
-                        id=_route_id(owner_id, f"continue:{child.lineno}:{index}"),
-                        owner_id=owner_id,
-                        kind=ControlRouteKind.LOOP_CONTINUE,
-                        source_region_id=source_region_id,
-                        target_region_id=decision_region_id,
-                        target_line=decision_line,
-                        exit_kind=ExitKind.CONTINUE,
-                        synthetic=True,
-                    )
-                )
-
-            case ast.Break():
-                routes.append(
-                    ControlRoute(
-                        id=_route_id(owner_id, f"break:{child.lineno}:{index}"),
-                        owner_id=owner_id,
-                        kind=ControlRouteKind.LOOP_BREAK,
-                        source_region_id=source_region_id,
-                        target_line=loop_exit_line,
-                        exit_kind=ExitKind.BREAK,
-                        synthetic=True,
-                    )
-                )
-
-    return routes
-
-
+# return/raise are region-owned transfers. Do not recursively scan nested
+# control owners here; nested owners emit their own direct return/raise routes.
 def _direct_region_disruptive_exit_routes(
     *,
     owner_id: str,
@@ -112,232 +71,122 @@ def _direct_region_disruptive_exit_routes(
     return routes
 
 
-def _nested_if_loop_disruptive_exit_routes(
+# break/continue are loop-owned transfers. The route owner is the enclosing
+# loop, but the source_region_id is the innermost modeled region containing the
+# transfer statement. Nested loops are boundaries because break/continue bind to
+# the nearest loop.
+def _collect_loop_transfer_routes(
     *,
     owner_id: str,
     body: list[ast.stmt],
+    source_region_id: str,
     decision_region_id: str,
     decision_line: int,
     loop_exit_line: int | None,
 ) -> list[ControlRoute]:
     routes: list[ControlRoute] = []
 
-    for child in body:
-        if not isinstance(child, ast.If):
-            continue
-
-        true_region_id = _region_id(_if_control_id(child), "true_body")
-        false_region_id = _region_id(_if_control_id(child), "false_body")
-
-        routes.extend(
-            _direct_loop_disruptive_exit_routes(
+    def append_continue(stmt: ast.Continue, current_source_region_id: str) -> None:
+        routes.append(
+            ControlRoute(
+                id=_route_id(owner_id, f"continue:{stmt.lineno}:{len(routes)}"),
                 owner_id=owner_id,
-                source_region_id=true_region_id,
-                body=child.body,
-                decision_region_id=decision_region_id,
-                decision_line=decision_line,
-                loop_exit_line=loop_exit_line,
+                kind=ControlRouteKind.LOOP_CONTINUE,
+                source_region_id=current_source_region_id,
+                target_region_id=decision_region_id,
+                target_line=decision_line,
+                exit_kind=ExitKind.CONTINUE,
+                synthetic=True,
             )
         )
 
-        if child.orelse:
-            routes.extend(
-                _direct_loop_disruptive_exit_routes(
-                    owner_id=owner_id,
-                    source_region_id=false_region_id,
-                    body=child.orelse,
-                    decision_region_id=decision_region_id,
-                    decision_line=decision_line,
-                    loop_exit_line=loop_exit_line,
-                )
-            )
-
-    return routes
-
-
-def _nested_match_loop_disruptive_exit_routes(
-    *,
-    owner_id: str,
-    body: list[ast.stmt],
-    decision_region_id: str,
-    decision_line: int,
-    loop_exit_line: int | None,
-) -> list[ControlRoute]:
-    routes: list[ControlRoute] = []
-
-    for child in body:
-        if not isinstance(child, ast.Match):
-            continue
-
-        match_owner_id = _match_control_id(child)
-
-        for index, case in enumerate(child.cases, start=1):
-            case_region_id = _region_id(match_owner_id, f"case_body:{index}")
-
-            routes.extend(
-                _direct_loop_disruptive_exit_routes(
-                    owner_id=owner_id,
-                    source_region_id=case_region_id,
-                    body=case.body,
-                    decision_region_id=decision_region_id,
-                    decision_line=decision_line,
-                    loop_exit_line=loop_exit_line,
-                )
-            )
-
-    return routes
-
-
-def _nested_try_loop_disruptive_exit_routes(
-    *,
-    owner_id: str,
-    body: list[ast.stmt],
-    decision_region_id: str,
-    decision_line: int,
-    loop_exit_line: int | None,
-) -> list[ControlRoute]:
-    routes: list[ControlRoute] = []
-
-    for child in body:
-        if not isinstance(child, ast.Try):
-            continue
-
-        try_owner_id = _try_control_id(child)
-        protected_region_id = _region_id(try_owner_id, "protected_body")
-
-        routes.extend(
-            _direct_loop_disruptive_exit_routes(
+    def append_break(stmt: ast.Break, current_source_region_id: str) -> None:
+        routes.append(
+            ControlRoute(
+                id=_route_id(owner_id, f"break:{stmt.lineno}:{len(routes)}"),
                 owner_id=owner_id,
-                source_region_id=protected_region_id,
-                body=child.body,
-                decision_region_id=decision_region_id,
-                decision_line=decision_line,
-                loop_exit_line=loop_exit_line,
+                kind=ControlRouteKind.LOOP_BREAK,
+                source_region_id=current_source_region_id,
+                target_line=loop_exit_line,
+                exit_kind=ExitKind.BREAK,
+                synthetic=True,
             )
         )
 
-        routes.extend(
-            _nested_if_loop_disruptive_exit_routes(
-                owner_id=owner_id,
-                body=child.body,
-                decision_region_id=decision_region_id,
-                decision_line=decision_line,
-                loop_exit_line=loop_exit_line,
-            )
-        )
+    def visit_block(statements: list[ast.stmt], current_source_region_id: str) -> None:
+        for child in statements:
+            visit_stmt(child, current_source_region_id)
 
-        routes.extend(
-            _nested_match_loop_disruptive_exit_routes(
-                owner_id=owner_id,
-                body=child.body,
-                decision_region_id=decision_region_id,
-                decision_line=decision_line,
-                loop_exit_line=loop_exit_line,
-            )
-        )
+    def visit_stmt(stmt: ast.stmt, current_source_region_id: str) -> None:
+        match stmt:
+            case ast.Continue():
+                append_continue(stmt, current_source_region_id)
 
-        for index, handler in enumerate(child.handlers):
-            handler_region_id = _region_id(try_owner_id, f"exception_handler:{index}")
+            case ast.Break():
+                append_break(stmt, current_source_region_id)
 
-            routes.extend(
-                _direct_loop_disruptive_exit_routes(
-                    owner_id=owner_id,
-                    source_region_id=handler_region_id,
-                    body=handler.body,
-                    decision_region_id=decision_region_id,
-                    decision_line=decision_line,
-                    loop_exit_line=loop_exit_line,
-                )
-            )
+            case ast.For() | ast.AsyncFor() | ast.While():
+                return
 
-        if child.orelse:
-            else_region_id = _region_id(try_owner_id, "success_continuation")
+            case ast.FunctionDef() | ast.AsyncFunctionDef() | ast.ClassDef():
+                return
 
-            routes.extend(
-                _direct_loop_disruptive_exit_routes(
-                    owner_id=owner_id,
-                    source_region_id=else_region_id,
-                    body=child.orelse,
-                    decision_region_id=decision_region_id,
-                    decision_line=decision_line,
-                    loop_exit_line=loop_exit_line,
-                )
-            )
+            case ast.If():
+                if_owner_id = _if_control_id(stmt)
+                true_region_id = _region_id(if_owner_id, "true_body")
+                false_region_id = _region_id(if_owner_id, "false_body")
 
-        if child.finalbody:
-            finally_region_id = _region_id(try_owner_id, "post_execution")
+                visit_block(stmt.body, true_region_id)
 
-            routes.extend(
-                _direct_loop_disruptive_exit_routes(
-                    owner_id=owner_id,
-                    source_region_id=finally_region_id,
-                    body=child.finalbody,
-                    decision_region_id=decision_region_id,
-                    decision_line=decision_line,
-                    loop_exit_line=loop_exit_line,
-                )
-            )
+                if stmt.orelse:
+                    visit_block(stmt.orelse, false_region_id)
 
-    return routes
+            case ast.Match():
+                match_owner_id = _match_control_id(stmt)
 
+                for index, case in enumerate(stmt.cases, start=1):
+                    case_region_id = _region_id(
+                        match_owner_id,
+                        f"case_body:{index}",
+                    )
+                    visit_block(case.body, case_region_id)
 
-def _nested_with_loop_disruptive_exit_routes(
-    *,
-    owner_id: str,
-    body: list[ast.stmt],
-    decision_region_id: str,
-    decision_line: int,
-    loop_exit_line: int | None,
-) -> list[ControlRoute]:
-    routes: list[ControlRoute] = []
+            case ast.Try():
+                try_owner_id = _try_control_id(stmt)
 
-    for child in body:
-        if not isinstance(child, (ast.With, ast.AsyncWith)):
-            continue
+                protected_region_id = _region_id(try_owner_id, "protected_body")
+                visit_block(stmt.body, protected_region_id)
 
-        with_owner_id = _with_control_id(child)
-        body_region_id = _region_id(with_owner_id, "body")
+                for index, handler in enumerate(stmt.handlers):
+                    handler_region_id = _region_id(
+                        try_owner_id,
+                        f"exception_handler:{index}",
+                    )
+                    visit_block(handler.body, handler_region_id)
 
-        routes.extend(
-            _direct_loop_disruptive_exit_routes(
-                owner_id=owner_id,
-                source_region_id=body_region_id,
-                body=child.body,
-                decision_region_id=decision_region_id,
-                decision_line=decision_line,
-                loop_exit_line=loop_exit_line,
-            )
-        )
+                if stmt.orelse:
+                    else_region_id = _region_id(
+                        try_owner_id,
+                        "success_continuation",
+                    )
+                    visit_block(stmt.orelse, else_region_id)
 
-        routes.extend(
-            _nested_if_loop_disruptive_exit_routes(
-                owner_id=owner_id,
-                body=child.body,
-                decision_region_id=decision_region_id,
-                decision_line=decision_line,
-                loop_exit_line=loop_exit_line,
-            )
-        )
+                if stmt.finalbody:
+                    finally_region_id = _region_id(
+                        try_owner_id,
+                        "post_execution",
+                    )
+                    visit_block(stmt.finalbody, finally_region_id)
 
-        routes.extend(
-            _nested_match_loop_disruptive_exit_routes(
-                owner_id=owner_id,
-                body=child.body,
-                decision_region_id=decision_region_id,
-                decision_line=decision_line,
-                loop_exit_line=loop_exit_line,
-            )
-        )
+            case ast.With() | ast.AsyncWith():
+                with_owner_id = _with_control_id(stmt)
+                body_region_id = _region_id(with_owner_id, "body")
+                visit_block(stmt.body, body_region_id)
 
-        routes.extend(
-            _nested_try_loop_disruptive_exit_routes(
-                owner_id=owner_id,
-                body=child.body,
-                decision_region_id=decision_region_id,
-                decision_line=decision_line,
-                loop_exit_line=loop_exit_line,
-            )
-        )
+            case _:
+                return
+
+    visit_block(body, source_region_id)
 
     return routes
 
@@ -1059,50 +908,10 @@ class ForDecomposer(ControlOwnerDecomposer):
             )
 
         routes.extend(
-            _direct_loop_disruptive_exit_routes(
+            _collect_loop_transfer_routes(
                 owner_id=owner_id,
+                body=stmt.body,
                 source_region_id=body_region_id,
-                body=stmt.body,
-                decision_region_id=condition_region_id,
-                decision_line=stmt.lineno,
-                loop_exit_line=continuation_target,
-            )
-        )
-
-        routes.extend(
-            _nested_if_loop_disruptive_exit_routes(
-                owner_id=owner_id,
-                body=stmt.body,
-                decision_region_id=condition_region_id,
-                decision_line=stmt.lineno,
-                loop_exit_line=continuation_target,
-            )
-        )
-
-        routes.extend(
-            _nested_match_loop_disruptive_exit_routes(
-                owner_id=owner_id,
-                body=stmt.body,
-                decision_region_id=condition_region_id,
-                decision_line=stmt.lineno,
-                loop_exit_line=continuation_target,
-            )
-        )
-
-        routes.extend(
-            _nested_try_loop_disruptive_exit_routes(
-                owner_id=owner_id,
-                body=stmt.body,
-                decision_region_id=condition_region_id,
-                decision_line=stmt.lineno,
-                loop_exit_line=continuation_target,
-            )
-        )
-
-        routes.extend(
-            _nested_with_loop_disruptive_exit_routes(
-                owner_id=owner_id,
-                body=stmt.body,
                 decision_region_id=condition_region_id,
                 decision_line=stmt.lineno,
                 loop_exit_line=continuation_target,
@@ -1339,50 +1148,10 @@ class WhileDecomposer(ControlOwnerDecomposer):
             )
 
         routes.extend(
-            _direct_loop_disruptive_exit_routes(
+            _collect_loop_transfer_routes(
                 owner_id=owner_id,
+                body=stmt.body,
                 source_region_id=body_region_id,
-                body=stmt.body,
-                decision_region_id=condition_region_id,
-                decision_line=stmt.lineno,
-                loop_exit_line=continuation_target,
-            )
-        )
-
-        routes.extend(
-            _nested_if_loop_disruptive_exit_routes(
-                owner_id=owner_id,
-                body=stmt.body,
-                decision_region_id=condition_region_id,
-                decision_line=stmt.lineno,
-                loop_exit_line=continuation_target,
-            )
-        )
-
-        routes.extend(
-            _nested_match_loop_disruptive_exit_routes(
-                owner_id=owner_id,
-                body=stmt.body,
-                decision_region_id=condition_region_id,
-                decision_line=stmt.lineno,
-                loop_exit_line=continuation_target,
-            )
-        )
-
-        routes.extend(
-            _nested_try_loop_disruptive_exit_routes(
-                owner_id=owner_id,
-                body=stmt.body,
-                decision_region_id=condition_region_id,
-                decision_line=stmt.lineno,
-                loop_exit_line=continuation_target,
-            )
-        )
-
-        routes.extend(
-            _nested_with_loop_disruptive_exit_routes(
-                owner_id=owner_id,
-                body=stmt.body,
                 decision_region_id=condition_region_id,
                 decision_line=stmt.lineno,
                 loop_exit_line=continuation_target,
@@ -1484,11 +1253,27 @@ def _stmt_list_end(body: list[ast.stmt]) -> int | None:
 
 class TryDecomposer(ControlOwnerDecomposer):
     @classmethod
-    def control_decomposition(cls, stmt: ast.Try) -> ControlStatementDecomposition:
+    def control_decomposition(
+        cls,
+        stmt: ast.Try,
+        context: DecompositionContext,
+    ) -> ControlStatementDecomposition:
         owner_id = _try_control_id(stmt)
-
         protected_region_id = _region_id(owner_id, "protected_body")
         dispatch_region_id = _region_id(owner_id, "exception_dispatch")
+        try_body_lines = body_lines(stmt.body)
+
+        handler_lines: list[int] = []
+        for handler in stmt.handlers:
+            handler_lines.extend(body_lines(handler.body))
+
+        else_lines = body_lines(stmt.orelse)
+        finally_lines = body_lines(stmt.finalbody)
+
+        continuation_target = _continuation_target(
+            context,
+            try_body_lines + handler_lines + else_lines + finally_lines,
+        )
 
         regions: list[ControlRegion] = [
             ControlRegion(
@@ -1529,6 +1314,21 @@ class TryDecomposer(ControlOwnerDecomposer):
                 synthetic=True,
             ),
         ]
+
+        for index, handler in enumerate(stmt.handlers):
+            handler_region_id = _region_id(owner_id, f"exception_handler:{index}")
+
+            if not _body_has_disruptive_terminal(handler.body):
+                routes.append(
+                    ControlRoute(
+                        id=_route_id(owner_id, f"handler_completion:{index}"),
+                        owner_id=owner_id,
+                        kind=ControlRouteKind.NORMAL_COMPLETION,
+                        source_region_id=handler_region_id,
+                        target_line=continuation_target,
+                        exit_kind=ExitKind.NORMAL,
+                    )
+                )
 
         for index, handler in enumerate(stmt.handlers):
             handler_region_id = _region_id(owner_id, f"exception_handler:{index}")
@@ -1591,17 +1391,30 @@ class TryDecomposer(ControlOwnerDecomposer):
                 )
             )
 
-            routes.append(
-                ControlRoute(
-                    id=_route_id(owner_id, "protected_normal_to_else"),
-                    owner_id=owner_id,
-                    kind=ControlRouteKind.NORMAL_COMPLETION,
-                    source_region_id=protected_region_id,
-                    target_region_id=else_region_id,
-                    target_line=_stmt_list_start(stmt.orelse),
-                    exit_kind=ExitKind.NORMAL,
+            if not _body_has_disruptive_terminal(stmt.body):
+                routes.append(
+                    ControlRoute(
+                        id=_route_id(owner_id, "protected_normal_to_else"),
+                        owner_id=owner_id,
+                        kind=ControlRouteKind.NORMAL_COMPLETION,
+                        source_region_id=protected_region_id,
+                        target_region_id=else_region_id,
+                        target_line=_stmt_list_start(stmt.orelse),
+                        exit_kind=ExitKind.NORMAL,
+                    )
                 )
-            )
+
+            if not _body_has_disruptive_terminal(stmt.orelse):
+                routes.append(
+                    ControlRoute(
+                        id=_route_id(owner_id, "else_completion"),
+                        owner_id=owner_id,
+                        kind=ControlRouteKind.NORMAL_COMPLETION,
+                        source_region_id=else_region_id,
+                        target_line=continuation_target,
+                        exit_kind=ExitKind.NORMAL,
+                    )
+                )
 
         if stmt.finalbody:
             finally_region_id = _region_id(owner_id, "post_execution")
@@ -1625,6 +1438,17 @@ class TryDecomposer(ControlOwnerDecomposer):
                     target_region_id=finally_region_id,
                     target_line=_stmt_list_start(stmt.finalbody),
                     preserves_prior_outcome=True,
+                )
+            )
+
+            routes.append(
+                ControlRoute(
+                    id=_route_id(owner_id, "resume_after_finally"),
+                    owner_id=owner_id,
+                    kind=ControlRouteKind.RESUME_PRIOR_OUTCOME,
+                    source_region_id=finally_region_id,
+                    preserves_prior_outcome=True,
+                    synthetic=True,
                 )
             )
 
@@ -1655,6 +1479,47 @@ class TryDecomposer(ControlOwnerDecomposer):
             ]
         else:
             policies = []
+
+        routes.extend(
+            _direct_region_disruptive_exit_routes(
+                owner_id=owner_id,
+                source_region_id=protected_region_id,
+                body=stmt.body,
+            )
+        )
+
+        for index, handler in enumerate(stmt.handlers):
+            handler_region_id = _region_id(owner_id, f"exception_handler:{index}")
+
+            routes.extend(
+                _direct_region_disruptive_exit_routes(
+                    owner_id=owner_id,
+                    source_region_id=handler_region_id,
+                    body=handler.body,
+                )
+            )
+
+        if stmt.orelse:
+            else_region_id = _region_id(owner_id, "success_continuation")
+
+            routes.extend(
+                _direct_region_disruptive_exit_routes(
+                    owner_id=owner_id,
+                    source_region_id=else_region_id,
+                    body=stmt.orelse,
+                )
+            )
+
+        if stmt.finalbody:
+            finally_region_id = _region_id(owner_id, "post_execution")
+
+            routes.extend(
+                _direct_region_disruptive_exit_routes(
+                    owner_id=owner_id,
+                    source_region_id=finally_region_id,
+                    body=stmt.finalbody,
+                )
+            )
 
         return ControlStatementDecomposition(
             description=f"try statement at line {stmt.lineno}",
@@ -1719,7 +1584,9 @@ class TryDecomposer(ControlOwnerDecomposer):
                 )
             )
 
-        results.append(DecomposerResult(decomposition=cls.control_decomposition(stmt)))
+        results.append(
+            DecomposerResult(decomposition=cls.control_decomposition(stmt, context))
+        )
 
         return results
 
@@ -1819,6 +1686,14 @@ class WithDecomposer(ControlOwnerDecomposer):
                 detail=f"invoke context manager exit for {contexts}",
             )
         ]
+
+        routes.extend(
+            _direct_region_disruptive_exit_routes(
+                owner_id=owner_id,
+                source_region_id=body_region_id,
+                body=stmt.body,
+            )
+        )
 
         return ControlStatementDecomposition(
             description=f"{source_construct} statement at line {stmt.lineno}",

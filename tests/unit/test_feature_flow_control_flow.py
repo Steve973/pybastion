@@ -632,3 +632,294 @@ def test_nested_loop_transfers_bind_to_inner_loop_not_outer_loop(
 
     assert len(inner_break_routes) == 1
     assert inner_break_routes[0].get("exit_kind") == "break"
+
+
+def test_try_direct_return_raise_emits_region_disruptive_routes(
+    inventory: dict[str, Any],
+) -> None:
+    entry = _entry_by_name(inventory, "fixture_try_direct_return_raise")
+
+    try_owner_ids = [
+        region["owner_id"]
+        for region in _regions(entry)
+        if region.get("kind") == "protected_body"
+        and region.get("source_construct") == "try"
+    ]
+
+    assert len(try_owner_ids) == 1
+    try_owner_id = try_owner_ids[0]
+
+    protected_return_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == try_owner_id
+        and route.get("kind") == "function_return"
+        and route.get("source_region_id") == f"{try_owner_id}:protected_body"
+    ]
+
+    handler_raise_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == try_owner_id
+        and route.get("kind") == "raise"
+        and route.get("source_region_id", "").startswith(
+            f"{try_owner_id}:exception_handler:"
+        )
+    ]
+
+    post_execution_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == try_owner_id
+        and route.get("kind") == "post_execution_entry"
+    ]
+
+    try_finally_policies = [
+        policy
+        for policy in _policies(entry)
+        if policy.get("owner_id") == try_owner_id
+        and policy.get("mechanism_kind") == "try_finally"
+    ]
+
+    assert len(protected_return_routes) == 1
+    assert protected_return_routes[0].get("exit_kind") == "return"
+
+    assert len(handler_raise_routes) == 1
+    assert handler_raise_routes[0].get("exit_kind") == "raise"
+
+    assert len(post_execution_routes) == 1
+    assert len(try_finally_policies) == 1
+    assert "return" in try_finally_policies[0].get("applies_to", [])
+    assert "raise" in try_finally_policies[0].get("applies_to", [])
+
+
+def test_with_direct_return_raise_emits_body_disruptive_routes(
+    inventory: dict[str, Any],
+) -> None:
+    entry = _entry_by_name(inventory, "fixture_with_direct_return_raise")
+
+    with_owner_ids = [
+        region["owner_id"]
+        for region in _regions(entry)
+        if region.get("kind") == "body" and region.get("source_construct") == "with"
+    ]
+
+    assert len(with_owner_ids) == 2
+
+    return_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("kind") == "function_return"
+        and route.get("source_region_id", "").endswith(":body")
+        and route.get("source_region_id", "").startswith("with:")
+    ]
+
+    raise_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("kind") == "raise"
+        and route.get("source_region_id", "").endswith(":body")
+        and route.get("source_region_id", "").startswith("with:")
+    ]
+
+    post_execution_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") in with_owner_ids
+        and route.get("kind") == "post_execution_entry"
+    ]
+
+    resume_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") in with_owner_ids
+        and route.get("kind") == "resume_prior_outcome"
+    ]
+
+    with_policies = [
+        policy
+        for policy in _policies(entry)
+        if policy.get("owner_id") in with_owner_ids
+        and policy.get("mechanism_kind") == "context_manager_exit"
+    ]
+
+    assert len(return_routes) == 1
+    assert return_routes[0].get("exit_kind") == "return"
+
+    assert len(raise_routes) == 1
+    assert raise_routes[0].get("exit_kind") == "raise"
+
+    assert len(post_execution_routes) == 2
+    assert all(
+        route.get("preserves_prior_outcome") is True for route in post_execution_routes
+    )
+
+    assert len(resume_routes) == 2
+    assert all(route.get("preserves_prior_outcome") is True for route in resume_routes)
+
+    assert len(with_policies) == 2
+    assert all("return" in policy.get("applies_to", []) for policy in with_policies)
+    assert all("raise" in policy.get("applies_to", []) for policy in with_policies)
+
+
+def test_try_direct_return_suppresses_protected_normal_to_else(
+    inventory: dict[str, Any],
+) -> None:
+    entry = _entry_by_name(inventory, "fixture_try_direct_return_suppresses_else")
+
+    try_owner_ids = [
+        region["owner_id"]
+        for region in _regions(entry)
+        if region.get("kind") == "protected_body"
+        and region.get("source_construct") == "try"
+    ]
+
+    assert len(try_owner_ids) == 1
+    try_owner_id = try_owner_ids[0]
+
+    protected_return_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == try_owner_id
+        and route.get("kind") == "function_return"
+        and route.get("source_region_id") == f"{try_owner_id}:protected_body"
+    ]
+
+    protected_normal_to_else_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == try_owner_id
+        and str(route.get("id", "")).endswith(":protected_normal_to_else")
+    ]
+
+    else_return_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == try_owner_id
+        and route.get("kind") == "function_return"
+        and route.get("source_region_id") == f"{try_owner_id}:success_continuation"
+    ]
+
+    assert len(protected_return_routes) == 1
+    assert protected_return_routes[0].get("exit_kind") == "return"
+
+    assert protected_normal_to_else_routes == []
+
+    assert len(else_return_routes) == 1
+    assert else_return_routes[0].get("exit_kind") == "return"
+
+
+def test_try_finally_emits_resume_prior_outcome_route(
+    inventory: dict[str, Any],
+) -> None:
+    entry = _entry_by_name(inventory, "fixture_try_direct_return_raise")
+
+    try_owner_ids = [
+        region["owner_id"]
+        for region in _regions(entry)
+        if region.get("kind") == "post_execution"
+        and region.get("source_construct") == "finally"
+    ]
+
+    assert len(try_owner_ids) == 1
+    try_owner_id = try_owner_ids[0]
+
+    resume_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == try_owner_id
+        and route.get("kind") == "resume_prior_outcome"
+        and route.get("source_region_id") == f"{try_owner_id}:post_execution"
+    ]
+
+    assert len(resume_routes) == 1
+    assert resume_routes[0].get("preserves_prior_outcome") is True
+
+
+def test_try_handler_and_else_emit_normal_completion_routes(
+    inventory: dict[str, Any],
+) -> None:
+    entry = _entry_by_name(inventory, "fixture_try_handler_else_normal_completion")
+
+    try_owner_ids = [
+        region["owner_id"]
+        for region in _regions(entry)
+        if region.get("kind") == "protected_body"
+        and region.get("source_construct") == "try"
+    ]
+
+    assert len(try_owner_ids) == 1
+    try_owner_id = try_owner_ids[0]
+
+    handler_completion_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == try_owner_id
+        and route.get("kind") == "normal_completion"
+        and str(route.get("source_region_id", "")).startswith(
+            f"{try_owner_id}:exception_handler:"
+        )
+    ]
+
+    else_completion_routes = [
+        route
+        for route in _routes(entry)
+        if route.get("owner_id") == try_owner_id
+        and route.get("kind") == "normal_completion"
+        and route.get("source_region_id") == f"{try_owner_id}:success_continuation"
+    ]
+
+    assert len(handler_completion_routes) == 1
+    assert handler_completion_routes[0].get("exit_kind") == "normal"
+    assert handler_completion_routes[0].get("target_line") == entry["line_end"]
+
+    assert len(else_completion_routes) == 1
+    assert else_completion_routes[0].get("exit_kind") == "normal"
+    assert else_completion_routes[0].get("target_line") == entry["line_end"]
+
+
+def test_control_flow_route_ids_are_unique_per_entry(
+    inventory: dict[str, Any],
+) -> None:
+    for entry in _walk_entries(inventory.get("entries", []) or []):
+        control_flow = (entry.get("analysis_info") or {}).get("control_flow")
+        if not control_flow:
+            continue
+
+        route_ids = [
+            route.get("id")
+            for route in control_flow.get("routes", []) or []
+            if route.get("id")
+        ]
+
+        assert len(route_ids) == len(set(route_ids)), (
+            f"duplicate route IDs in {entry.get('name')}: "
+            f"{sorted(route_id for route_id in set(route_ids) if route_ids.count(route_id) > 1)}"
+        )
+
+
+def test_loop_transfer_routes_are_not_duplicated_per_source(
+    inventory: dict[str, Any],
+) -> None:
+    for entry in _walk_entries(inventory.get("entries", []) or []):
+        control_flow = (entry.get("analysis_info") or {}).get("control_flow")
+        if not control_flow:
+            continue
+
+        seen: set[tuple[str, str, str, int | None]] = set()
+
+        for route in control_flow.get("routes", []) or []:
+            if route.get("kind") not in {"loop_continue", "loop_break"}:
+                continue
+
+            key = (
+                route.get("owner_id"),
+                route.get("kind"),
+                route.get("source_region_id"),
+                route.get("target_line"),
+            )
+
+            assert (
+                key not in seen
+            ), f"duplicate loop transfer route in {entry.get('name')}: {route}"
+            seen.add(key)

@@ -244,14 +244,12 @@ def fixture_full_control_flow_probe(
     path,
 ) -> int:
     total = 0
-
     if value > 10:
         total += value
     elif value == 10:
         total += 100
     else:
         total -= value
-
     match value:
         case 0:
             total += 1
@@ -261,7 +259,6 @@ def fixture_full_control_flow_probe(
             total -= 10
         case _:
             total += 5
-
     for item in items:
         if item < 0:
             continue
@@ -270,14 +267,12 @@ def fixture_full_control_flow_probe(
         total += item
     else:
         total += 50
-
     while total < 100:
         total += 10
         if total == 70:
             break
     else:
         total += 7
-
     try:
         with path.open("r") as handle:
             raw = handle.read()
@@ -286,7 +281,6 @@ def fixture_full_control_flow_probe(
             total += len(raw)
         else:
             total -= 1
-
     except FileNotFoundError:
         total = -404
     except OSError:
@@ -295,43 +289,35 @@ def fixture_full_control_flow_probe(
         total += mapping.get("bonus", 0)
     finally:
         total += 3
-
     return total
 
 
 def fixture_if_normal_completion_probe(value: int) -> int:
     total = 0
-
     if value > 0:
         total += 1
     else:
         total -= 1
-
     return total
 
 
 def fixture_if_partial_disruption_probe(value: int) -> int:
     total = 0
-
     if value > 0:
         if value == 10:
             return 10
         total += 1
-
     return total
 
 
 def fixture_loop_direct_disruptions(items: list[int]) -> int:
     total = 0
-
     for item in items:
         total += item
         continue
-
     while total < 10:
         total += 1
         break
-
     return total
 
 
@@ -387,25 +373,19 @@ def fixture_try_loop_disruptions(values: list[str]) -> int:
 
 def fixture_with_loop_disruptions(values: list[str], path) -> int:
     total = 0
-
     for value in values:
         with path.open("r") as handle:
             handle.read()
-
             if value == "skip":
                 continue
-
             if value == "stop":
                 break
-
             total += 1
-
     return total
 
 
 def fixture_nested_loop_transfer_binding(values: list[list[int]]) -> int:
     total = 0
-
     for row in values:
         for item in row:
             if item < 0:
@@ -413,7 +393,44 @@ def fixture_nested_loop_transfer_binding(values: list[list[int]]) -> int:
             if item == 0:
                 break
             total += item
-
         total += 100
-
     return total
+
+
+def fixture_try_direct_return_raise(value: int) -> int:
+    try:
+        if value == 0:
+            raise ValueError("zero")
+        return value
+    except ValueError:
+        raise RuntimeError("wrapped")
+    finally:
+        value + 1
+
+
+def fixture_with_direct_return_raise(path, mode: str) -> str:
+    if mode == "raise":
+        with path.open("r") as handle:
+            raise RuntimeError("forced failure")
+    with path.open("r") as handle:
+        return handle.read()
+
+
+def fixture_try_direct_return_suppresses_else(value: int) -> int:
+    try:
+        return value
+    except ValueError:
+        return -1
+    else:
+        return 100
+
+
+def fixture_try_handler_else_normal_completion(value: str) -> int:
+    result = 0
+    try:
+        parsed = int(value)
+    except ValueError:
+        result = -1
+    else:
+        result = parsed
+    return result
