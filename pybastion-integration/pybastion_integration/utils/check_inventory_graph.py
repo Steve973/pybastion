@@ -680,7 +680,7 @@ def load_cfg(cfg_path: Path) -> nx.DiGraph:
         if not isinstance(payload, dict):
             raise ValueError(f"Graph YAML is not a mapping: {cfg_path}")
 
-        return nx.node_link_graph(payload, edges="links")
+        return nx.node_link_graph(payload, edges="edges")
 
     raise ValueError(
         f"Unsupported graph format for {cfg_path}. "

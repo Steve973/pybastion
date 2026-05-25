@@ -19,6 +19,9 @@ Expected full feature cases:
 - main::b::d
 """
 
+from io import BufferedReader
+from synthetic_feature_dependency import SyntheticDependency
+
 
 def normalize_input(raw: str) -> str:
     return raw.strip().lower()
@@ -201,6 +204,7 @@ def fixture_try_control(value: str) -> str:
 
 
 def fixture_with_control(path: str) -> str:
+    handle: BufferedReader
     with open(path, encoding="utf-8") as handle:
         content = handle.read()
 
@@ -212,6 +216,8 @@ def fixture_with_control(path: str) -> str:
 
 def fixture_mixed_control(values: list[str], fallback: str) -> str:
     result = fallback
+    text: str
+    value: str
 
     try:
         for value in values:
@@ -274,6 +280,8 @@ def fixture_full_control_flow_probe(
     else:
         total += 7
     try:
+        handle: BufferedReader
+        raw: bytes
         with path.open("r") as handle:
             raw = handle.read()
 
@@ -373,6 +381,7 @@ def fixture_try_loop_disruptions(values: list[str]) -> int:
 
 def fixture_with_loop_disruptions(values: list[str], path) -> int:
     total = 0
+    handle: BufferedReader
     for value in values:
         with path.open("r") as handle:
             handle.read()
@@ -409,6 +418,7 @@ def fixture_try_direct_return_raise(value: int) -> int:
 
 
 def fixture_with_direct_return_raise(path, mode: str) -> str:
+    handle: BufferedReader
     if mode == "raise":
         with path.open("r") as handle:
             raise RuntimeError("forced failure")
@@ -446,3 +456,7 @@ def fixture_try_finally_normal_resume_target(value: int) -> int:
 
     result += 100
     return result
+
+
+def calls_other_unit(dependency: SyntheticDependency, value: str) -> str:
+    return dependency.transform(value)

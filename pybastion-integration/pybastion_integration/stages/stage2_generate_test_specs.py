@@ -74,30 +74,32 @@ def infer_graph_format(path: Path, explicit_format: str | None) -> str:
     )
 
 
-def load_graph(path: Path, graph_format: str) -> nx.DiGraph:
+def load_graph(path: Path, graph_format: str) -> nx.MultiDiGraph:
     if graph_format == "pickle":
         with open(path, "rb") as f:
             graph = pickle.load(f)
-        if not isinstance(graph, nx.DiGraph):
-            raise TypeError(f"Expected NetworkX DiGraph in {path}, got {type(graph)!r}")
+        if not isinstance(graph, nx.MultiDiGraph):
+            raise TypeError(
+                f"Expected NetworkX MultiDiGraph in {path}, got {type(graph)!r}"
+            )
         return graph
 
     if graph_format == "yaml":
         with open(path, "r", encoding="utf-8") as f:
             data = yaml.safe_load(f)
-        return nx.node_link_graph(data)
+        return nx.node_link_graph(data, edges="edges")
 
     raise ValueError(f"Unsupported graph format: {graph_format}")
 
 
-def graph_nodes_by_id(cfg: nx.DiGraph) -> dict[str, dict[str, Any]]:
+def graph_nodes_by_id(cfg: nx.MultiDiGraph) -> dict[str, dict[str, Any]]:
     return {
         str(node_id): {"id": str(node_id), **dict(data)}
         for node_id, data in cfg.nodes(data=True)
     }
 
 
-def graph_edges_by_source(cfg: nx.DiGraph) -> dict[str, list[dict[str, Any]]]:
+def graph_edges_by_source(cfg: nx.MultiDiGraph) -> dict[str, list[dict[str, Any]]]:
     result: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     for source, target, data in cfg.edges(data=True):
@@ -112,7 +114,7 @@ def graph_edges_by_source(cfg: nx.DiGraph) -> dict[str, list[dict[str, Any]]]:
     return dict(result)
 
 
-def graph_edges(cfg: nx.DiGraph) -> list[dict[str, Any]]:
+def graph_edges(cfg: nx.MultiDiGraph) -> list[dict[str, Any]]:
     edges: list[dict[str, Any]] = []
 
     for source, target, data in cfg.edges(data=True):
@@ -154,10 +156,22 @@ def classification_kind(candidate: dict[str, Any] | None) -> str:
         return "unknown"
 
     classification = candidate.get("classification")
+
     if isinstance(classification, dict):
+        if not classification.get("is_integration", False):
+            return "unknown"
+
         return (
-            classification.get("kind")
+            classification.get("seam_kind")
+            or classification.get("seam_type")
+            or classification.get("integration_kind")
+            or classification.get("integration_type")
+            or classification.get("kind")
             or classification.get("type")
+            or candidate.get("seam_kind")
+            or candidate.get("seam_type")
+            or candidate.get("integration_kind")
+            or candidate.get("integration_type")
             or candidate.get("kind")
             or "unknown"
         )
@@ -165,7 +179,14 @@ def classification_kind(candidate: dict[str, Any] | None) -> str:
     if isinstance(classification, str):
         return classification
 
-    return candidate.get("kind") or "unknown"
+    return (
+        candidate.get("seam_kind")
+        or candidate.get("seam_type")
+        or candidate.get("integration_kind")
+        or candidate.get("integration_type")
+        or candidate.get("kind")
+        or "unknown"
+    )
 
 
 def normalized_seam_kind(kind: str | None) -> str:
@@ -211,7 +232,7 @@ def candidate_execution_paths(
 
 
 def outgoing_call_edges_by_source_ei(
-    cfg: nx.DiGraph,
+    cfg: nx.MultiDiGraph,
 ) -> dict[str, list[dict[str, Any]]]:
     result: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
@@ -287,7 +308,7 @@ def should_include_inventory_candidate(
 
 def discover_inventory_seams(
     *,
-    cfg: nx.DiGraph,
+    cfg: nx.MultiDiGraph,
     inventory_index: InventoryIndex,
     nodes_by_id: dict[str, dict[str, Any]],
     seam_types: set[str],
@@ -573,7 +594,9 @@ def build_synthetic_error_representative(
 # =============================================================================
 
 
-def outgoing_call_edges_by_source(cfg: nx.DiGraph) -> dict[str, list[dict[str, Any]]]:
+def outgoing_call_edges_by_source(
+    cfg: nx.MultiDiGraph,
+) -> dict[str, list[dict[str, Any]]]:
     result: dict[str, list[dict[str, Any]]] = defaultdict(list)
 
     for edge in graph_edges(cfg):

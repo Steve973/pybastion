@@ -186,7 +186,7 @@ def context_control_flow(context: CallableContext) -> dict[str, Any]:
     return control_flow if isinstance(control_flow, dict) else {}
 
 
-def add_callable_container_node(cfg: nx.DiGraph, context: CallableContext) -> None:
+def add_callable_container_node(cfg: nx.MultiDiGraph, context: CallableContext) -> None:
     control_flow = context_control_flow(context)
 
     cfg.add_node(
@@ -219,7 +219,9 @@ def add_callable_container_node(cfg: nx.DiGraph, context: CallableContext) -> No
         )
 
 
-def add_control_flow_nodes_and_edges(cfg: nx.DiGraph, context: CallableContext) -> None:
+def add_control_flow_nodes_and_edges(
+    cfg: nx.MultiDiGraph, context: CallableContext
+) -> None:
     """
     Structural control-flow layer.
 
@@ -544,7 +546,7 @@ def inventory_successor_targets(execution_item: dict[str, Any]) -> list[str]:
 
 
 def add_external_placeholder_node(
-    cfg: nx.DiGraph,
+    cfg: nx.MultiDiGraph,
     *,
     call_site_ei: str,
     candidate: dict[str, Any],
@@ -560,7 +562,7 @@ def add_external_placeholder_node(
     between different parts of the system when external operations are involved.
 
     Parameters:
-    cfg: nx.DiGraph
+    cfg: nx.MultiDiGraph
         The directed graph to which the node will be added.
     call_site_ei: str
         The unique identifier of the calling site from which the external target is
@@ -620,7 +622,7 @@ def add_external_placeholder_node(
     return node_id
 
 
-def add_callable_nodes(cfg: nx.DiGraph, context: CallableContext) -> None:
+def add_callable_nodes(cfg: nx.MultiDiGraph, context: CallableContext) -> None:
     callable_decorators = signature_info(context.entry).get("decorators", []) or []
 
     for execution_item in context_execution_items(context):
@@ -681,7 +683,7 @@ def add_callable_nodes(cfg: nx.DiGraph, context: CallableContext) -> None:
 
 
 def add_explicit_within_callable_edges(
-    cfg: nx.DiGraph,
+    cfg: nx.MultiDiGraph,
     context: CallableContext,
     modeled_call_site_eis: set[str],
 ) -> None:
@@ -867,7 +869,7 @@ def resolve_collapsible_decorated_target(
 
 
 def add_call_to_placeholder_with_return(
-    cfg: nx.DiGraph,
+    cfg: nx.MultiDiGraph,
     *,
     call_site_ei: str,
     return_targets: list[str],
@@ -900,7 +902,7 @@ def add_call_to_placeholder_with_return(
 
 
 def add_call_to_callable_with_returns(
-    cfg: nx.DiGraph,
+    cfg: nx.MultiDiGraph,
     *,
     call_site_ei: str,
     return_targets: list[str],
@@ -960,7 +962,7 @@ def add_collapsed_internal_operation_node(
     ei_id: str,
     resolved_callable_id: str,
     target_context: CallableContext,
-    cfg: nx.DiGraph,
+    cfg: nx.MultiDiGraph,
     marker_name: str | None = None,
     marker_type: str | None = None,
 ) -> str:
@@ -971,7 +973,7 @@ def add_collapsed_internal_operation_node(
         ei_id (str): The ID of the execution item.
         resolved_callable_id (str): The resolved callable ID for the collapsed operation.
         target_context (CallableContext): The context of the target callable.
-        cfg (nx.DiGraph): The call graph to which the node will be added.
+        cfg (nx.MultiDiGraph): The call graph to which the node will be added.
         marker_name (str): The name of the marker associated with the collapsed operation.
         marker_type (str): The type of the marker associated with the collapsed operation.
     """
@@ -994,7 +996,7 @@ def add_collapsed_internal_operation_node(
 
 
 def add_call_and_return_edges(
-    cfg: nx.DiGraph,
+    cfg: nx.MultiDiGraph,
     context: CallableContext,
     inventory_index: InventoryIndex,
     local_callables_by_unit: dict[str, dict[str, str]],
@@ -1237,7 +1239,7 @@ def add_call_and_return_edges(
 
 
 def verify_recorded_execution_paths(
-    cfg: nx.DiGraph,
+    cfg: nx.MultiDiGraph,
     callable_contexts: dict[str, CallableContext],
 ) -> list[dict[str, Any]]:
     failures: list[dict[str, Any]] = []
@@ -1321,7 +1323,7 @@ def verify_recorded_execution_paths(
 
 def build_graph_from_inventories(
     inventory_paths: list[Path],
-) -> tuple[nx.DiGraph, InventoryIndex, list[dict[str, Any]]]:
+) -> tuple[nx.MultiDiGraph, InventoryIndex, list[dict[str, Any]]]:
     inventory_index = load_all_inventories(inventory_paths)
     local_callables_by_unit = inventory_index.build_local_callables_by_unit()
     contract_impl_index = inventory_index.build_contract_impl_index()
@@ -1360,7 +1362,7 @@ def build_graph_from_inventories(
     return cfg, inventory_index, failures
 
 
-def serialize_graph(cfg: nx.DiGraph, output_path: Path, fmt: str) -> None:
+def serialize_graph(cfg: nx.MultiDiGraph, output_path: Path, fmt: str) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     if fmt == "pickle":
@@ -1369,7 +1371,7 @@ def serialize_graph(cfg: nx.DiGraph, output_path: Path, fmt: str) -> None:
         return
 
     if fmt == "yaml":
-        graph_data = nx.node_link_data(cfg)
+        graph_data = nx.node_link_data(cfg, edges="edges")
         with open(output_path, "w", encoding="utf-8") as f:
             yaml.dump(
                 graph_data, f, sort_keys=False, allow_unicode=True, width=float("inf")
