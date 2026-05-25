@@ -2086,8 +2086,6 @@ def build_structural_health_report(
     edge_target_health = analyze_edge_target_health(cfg)
     callable_cycles = analyze_callable_call_cycles(cfg)
     external_seams = analyze_external_seams(results)
-    edge_type_counts = analyze_edge_type_counts(cfg)
-    control_flow_route_coverage = analyze_control_flow_route_coverage(cfg)
 
     return {
         "ei_validation": ei_validation,
@@ -2095,8 +2093,6 @@ def build_structural_health_report(
         "edge_target_health": edge_target_health,
         "callable_call_cycles": callable_cycles,
         "external_seams": external_seams,
-        "edge_type_counts": edge_type_counts,
-        "control_flow_route_coverage": control_flow_route_coverage,
         "problem_count": (
             ei_validation["ei_regex_mismatch_count"]
             + ei_validation["callables_missing_entryish_ei_count"]
