@@ -939,7 +939,7 @@ def build_spec(
         },
         "target": {
             "unit": target_unit,
-            "unit_fqn": target_fqn,
+            "unit_fqn": target_context.unit_fqn if target_context is not None else None,
             "callable_id": target_callable_id,
             "name": target_name,
             "fully_qualified": target_fqn,
