@@ -9,7 +9,7 @@ Output: One YAML file per source-unit → target-unit pair, written to a
 Each output file contains all specs that describe tests between the same
 two units, and maps cleanly to a single pytest test module.
 
-Output filenames: {source_unit}__{target_unit}.yaml
+Output filenames: {source_unit}__->__{target_unit}.yaml
   e.g. api__resolution.yaml
        builtin_strategies__repository.yaml
 
@@ -31,29 +31,29 @@ import yaml
 
 from pybastion_integration import config
 
-
 # =============================================================================
 # Helpers
 # =============================================================================
 
+
 def load_yaml(path: Path) -> dict[str, Any]:
-    with open(path, 'r', encoding='utf-8') as f:
+    with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
 def safe_filename_segment(name: str) -> str:
     """Convert a unit name to a safe filename segment."""
     # Strip leading paths/packages — use only the final module name
-    segment = name.split('.')[-1].split('::')[-1]
+    segment = name.split(".")[-1].split("::")[-1]
     # Replace any remaining non-alphanumeric chars with underscore
-    segment = re.sub(r'[^A-Za-z0-9_]', '_', segment)
+    segment = re.sub(r"[^A-Za-z0-9_]", "_", segment)
     return segment.lower()
 
 
 def pair_key(spec: dict[str, Any]) -> tuple[str, str]:
     """Return (source_unit, target_unit) key for a spec."""
-    source_unit = spec.get('source', {}).get('unit', 'unknown')
-    target_unit = spec.get('target', {}).get('unit', 'unknown')
+    source_unit = spec.get("source", {}).get("unit", "unknown")
+    target_unit = spec.get("target", {}).get("unit", "unknown")
     return source_unit, target_unit
 
 
@@ -68,9 +68,10 @@ def pair_filename(source_unit: str, target_unit: str) -> str:
 # Splitting
 # =============================================================================
 
+
 def split_specs(
-        specs: list[dict[str, Any]],
-        verbose: bool = False,
+    specs: list[dict[str, Any]],
+    verbose: bool = False,
 ) -> dict[tuple[str, str], list[dict[str, Any]]]:
     """
     Group specs by (source_unit, target_unit) pair.
@@ -94,32 +95,34 @@ def split_specs(
 # Main
 # =============================================================================
 
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument(
-        '--input',
+        "--input",
         type=Path,
         default=None,
-        help='Stage 2 input file (default: from config)',
+        help="Stage 2 input file (default: from config)",
     )
     ap.add_argument(
-        '--output-dir',
+        "--output-dir",
         type=Path,
         default=None,
-        help='Output directory for split files (default: from config)',
+        help="Output directory for split files (default: from config)",
     )
     ap.add_argument(
-        '--target-root',
+        "--target-root",
         type=Path,
-        help='Target project root (sets config defaults)',
+        help="Target project root (sets config defaults)",
     )
     ap.add_argument(
-        '-v', '--verbose',
-        action='store_true',
-        help='Verbose output',
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Verbose output",
     )
 
     args = ap.parse_args(argv)
@@ -141,7 +144,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Loading: {input_path}")
 
     stage2_data = load_yaml(input_path)
-    specs = stage2_data.get('test_specs', [])
+    specs = stage2_data.get("test_specs", [])
 
     if not specs:
         print("ERROR: No test specs found in input", file=sys.stderr)
@@ -165,14 +168,14 @@ def main(argv: list[str] | None = None) -> int:
         output_path = output_dir / filename
 
         output_data = {
-            'stage': 'split-test-specs',
-            'source_unit': source_unit,
-            'target_unit': target_unit,
-            'spec_count': len(group_specs),
-            'test_specs': group_specs,
+            "stage": "split-test-specs",
+            "source_unit": source_unit,
+            "target_unit": target_unit,
+            "spec_count": len(group_specs),
+            "test_specs": group_specs,
         }
 
-        with open(output_path, 'w', encoding='utf-8') as f:
+        with open(output_path, "w", encoding="utf-8") as f:
             yaml.dump(
                 output_data,
                 f,
@@ -192,5 +195,5 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     sys.exit(main())

@@ -22,6 +22,11 @@ from typing import Any
 import networkx as nx
 import yaml
 
+from pybastion_integration.utils.graph_loader import (
+    load_cfg,
+    FeatureFlowGraphs,
+    load_graph,
+)
 from pybastion_integration.utils.inventory_index import (
     analysis_info,
     hierarchy_info,
@@ -81,7 +86,7 @@ def callable_prefix_from_ei(ei_id: str) -> str | None:
     return m.group(1) if m else None
 
 
-def validate_ei_ids(cfg: nx.DiGraph) -> dict[str, Any]:
+def validate_ei_ids(cfg: nx.MultiDiGraph) -> dict[str, Any]:
     ei_like_nodes: list[str] = []
     bad_ei_nodes: list[str] = []
     callable_to_eis: dict[str, list[str]] = {}
@@ -130,7 +135,7 @@ def validate_ei_ids(cfg: nx.DiGraph) -> dict[str, Any]:
     }
 
 
-def analyze_integration_point_graph_coverage(cfg: nx.DiGraph) -> dict[str, Any]:
+def analyze_integration_point_graph_coverage(cfg: nx.MultiDiGraph) -> dict[str, Any]:
     missing_call_edges: list[dict[str, Any]] = []
     bad_call_targets: list[dict[str, Any]] = []
     paths_not_ending_at_integration_ei: list[dict[str, Any]] = []
@@ -272,7 +277,7 @@ def classify_placeholder_reason(
     return "unclassified_placeholder"
 
 
-def analyze_interunit_placeholder_targets(cfg: nx.DiGraph) -> dict[str, Any]:
+def analyze_interunit_placeholder_targets(cfg: nx.MultiDiGraph) -> dict[str, Any]:
     interunit_placeholder_targets: list[dict[str, Any]] = []
     interunit_real_targets: list[dict[str, Any]] = []
     placeholder_reason_counts: Counter[str] = Counter()
@@ -356,7 +361,7 @@ def classify_interunit_placeholder_reason(item: dict[str, Any]) -> str:
     return "unresolved_callable_like_target"
 
 
-def analyze_collapsed_node_health(cfg: nx.DiGraph) -> dict[str, Any]:
+def analyze_collapsed_node_health(cfg: nx.MultiDiGraph) -> dict[str, Any]:
     collapsed_without_return: list[dict[str, Any]] = []
     collapsed_without_incoming_call: list[dict[str, Any]] = []
     collapsed_missing_target_callable: list[dict[str, Any]] = []
@@ -413,7 +418,7 @@ def analyze_collapsed_node_health(cfg: nx.DiGraph) -> dict[str, Any]:
     }
 
 
-def analyze_edge_target_health(cfg: nx.DiGraph) -> dict[str, Any]:
+def analyze_edge_target_health(cfg: nx.MultiDiGraph) -> dict[str, Any]:
     bad_call_targets: list[dict[str, Any]] = []
     bad_return_targets: list[dict[str, Any]] = []
     self_loop_call_edges: list[dict[str, Any]] = []
@@ -473,8 +478,8 @@ def analyze_edge_target_health(cfg: nx.DiGraph) -> dict[str, Any]:
     }
 
 
-def build_callable_call_graph(cfg: nx.DiGraph) -> nx.DiGraph:
-    call_graph = nx.DiGraph()
+def build_callable_call_graph(cfg: nx.MultiDiGraph) -> nx.MultiDiGraph:
+    call_graph = nx.MultiDiGraph()
 
     for _, node_data in cfg.nodes(data=True):
         callable_id = node_data.get("callable_id")
@@ -503,7 +508,7 @@ def build_callable_call_graph(cfg: nx.DiGraph) -> nx.DiGraph:
     return call_graph
 
 
-def analyze_callable_call_cycles(cfg: nx.DiGraph) -> dict[str, Any]:
+def analyze_callable_call_cycles(cfg: nx.MultiDiGraph) -> dict[str, Any]:
     call_graph = build_callable_call_graph(cfg)
 
     self_recursive: list[dict[str, Any]] = []
@@ -635,7 +640,7 @@ def load_checker_config(config_path: Path) -> CheckerConfig:
     )
 
 
-def callable_marker_names(cfg: nx.DiGraph, callable_id: str) -> set[str]:
+def callable_marker_names(cfg: nx.MultiDiGraph, callable_id: str) -> set[str]:
     names: set[str] = set()
 
     for _, data in cfg.nodes(data=True):
@@ -655,7 +660,7 @@ def callable_marker_names(cfg: nx.DiGraph, callable_id: str) -> set[str]:
 
 
 def externally_reachable_via_marker(
-    cfg: nx.DiGraph,
+    cfg: nx.MultiDiGraph,
     callable_id: str,
     config: CheckerConfig,
 ) -> bool:
@@ -663,28 +668,6 @@ def externally_reachable_via_marker(
         return False
     return bool(
         callable_marker_names(cfg, callable_id) & config.external_method_decorators
-    )
-
-
-def load_cfg(cfg_path: Path) -> nx.DiGraph:
-    suffixes = {suffix.lower() for suffix in cfg_path.suffixes}
-
-    if ".pickle" in suffixes or ".pkl" in suffixes:
-        with open(cfg_path, "rb") as f:
-            return pickle.load(f)
-
-    if ".yaml" in suffixes or ".yml" in suffixes:
-        with open(cfg_path, "r", encoding="utf-8") as f:
-            payload = yaml.safe_load(f)
-
-        if not isinstance(payload, dict):
-            raise ValueError(f"Graph YAML is not a mapping: {cfg_path}")
-
-        return nx.node_link_graph(payload, edges="edges")
-
-    raise ValueError(
-        f"Unsupported graph format for {cfg_path}. "
-        "Expected .pickle, .pkl, .yaml, or .yml"
     )
 
 
@@ -752,7 +735,7 @@ def index_inventory_execution_paths(
     return indexed
 
 
-def collect_callables_from_graph(cfg: nx.DiGraph) -> dict[str, dict[str, Any]]:
+def collect_callables_from_graph(cfg: nx.MultiDiGraph) -> dict[str, dict[str, Any]]:
     callables: dict[str, dict[str, Any]] = {}
 
     for node_id, node_data in cfg.nodes(data=True):
@@ -793,7 +776,7 @@ def _ei_sort_key(ei_id: str) -> int:
         return 0
 
 
-def find_entry_ei(cfg: nx.DiGraph, callable_id: str) -> str | None:
+def find_entry_ei(cfg: nx.MultiDiGraph, callable_id: str) -> str | None:
     eis = [
         node_id
         for node_id, data in cfg.nodes(data=True)
@@ -804,7 +787,7 @@ def find_entry_ei(cfg: nx.DiGraph, callable_id: str) -> str | None:
     return sorted(eis, key=_ei_sort_key)[0]
 
 
-def find_success_exit_eis(cfg: nx.DiGraph, callable_id: str) -> list[str]:
+def find_success_exit_eis(cfg: nx.MultiDiGraph, callable_id: str) -> list[str]:
     exits: list[str] = []
     for node_id, node_data in cfg.nodes(data=True):
         if not is_execution_instance_node(node_data):
@@ -819,7 +802,7 @@ def find_success_exit_eis(cfg: nx.DiGraph, callable_id: str) -> list[str]:
     return sorted(exits, key=_ei_sort_key)
 
 
-def find_exception_exit_eis(cfg: nx.DiGraph, callable_id: str) -> list[str]:
+def find_exception_exit_eis(cfg: nx.MultiDiGraph, callable_id: str) -> list[str]:
     exits: list[str] = []
     for node_id, node_data in cfg.nodes(data=True):
         if not is_execution_instance_node(node_data):
@@ -834,7 +817,7 @@ def find_exception_exit_eis(cfg: nx.DiGraph, callable_id: str) -> list[str]:
     return sorted(exits, key=_ei_sort_key)
 
 
-def has_incoming_callable_call_edges(cfg: nx.DiGraph, callable_id: str) -> bool:
+def has_incoming_callable_call_edges(cfg: nx.MultiDiGraph, callable_id: str) -> bool:
     entry = find_entry_ei(cfg, callable_id)
     if not entry:
         return False
@@ -851,7 +834,7 @@ def has_incoming_callable_call_edges(cfg: nx.DiGraph, callable_id: str) -> bool:
 
 
 def find_first_failed_recorded_hop(
-    cfg: nx.DiGraph,
+    cfg: nx.MultiDiGraph,
     start_node: str,
     target_node: str,
     recorded_path: list[str],
@@ -885,7 +868,7 @@ def find_first_failed_recorded_hop(
 
 
 def path_contains_recorded_execution_path(
-    cfg: nx.DiGraph,
+    cfg: nx.MultiDiGraph,
     start_node: str,
     target_node: str,
     recorded_path: list[str],
@@ -910,7 +893,7 @@ def path_contains_recorded_execution_path(
     return True
 
 
-def check_callable_integrity(cfg: nx.DiGraph, callable_id: str) -> dict[str, Any]:
+def check_callable_integrity(cfg: nx.MultiDiGraph, callable_id: str) -> dict[str, Any]:
     entry = find_entry_ei(cfg, callable_id)
     if not entry:
         return {"callable_id": callable_id, "valid": False, "issue": "no_entry_ei"}
@@ -1005,7 +988,7 @@ def low_signal_category(
 
 
 def check_return_edges(
-    cfg: nx.DiGraph,
+    cfg: nx.MultiDiGraph,
     callable_id: str,
     inventory_info: dict[str, Any] | None,
     callable_info: dict[str, Any],
@@ -1084,7 +1067,7 @@ def check_return_edges(
     }
 
 
-def check_call_coverage(cfg: nx.DiGraph, callable_id: str) -> dict[str, Any]:
+def check_call_coverage(cfg: nx.MultiDiGraph, callable_id: str) -> dict[str, Any]:
     entry = find_entry_ei(cfg, callable_id)
 
     target_nodes: list[str] = []
@@ -1148,7 +1131,7 @@ def check_call_coverage(cfg: nx.DiGraph, callable_id: str) -> dict[str, Any]:
 
 
 def check_execution_paths(
-    cfg: nx.DiGraph,
+    cfg: nx.MultiDiGraph,
     inventory_index: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     failures: list[dict[str, Any]] = []
@@ -1205,7 +1188,7 @@ def check_execution_paths(
 
 
 def diagnose_all_callables(
-    cfg: nx.DiGraph,
+    cfg: nx.MultiDiGraph,
     inventory_index: dict[str, dict[str, Any]],
     config: CheckerConfig,
 ) -> list[dict[str, Any]]:
@@ -1258,7 +1241,7 @@ def diagnose_all_callables(
     return results
 
 
-def analyze_broken_callable(cfg: nx.DiGraph, callable_id: str) -> dict[str, Any]:
+def analyze_broken_callable(cfg: nx.MultiDiGraph, callable_id: str) -> dict[str, Any]:
     entry = find_entry_ei(cfg, callable_id)
     success_exits = find_success_exit_eis(cfg, callable_id)
     exception_exits = find_exception_exit_eis(cfg, callable_id)
@@ -1311,7 +1294,7 @@ def analyze_broken_callable(cfg: nx.DiGraph, callable_id: str) -> dict[str, Any]
     }
 
 
-def diagnose_callable_detail(cfg: nx.DiGraph, callable_id: str) -> dict[str, Any]:
+def diagnose_callable_detail(cfg: nx.MultiDiGraph, callable_id: str) -> dict[str, Any]:
     callable_nodes = []
     for node_id, node_data in cfg.nodes(data=True):
         if not is_execution_instance_node(node_data):
@@ -1726,7 +1709,7 @@ def section_match(item: dict[str, Any], include_when: dict[str, Any]) -> bool:
 
 
 def build_section_payloads(
-    cfg: nx.DiGraph,
+    cfg: nx.MultiDiGraph,
     results: list[dict[str, Any]],
     config: CheckerConfig,
     private_helper_items: list[dict[str, Any]],
@@ -1894,7 +1877,7 @@ def render_console_summary(
             )
 
 
-def analyze_edge_type_counts(cfg: nx.DiGraph) -> dict[str, Any]:
+def analyze_edge_type_counts(cfg: nx.MultiDiGraph) -> dict[str, Any]:
     counts: Counter[str] = Counter()
 
     for _, _, edge_data in cfg.edges(data=True):
@@ -1909,7 +1892,7 @@ def analyze_edge_type_counts(cfg: nx.DiGraph) -> dict[str, Any]:
     }
 
 
-def analyze_control_flow_route_coverage(cfg: nx.DiGraph) -> dict[str, Any]:
+def analyze_control_flow_route_coverage(cfg: nx.MultiDiGraph) -> dict[str, Any]:
     contained_eis_by_region_node: dict[Hashable, set[Hashable]] = {}
 
     for src, dst, edge_data in cfg.edges(data=True):
@@ -2007,7 +1990,7 @@ def analyze_control_flow_route_coverage(cfg: nx.DiGraph) -> dict[str, Any]:
 
 
 def build_analysis_registry(
-    cfg: nx.DiGraph,
+    cfg: nx.MultiDiGraph,
     results: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
     return {
@@ -2078,7 +2061,7 @@ def print_analysis_payload(section: dict[str, Any]) -> None:
 
 
 def build_structural_health_report(
-    cfg: nx.DiGraph,
+    cfg: nx.MultiDiGraph,
     results: list[dict[str, Any]],
 ) -> dict[str, Any]:
     ei_validation = validate_ei_ids(cfg)
@@ -2161,8 +2144,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     print(f"Loading CFG from {args.cfg}...")
-    cfg = load_cfg(args.cfg)
-    print(f"  {cfg.number_of_nodes()} nodes, {cfg.number_of_edges()} edges")
+    graphs = load_graph(args.cfg)
+    if graphs is None:
+        raise ValueError(f"Failed to load CFG from {args.cfg}")
+
+    print(
+        f"  {graphs.cfg.number_of_nodes()} nodes, {graphs.cfg.number_of_edges()} edges"
+    )
 
     if not args.inventories_root.exists():
         print(
@@ -2190,14 +2178,14 @@ def main(argv: list[str] | None = None) -> int:
     inventory_index = index_inventory_execution_paths(inventory_paths)
 
     print("Running diagnostics...")
-    results = diagnose_all_callables(cfg, inventory_index, checker_config)
-    path_check = check_execution_paths(cfg, inventory_index)
+    results = diagnose_all_callables(graphs.cfg, inventory_index, checker_config)
+    path_check = check_execution_paths(graphs.cfg, inventory_index)
     private_helper_items = build_private_helper_suspect_items(results, inventory_index)
     same_unit_reference_items = build_same_unit_reference_suspect_items(
         results, inventory_index
     )
     section_payloads = build_section_payloads(
-        cfg,
+        graphs.cfg,
         results,
         checker_config,
         private_helper_items,
@@ -2224,11 +2212,11 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     if args.callable_id:
-        detail = diagnose_callable_detail(cfg, args.callable_id)
+        detail = diagnose_callable_detail(graphs.cfg, args.callable_id)
         print_callable_detail(detail)
 
     if args.broken_callable_id:
-        broken_detail = analyze_broken_callable(cfg, args.broken_callable_id)
+        broken_detail = analyze_broken_callable(graphs.cfg, args.broken_callable_id)
         print("\n=== Broken Callable Analysis ===")
         print(
             yaml.dump(
@@ -2237,8 +2225,8 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     if args.write_report:
-        edge_type_counts = analyze_edge_type_counts(cfg)
-        control_flow_route_coverage = analyze_control_flow_route_coverage(cfg)
+        edge_type_counts = analyze_edge_type_counts(graphs.cfg)
+        control_flow_route_coverage = analyze_control_flow_route_coverage(graphs.cfg)
 
         report = {
             "summary": {
@@ -2246,9 +2234,9 @@ def main(argv: list[str] | None = None) -> int:
                 "broken_callables": len([r for r in results if r["is_broken"]]),
                 "execution_paths_checked": path_check["checked_paths"],
                 "execution_path_failures": path_check["failure_count"],
-                "graph_nodes": cfg.number_of_nodes(),
-                "graph_edges": cfg.number_of_edges(),
-                "graph_is_multigraph": cfg.is_multigraph(),
+                "graph_nodes": graphs.cfg.number_of_nodes(),
+                "graph_edges": graphs.cfg.number_of_edges(),
+                "graph_is_multigraph": graphs.cfg.is_multigraph(),
                 "control_routes_missing_derived_ei_with_source_eis": (
                     control_flow_route_coverage[
                         "missing_derived_routes_with_source_execution_items_count"

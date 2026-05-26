@@ -5,13 +5,15 @@ from typing import Any
 
 import networkx as nx
 import pytest
+
 from pybastion_integration.stages import stage1_build_call_graph as graph_builder
+from pybastion_integration.utils.inventory_index import CallableContext
 
 pytestmark = pytest.mark.integration
 
 
 @dataclass
-class FakeCallableContext:
+class FakeCallableContext(CallableContext):
     callable_id: str = "callable:fixture"
     callable_name: str = "fixture"
     callable_kind: str = "function"
@@ -19,6 +21,7 @@ class FakeCallableContext:
     unit_name: str = "synthetic"
     unit_fqn: str = "synthetic"
     entry: dict[str, Any] = field(default_factory=dict)
+    execution_items: list[dict[str, Any]] = field(default_factory=list)
     integration_by_ei: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
 
@@ -26,7 +29,7 @@ def make_context(
     execution_items: list[dict[str, Any]],
     *,
     control_flow: dict[str, Any] | None = None,
-) -> FakeCallableContext:
+) -> CallableContext:
     return FakeCallableContext(
         entry={
             "analysis_info": {
@@ -37,28 +40,31 @@ def make_context(
     )
 
 
-def edge_types(cfg: nx.DiGraph) -> set[str]:
-    return {data.get("edge_type") for _, _, data in cfg.edges(data=True)}
+def edge_types(cfg: nx.MultiDiGraph) -> set[str]:
+    return {
+        data["edge_type"]
+        for _source, _target, _key, data in cfg.edges(keys=True, data=True)
+        if "edge_type" in data
+    }
 
 
 def edges_by_type(
-    cfg: nx.DiGraph, edge_type: str
+    cfg: nx.MultiDiGraph, edge_type: str
 ) -> list[tuple[str, str, dict[str, Any]]]:
     return [
-        (source, target, data)
+        (str(source), str(target), data)
         for source, target, data in cfg.edges(data=True)
         if data.get("edge_type") == edge_type
     ]
 
 
 def test_context_execution_items_reads_current_stage3_field_only() -> None:
-    context = make_context(
-        [
-            {"id": "fixture_E0001", "stmt_type": "assign"},
-            "not-an-execution-item",
-            {"id": "fixture_E0002", "stmt_type": "return"},
-        ]
-    )
+    eis: list[Any] = [
+        {"id": "fixture_E0001", "stmt_type": "assign"},
+        "not-an-execution-item",
+        {"id": "fixture_E0002", "stmt_type": "return"},
+    ]
+    context = make_context(eis)
 
     assert graph_builder.context_execution_items(context) == [
         {"id": "fixture_E0001", "stmt_type": "assign"},
@@ -95,7 +101,7 @@ def test_add_explicit_within_callable_edges_diagnostic_mode_keeps_inventory_fiel
             }
         ]
     )
-    cfg = nx.DiGraph()
+    cfg = nx.MultiDiGraph()
 
     graph_builder.add_explicit_within_callable_edges(
         cfg,
@@ -147,7 +153,7 @@ def test_add_explicit_within_callable_edges_skips_modeled_call_sites_in_both_mod
     )
 
     for diagnostic_only in (False, True):
-        cfg = nx.DiGraph()
+        cfg = nx.MultiDiGraph()
         graph_builder.add_explicit_within_callable_edges(
             cfg,
             context,
@@ -208,7 +214,7 @@ def test_add_control_flow_nodes_and_edges_adds_region_policy_and_route_layer() -
             ],
         },
     )
-    cfg = nx.DiGraph()
+    cfg = nx.MultiDiGraph()
 
     graph_builder.add_callable_container_node(cfg, context)
     graph_builder.add_control_flow_nodes_and_edges(cfg, context)
@@ -271,7 +277,7 @@ def test_control_route_target_line_resolves_to_execution_item() -> None:
         },
     )
 
-    cfg = nx.DiGraph()
+    cfg = nx.MultiDiGraph()
 
     graph_builder.add_callable_container_node(cfg, context)
     graph_builder.add_callable_nodes(cfg, context)
@@ -284,7 +290,7 @@ def test_control_route_target_line_resolves_to_execution_item() -> None:
 
     assert cfg.has_edge(source_node, "unit.fn_E0002")
 
-    edge_data = cfg.get_edge_data(source_node, "unit.fn_E0002")
+    edge_data = next(iter(cfg.get_edge_data(source_node, "unit.fn_E0002").values()))
     assert edge_data["edge_type"] == "control_route"
     assert edge_data["route_id"] == "try:10:route:resume_after_finally"
     assert edge_data["resolved_target_kind"] == "execution_item"
@@ -333,7 +339,7 @@ def test_control_route_target_line_falls_back_to_line_placeholder_when_no_execut
         },
     )
 
-    cfg = nx.DiGraph()
+    cfg = nx.MultiDiGraph()
 
     graph_builder.add_callable_container_node(cfg, context)
     graph_builder.add_callable_nodes(cfg, context)
@@ -355,7 +361,7 @@ def test_control_route_target_line_falls_back_to_line_placeholder_when_no_execut
     target_node = line_target_nodes[0]
     assert cfg.has_edge(source_node, target_node)
 
-    edge_data = cfg.get_edge_data(source_node, target_node)
+    edge_data = next(iter(cfg.get_edge_data(source_node, target_node).values()))
     assert edge_data["edge_type"] == "control_route"
     assert edge_data["route_id"] == "try:10:route:resume_after_finally"
     assert edge_data["resolved_target_kind"] == "line_placeholder"
@@ -389,7 +395,7 @@ def test_control_region_links_to_execution_items_in_line_range() -> None:
         },
     )
 
-    cfg = nx.DiGraph()
+    cfg = nx.MultiDiGraph()
 
     graph_builder.add_callable_container_node(cfg, context)
     graph_builder.add_callable_nodes(cfg, context)
@@ -405,13 +411,17 @@ def test_control_region_links_to_execution_items_in_line_range() -> None:
     assert not cfg.has_edge(region_node, "unit.fn_E0003")
 
     assert (
-        cfg.get_edge_data(region_node, "unit.fn_E0001")["edge_type"]
+        next(iter(cfg.get_edge_data(region_node, "unit.fn_E0001").values()))[
+            "edge_type"
+        ]
         == "control_region_contains_execution_item"
     )
 
     assert cfg.has_edge("unit.fn_E0001", region_node)
     assert (
-        cfg.get_edge_data("unit.fn_E0001", region_node)["edge_type"]
+        next(iter(cfg.get_edge_data("unit.fn_E0001", region_node).values()))[
+            "edge_type"
+        ]
         == "execution_item_in_control_region"
     )
 
@@ -453,7 +463,7 @@ def test_region_to_region_control_route_adds_derived_execution_item_edge() -> No
         },
     )
 
-    cfg = nx.DiGraph()
+    cfg = nx.MultiDiGraph()
 
     graph_builder.add_callable_container_node(cfg, context)
     graph_builder.add_callable_nodes(cfg, context)
@@ -461,7 +471,7 @@ def test_region_to_region_control_route_adds_derived_execution_item_edge() -> No
 
     assert cfg.has_edge("unit.fn_E0001", "unit.fn_E0002")
 
-    edge_data = cfg.get_edge_data("unit.fn_E0001", "unit.fn_E0002")
+    edge_data = next(iter(cfg.get_edge_data("unit.fn_E0001", "unit.fn_E0002").values()))
     assert edge_data["edge_type"] == "derived_control_route_execution_item"
     assert edge_data["route_id"] == "if:10:route:true"
     assert edge_data["route_kind"] == "conditional_true"
@@ -500,7 +510,7 @@ def test_target_line_control_route_adds_derived_execution_item_edge() -> None:
         },
     )
 
-    cfg = nx.DiGraph()
+    cfg = nx.MultiDiGraph()
 
     graph_builder.add_callable_container_node(cfg, context)
     graph_builder.add_callable_nodes(cfg, context)
@@ -508,7 +518,7 @@ def test_target_line_control_route_adds_derived_execution_item_edge() -> None:
 
     assert cfg.has_edge("unit.fn_E0001", "unit.fn_E0002")
 
-    edge_data = cfg.get_edge_data("unit.fn_E0001", "unit.fn_E0002")
+    edge_data = next(iter(cfg.get_edge_data("unit.fn_E0001", "unit.fn_E0002").values()))
     assert edge_data["edge_type"] == "derived_control_route_execution_item"
     assert edge_data["route_id"] == "try:10:route:resume_after_finally"
     assert edge_data["route_kind"] == "resume_prior_outcome"
@@ -546,7 +556,7 @@ def test_terminal_control_route_adds_derived_execution_item_terminal_edge() -> N
         },
     )
 
-    cfg = nx.DiGraph()
+    cfg = nx.MultiDiGraph()
 
     graph_builder.add_callable_container_node(cfg, context)
     graph_builder.add_callable_nodes(cfg, context)
@@ -564,7 +574,7 @@ def test_terminal_control_route_adds_derived_execution_item_terminal_edge() -> N
 
     assert cfg.has_edge("unit.fn_E0001", terminal_node)
 
-    edge_data = cfg.get_edge_data("unit.fn_E0001", terminal_node)
+    edge_data = next(iter(cfg.get_edge_data("unit.fn_E0001", terminal_node).values()))
     assert edge_data["edge_type"] == "derived_control_route_execution_item_terminal"
     assert edge_data["route_id"] == "with:10:route:return"
     assert edge_data["route_kind"] == "function_return"
@@ -636,7 +646,7 @@ def test_every_control_route_with_source_execution_items_gets_derived_execution_
         },
     )
 
-    cfg = nx.DiGraph()
+    cfg = nx.MultiDiGraph()
 
     graph_builder.add_callable_container_node(cfg, context)
     graph_builder.add_callable_nodes(cfg, context)
