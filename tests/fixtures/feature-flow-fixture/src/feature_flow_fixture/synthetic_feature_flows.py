@@ -64,6 +64,11 @@ def finish(value: str) -> dict[str, str]:
     }
 
 
+################################################################################
+##  Flow tests: if/elif/else
+################################################################################
+
+
 def synthetic_branch_multiply_feature(raw: str) -> dict[str, str]:
     # :: FeatureStart | name=synthetic_branch_multiply
     value = normalize_input(raw)
@@ -121,6 +126,335 @@ def synthetic_nested_branch_feature(raw: str) -> dict[str, str]:
 
     # :: FeatureEnd | name=synthetic_nested_branch
     return finish(converged)
+
+
+################################################################################
+##  Flow tests: match
+################################################################################
+
+
+def synthetic_match_feature(value: str) -> dict[str, str]:
+    # :: FeatureStart | name=synthetic_match
+    normalized = normalize_input(value)
+
+    match normalized:
+        # :: FeatureBranch | name=synthetic_match | branch=alpha
+        case "alpha":
+            result = handle_a(normalized)
+        # :: FeatureBranch | name=synthetic_match | branch=betaish
+        case "beta" | "bravo":
+            result = handle_b(normalized)
+        # :: FeatureBranch | name=synthetic_match | branch=guarded_x
+        case other if other.startswith("x"):
+            result = handle_c(other)
+        # :: FeatureBranch | name=synthetic_match | branch=default
+        case _:
+            result = handle_d(normalized)
+
+    # :: FeatureConverge | name=synthetic_match | branches=alpha,betaish,guarded_x,default | into=main
+    converged = f"match:{result}"
+
+    # :: FeatureEnd | name=synthetic_match
+    return finish(converged)
+
+
+################################################################################
+##  Flow tests: loop completion and disruption
+################################################################################
+
+
+def synthetic_for_loop_feature(values: list[str]) -> dict[str, str]:
+    # :: FeatureStart | name=synthetic_for_loop
+    result = "empty"
+
+    # :: FeatureBranch | name=synthetic_for_loop | branch=loop_body | control_polarity=true
+    # :: FeatureBranch | name=synthetic_for_loop | branch=loop_else | control_polarity=false
+    for value in values:
+        # :: FeatureBranch | name=synthetic_for_loop | branch=loop_break | control_polarity=true
+        # :: FeatureBranch | name=synthetic_for_loop | branch=not_break | control_polarity=false
+        if value == "stop":
+            result = "stopped"
+            break
+
+        # :: FeatureBranch | name=synthetic_for_loop | branch=loop_continue | control_polarity=true
+        # :: FeatureBranch | name=synthetic_for_loop | branch=loop_consume | control_polarity=false
+        if value == "skip":
+            result = "skipped"
+            continue
+
+        result = f"seen:{value}"
+    else:
+        result = "completed"
+
+    # :: FeatureConverge | name=synthetic_for_loop | branches=loop_break,loop_continue,loop_consume,loop_else | into=main
+    converged = f"for:{result}"
+
+    # :: FeatureEnd | name=synthetic_for_loop
+    return finish(converged)
+
+
+def synthetic_while_loop_feature(limit: int) -> dict[str, str]:
+    # :: FeatureStart | name=synthetic_while_loop
+    count = 0
+    result = "initial"
+
+    # :: FeatureBranch | name=synthetic_while_loop | branch=loop_body | control_polarity=true
+    # :: FeatureBranch | name=synthetic_while_loop | branch=loop_else | control_polarity=false
+    while count < limit:
+        count += 1
+
+        # :: FeatureBranch | name=synthetic_while_loop | branch=loop_continue | control_polarity=true
+        # :: FeatureBranch | name=synthetic_while_loop | branch=not_continue | control_polarity=false
+        if count == 2:
+            result = "continued"
+            continue
+
+        # :: FeatureBranch | name=synthetic_while_loop | branch=loop_break | control_polarity=true
+        # :: FeatureBranch | name=synthetic_while_loop | branch=loop_consume | control_polarity=false
+        if count == 4:
+            result = "stopped"
+            break
+
+        result = f"seen:{count}"
+    else:
+        result = "exhausted"
+
+    # :: FeatureConverge | name=synthetic_while_loop | branches=loop_continue,loop_break,loop_consume,loop_else | into=main
+    converged = f"while:{result}"
+
+    # :: FeatureEnd | name=synthetic_while_loop
+    return finish(converged)
+
+
+def synthetic_nested_loop_feature(values: list[list[int]]) -> dict[str, str]:
+    # :: FeatureStart | name=synthetic_nested_loop
+    total = 0
+
+    # :: FeatureBranch | name=synthetic_nested_loop | branch=outer_body | control_polarity=true
+    # :: FeatureBranch | name=synthetic_nested_loop | branch=outer_empty | control_polarity=false
+    for row in values:
+        # :: FeatureBranch | name=synthetic_nested_loop | branch=inner_body | control_polarity=true
+        # :: FeatureBranch | name=synthetic_nested_loop | branch=inner_empty | control_polarity=false
+        for item in row:
+            # :: FeatureBranch | name=synthetic_nested_loop | branch=inner_continue | control_polarity=true
+            # :: FeatureBranch | name=synthetic_nested_loop | branch=not_inner_continue | control_polarity=false
+            if item < 0:
+                continue
+
+            # :: FeatureBranch | name=synthetic_nested_loop | branch=inner_break | control_polarity=true
+            # :: FeatureBranch | name=synthetic_nested_loop | branch=inner_consume | control_polarity=false
+            if item == 0:
+                break
+
+            total += item
+
+        # :: FeatureConverge | name=synthetic_nested_loop | branches=inner_continue,inner_break,inner_consume,inner_empty | into=outer_body
+        total += 100
+
+    # :: FeatureConverge | name=synthetic_nested_loop | branches=outer_body,outer_empty | into=main
+    converged = f"nested-loop:{total}"
+
+    # :: FeatureEnd | name=synthetic_nested_loop
+    return finish(converged)
+
+
+################################################################################
+##  Flow tests: Try / except / else / finally
+################################################################################
+
+
+def synthetic_try_except_else_finally_feature(value: str) -> dict[str, str]:
+    # :: FeatureStart | name=synthetic_try_except_else_finally
+    result = "unset"
+
+    try:
+        # :: FeatureBranch | name=synthetic_try_except_else_finally | branch=try_body
+        normalized = value.strip()
+
+        # :: FeatureBranch | name=synthetic_try_except_else_finally | branch=direct_value | control_polarity=true
+        # :: FeatureBranch | name=synthetic_try_except_else_finally | branch=parse_attempt | control_polarity=false
+        if normalized == "value":
+            result = "direct-value"
+        else:
+            parsed = int(normalized)
+            result = f"parsed:{parsed}"
+
+    except ValueError:
+        # :: FeatureBranch | name=synthetic_try_except_else_finally | branch=value_error
+        result = "value-error"
+
+    except TypeError:
+        # :: FeatureBranch | name=synthetic_try_except_else_finally | branch=type_error
+        result = "type-error"
+
+    else:
+        # :: FeatureBranch | name=synthetic_try_except_else_finally | branch=try_else
+        result = f"else:{result}"
+
+    finally:
+        # :: FeatureTrace | name=synthetic_try_except_else_finally
+        result = f"finally:{result}"
+
+    # :: FeatureConverge | name=synthetic_try_except_else_finally | branches=try_body,direct_value,parse_attempt,value_error,type_error,try_else | into=main
+    converged = f"try:{result}"
+
+    # :: FeatureEnd | name=synthetic_try_except_else_finally
+    return finish(converged)
+
+
+def synthetic_try_finally_resume_feature(value: int) -> dict[str, str]:
+    # :: FeatureStart | name=synthetic_try_finally_resume
+    result = value
+
+    # :: FeatureBranch | name=synthetic_try_finally_resume | branch=try_body
+    try:
+        result += 1
+
+    finally:
+        # :: FeatureTrace | name=synthetic_try_finally_resume
+        result += 10
+
+    # :: FeatureConverge | name=synthetic_try_finally_resume | branches=try_body | into=main
+    result += 100
+
+    # :: FeatureEnd | name=synthetic_try_finally_resume
+    return finish(str(result))
+
+
+def synthetic_try_direct_disruption_feature(value: int) -> dict[str, str]:
+    # :: FeatureStart | name=synthetic_try_direct_disruption
+    result = "unset"
+
+    try:
+        # :: FeatureBranch | name=synthetic_try_direct_disruption | branch=zero | control_polarity=true
+        # :: FeatureBranch | name=synthetic_try_direct_disruption | branch=nonzero | control_polarity=false
+        if value == 0:
+            raise ValueError("zero")
+
+        result = f"value:{value}"
+
+    except ValueError:
+        # :: FeatureBranch | name=synthetic_try_direct_disruption | branch=value_error
+        result = "wrapped"
+
+    finally:
+        # :: FeatureTrace | name=synthetic_try_direct_disruption
+        result = f"finally:{result}"
+
+    # :: FeatureConverge | name=synthetic_try_direct_disruption | branches=zero,nonzero,value_error | into=main
+    converged = f"try-direct:{result}"
+
+    # :: FeatureEnd | name=synthetic_try_direct_disruption
+    return finish(converged)
+
+
+################################################################################
+##  Flow tests: With + disruption
+################################################################################
+
+
+def synthetic_with_feature(path: str) -> dict[str, str]:
+    # :: FeatureStart | name=synthetic_with
+    handle: BufferedReader
+
+    # :: FeatureTrace | name=synthetic_with
+    with open(path, encoding="utf-8") as handle:
+        # :: FeatureBranch | name=synthetic_with | branch=with_body
+        content = handle.read()
+
+    # :: FeatureBranch | name=synthetic_with | branch=has_content | control_polarity=true
+    # :: FeatureBranch | name=synthetic_with | branch=empty | control_polarity=false
+    if content:
+        result = "has-content"
+    else:
+        result = "empty"
+
+    # :: FeatureConverge | name=synthetic_with | branches=with_body,has_content,empty | into=main
+    converged = f"with:{result}"
+
+    # :: FeatureEnd | name=synthetic_with
+    return finish(converged)
+
+
+def synthetic_with_disruption_feature(path, mode: str) -> dict[str, str]:
+    # :: FeatureStart | name=synthetic_with_disruption
+    handle: BufferedReader
+    result = "unset"
+
+    # :: FeatureBranch | name=synthetic_with_disruption | branch=raise_mode | control_polarity=true
+    # :: FeatureBranch | name=synthetic_with_disruption | branch=read_mode | control_polarity=false
+    if mode == "raise":
+        try:
+            # :: FeatureTrace | name=synthetic_with_disruption
+            with path.open("r") as handle:
+                # :: FeatureBranch | name=synthetic_with_disruption | branch=with_raise_body
+                handle.read()
+                raise RuntimeError("forced failure")
+
+        except RuntimeError:
+            # :: FeatureBranch | name=synthetic_with_disruption | branch=runtime_error
+            result = "raised"
+
+    else:
+        # :: FeatureTrace | name=synthetic_with_disruption
+        with path.open("r") as handle:
+            # :: FeatureBranch | name=synthetic_with_disruption | branch=with_read_body
+            result = handle.read()
+
+    # :: FeatureConverge | name=synthetic_with_disruption | branches=raise_mode,read_mode,with_raise_body,runtime_error,with_read_body | into=main
+    converged = f"with-disruption:{result}"
+
+    # :: FeatureEnd | name=synthetic_with_disruption
+    return finish(converged)
+
+
+def synthetic_with_loop_disruption_feature(values: list[str], path) -> dict[str, str]:
+    # :: FeatureStart | name=synthetic_with_loop_disruption
+    total = 0
+    handle: BufferedReader
+
+    for value in values:
+        # :: FeatureTrace | name=synthetic_with_loop_disruption
+        with path.open("r") as handle:
+            # :: FeatureBranch | name=synthetic_with_loop_disruption | branch=with_body
+            handle.read()
+
+            # :: FeatureBranch | name=synthetic_with_loop_disruption | branch=loop_continue | control_polarity=true
+            # :: FeatureBranch | name=synthetic_with_loop_disruption | branch=not_continue | control_polarity=false
+            if value == "skip":
+                continue
+
+            # :: FeatureBranch | name=synthetic_with_loop_disruption | branch=loop_break | control_polarity=true
+            # :: FeatureBranch | name=synthetic_with_loop_disruption | branch=loop_consume | control_polarity=false
+            if value == "stop":
+                break
+
+            total += 1
+
+    # :: FeatureConverge | name=synthetic_with_loop_disruption | branches=with_body,loop_continue,not_continue,loop_break,loop_consume | into=main
+    converged = f"with-loop:{total}"
+
+    # :: FeatureEnd | name=synthetic_with_loop_disruption
+    return finish(converged)
+
+
+################################################################################
+##  Flow tests: interunit call
+################################################################################
+
+
+def synthetic_interunit_call_feature(
+    dependency: SyntheticDependency,
+    value: str,
+) -> dict[str, str]:
+    # :: FeatureStart | name=synthetic_interunit_call
+    normalized = normalize_input(value)
+
+    # :: FeatureTrace | name=synthetic_interunit_call | operation=dependency_transform
+    transformed = dependency.transform(normalized)
+
+    # :: FeatureEnd | name=synthetic_interunit_call
+    return finish(transformed)
 
 
 ################################################################################
