@@ -39,5 +39,5 @@ pybastion-integration = "pybastion_integration.cli:main"
 module-root = ""
 
 [build-system]
-requires = ["uv_build"]
+requires = ["uv_build>=0.11.20,<0.12"]
 build-backend = "uv_build"
