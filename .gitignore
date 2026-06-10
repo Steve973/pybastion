@@ -17,6 +17,9 @@ dist/
 build/
 *.egg-info/
 
+# uv
+uv.lock
+
 # Ruff
 .ruff_cache/
 

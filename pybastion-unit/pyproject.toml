@@ -22,33 +22,28 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Testing",
-    "Topic :: Software Development :: Quality Assurance"
+    "Topic :: Software Development :: Quality Assurance",
 ]
 
-[tool.poetry]
-packages = [
-    { include = "pybastion_unit" },
-    { include = "pybastion_common", from = "../pybastion-common" }
+dependencies = [
+    "pybastion-common",
+    "pyyaml",
+    "radon",
+    "vulture",
+    "z3-solver",
 ]
 
-[tool.poetry.dependencies]
-python = ">=3.11,<4.0"
-pybastion-common = { path = "../pybastion-common", develop = true }
-mypy = ">=1.19.1"
-pyyaml = ">=6.0.3"
-radon = ">=6.0.1"
-vulture = ">=2.14"
-z3-solver = ">=4.15.8.0"
+[dependency-groups]
+dev = [
+    "mypy",
+]
 
-[tool.poetry-monoranger-plugin]
-enabled = true
-
-[tool.poetry.group.dev.dependencies]
-pytest = ">=8.0.0"
-
-[tool.poetry.scripts]
+[project.scripts]
 pybastion-unit = "pybastion_unit.cli:main"
 
+[tool.uv.build-backend]
+module-root = ""
+
 [build-system]
-requires = ["poetry-core>=2.4.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["uv_build"]
+build-backend = "uv_build"

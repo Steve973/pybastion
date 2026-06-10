@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -46,6 +46,7 @@ CONTROL_STMT_TYPES: set[str] = {
     "AsyncFor",
     "While",
     "Match",
+    "Try",
 }
 
 CONTROL_CONSTRAINT_TYPES: set[str] = {
@@ -59,6 +60,16 @@ TERMINAL_VIA_VALUES: set[str] = {
     "implicit-return",
     "raise",
     "exception",
+}
+
+TERMINAL_REPRESENTATIVE_ROUTE_KINDS: set[str] = {
+    "loop_continue",
+    "loop_break",
+}
+
+TERMINAL_REPRESENTATIVE_EXIT_KINDS: set[str] = {
+    "continue",
+    "break",
 }
 
 
@@ -451,10 +462,220 @@ def add_unique_text(target: list[str], value: Any) -> None:
         target.append(text)
 
 
+def normalize_branch_name(value: Any) -> str:
+    return "".join(ch.lower() for ch in str(value or "") if ch.isalnum())
+
+
+def try_success_branch_name(value: Any) -> bool:
+    normalized = normalize_branch_name(value)
+    return normalized in {
+        "trysuccess",
+        "success",
+        "normal",
+        "normalcompletion",
+        "trynormal",
+    }
+
+
+def text_mentions_branch(text: Any, branch: Any) -> bool:
+    normalized_text = normalize_branch_name(text)
+    normalized_branch = normalize_branch_name(branch)
+
+    if not normalized_text or not normalized_branch:
+        return False
+
+    if normalized_branch in normalized_text:
+        return True
+
+    if normalized_branch.endswith("error"):
+        exception_name = normalized_branch.removesuffix("error") + "error"
+        return exception_name in normalized_text
+
+    return False
+
+
+def derive_try_branch_targets(
+    *,
+    branch: Any,
+    marked_statement: MarkedStatementMetadata,
+) -> tuple[list[str], list[str]]:
+    selected_target_eis: list[str] = []
+    selected_conditions: list[str] = []
+
+    for control_ei in marked_statement.control_eis:
+        if control_ei.stmt_type != "Try":
+            continue
+
+        if try_success_branch_name(branch):
+            statement_outcome = control_ei.statement_outcome or {}
+            target_ei = statement_outcome.get("target_ei")
+
+            if target_ei is not None:
+                add_unique_text(selected_target_eis, target_ei)
+                add_unique_text(
+                    selected_conditions,
+                    control_ei.condition
+                    or control_ei.description
+                    or statement_outcome.get("outcome")
+                    or "try_success",
+                )
+
+            continue
+
+        for outcome in control_ei.disruptive_outcomes:
+            outcome_text = " ".join(
+                str(item)
+                for item in [
+                    control_ei.condition,
+                    control_ei.description,
+                    outcome.get("outcome"),
+                    outcome.get("exception_type"),
+                    outcome.get("handler_type"),
+                ]
+                if item
+            )
+
+            if not text_mentions_branch(outcome_text, branch):
+                continue
+
+            add_unique_text(selected_target_eis, outcome.get("target_ei"))
+            add_unique_text(selected_conditions, outcome_text)
+
+    return selected_target_eis, selected_conditions
+
+
+def control_route_owner_id(control_ei: EiExecutionMetadata) -> str | None:
+    if control_ei.line is None or control_ei.stmt_type is None:
+        return None
+
+    stmt_type = control_ei.stmt_type.lower()
+    return f"{stmt_type}:{control_ei.line}"
+
+
+def ei_id_for_route_target_line(
+    *,
+    execution_items: list[dict[str, Any]],
+    target_line: Any,
+) -> str | None:
+    if target_line is None:
+        return None
+
+    try:
+        line = int(target_line)
+    except (TypeError, ValueError):
+        return None
+
+    candidates = [
+        item for item in execution_items if item.get("line") == line and item.get("id")
+    ]
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: parse_ei_sort_key(str(item.get("id"))))
+
+    # Route target lines frequently point to a feature marker anchor.  Preserve
+    # that anchor so Stage 4 can consume the convergence/branch event instead
+    # of jumping past it to the executable statement on the same line.
+    for item in candidates:
+        if item.get("stmt_type") == "StatementAnchor":
+            return str(item.get("id"))
+
+    return str(candidates[0].get("id"))
+
+
+def route_mentions_branch(route: dict[str, Any], branch: Any) -> bool:
+    metadata = route.get("metadata") or {}
+    route_text = " ".join(
+        str(item)
+        for item in [
+            route.get("condition"),
+            route.get("kind"),
+            metadata.get("handler_expr"),
+            metadata.get("handler_type"),
+        ]
+        if item
+    )
+    return text_mentions_branch(route_text, branch)
+
+
+def derive_route_branch_targets(
+    *,
+    branch: Any,
+    control_polarity: bool | None,
+    marked_statement: MarkedStatementMetadata,
+    control_flow_routes: list[dict[str, Any]],
+    execution_items: list[dict[str, Any]],
+) -> tuple[list[str], list[str]]:
+    selected_target_eis: list[str] = []
+    selected_conditions: list[str] = []
+
+    for control_ei in marked_statement.control_eis:
+        owner_id = control_route_owner_id(control_ei)
+        if owner_id is None:
+            continue
+
+        owner_routes = [
+            route for route in control_flow_routes if route.get("owner_id") == owner_id
+        ]
+
+        if control_ei.stmt_type == "Try":
+            if try_success_branch_name(branch):
+                # Prefer the first explicit Try EI successor because it enters
+                # the protected body and therefore preserves nested feature
+                # branches inside a successful try path.  Later same-line Try
+                # EIs model else/finally transfer points and must not become
+                # alternate branch starts.
+                statement_outcome = control_ei.statement_outcome or {}
+                target_ei = statement_outcome.get("target_ei")
+
+                if target_ei is not None:
+                    add_unique_text(selected_target_eis, target_ei)
+                    add_unique_text(
+                        selected_conditions,
+                        statement_outcome.get("outcome") or control_ei.description,
+                    )
+                    break
+
+            for route in owner_routes:
+                if route.get("kind") != "handler_match":
+                    continue
+
+                if not route_mentions_branch(route, branch):
+                    continue
+
+                target_ei = ei_id_for_route_target_line(
+                    execution_items=execution_items,
+                    target_line=route.get("target_line"),
+                )
+                add_unique_text(selected_target_eis, target_ei)
+                add_unique_text(selected_conditions, route.get("condition"))
+
+            continue
+
+        if control_polarity is None:
+            continue
+
+        for route in owner_routes:
+            if route.get("condition_result") != control_polarity:
+                continue
+
+            target_ei = ei_id_for_route_target_line(
+                execution_items=execution_items,
+                target_line=route.get("target_line"),
+            )
+            add_unique_text(selected_target_eis, target_ei)
+            add_unique_text(selected_conditions, route.get("condition"))
+
+    return selected_target_eis, selected_conditions
+
+
 def derive_feature_branch_selection(
     *,
     marker_kwargs: dict[str, Any],
     marked_statement: MarkedStatementMetadata | None,
+    control_flow_routes: list[dict[str, Any]],
+    execution_items: list[dict[str, Any]],
 ) -> FeatureBranchSelection | None:
     if marked_statement is None:
         return None
@@ -465,7 +686,27 @@ def derive_feature_branch_selection(
     selected_target_eis: list[str] = []
     selected_conditions: list[str] = []
 
-    if control_polarity is not None:
+    route_target_eis, route_conditions = derive_route_branch_targets(
+        branch=branch,
+        control_polarity=control_polarity,
+        marked_statement=marked_statement,
+        control_flow_routes=control_flow_routes,
+        execution_items=execution_items,
+    )
+
+    selected_target_eis.extend(route_target_eis)
+    selected_conditions.extend(route_conditions)
+
+    if not selected_target_eis:
+        try_target_eis, try_conditions = derive_try_branch_targets(
+            branch=branch,
+            marked_statement=marked_statement,
+        )
+
+        selected_target_eis.extend(try_target_eis)
+        selected_conditions.extend(try_conditions)
+
+    if not selected_target_eis and control_polarity is not None:
         for control_ei in marked_statement.control_eis:
             for target in control_ei.conditional_targets:
                 if target.get("condition_result") != control_polarity:
@@ -536,6 +777,11 @@ def iter_feature_marker_records_for_callable(
                 derive_feature_branch_selection(
                     marker_kwargs=kwargs,
                     marked_statement=marked_statement,
+                    control_flow_routes=(
+                        (analysis_info.get("control_flow") or {}).get("routes", [])
+                        or []
+                    ),
+                    execution_items=execution_items,
                 )
                 if marker_name == "FeatureBranch"
                 else None
@@ -745,6 +991,42 @@ def marker_callables_for_path(
     return result
 
 
+NAVIGATION_EDGE_TYPES: set[str] = {
+    "diagnostic_statement_outcome",
+    "diagnostic_conditional_target",
+    "derived_control_route_execution_item",
+    "derived_control_route_execution_item_terminal",
+    "call",
+    "return",
+}
+
+
+def has_navigation_edge(
+    cfg: nx.MultiDiGraph,
+    source: str,
+    target: str,
+) -> bool:
+    edge_data = cfg.get_edge_data(source, target)
+
+    if not edge_data:
+        return False
+
+    # MultiDiGraph returns a key->attrs mapping. DiGraph-like test doubles may
+    # return the attrs directly, so support both shapes.
+    if isinstance(edge_data, dict) and "edge_type" in edge_data:
+        return edge_data.get("edge_type") in NAVIGATION_EDGE_TYPES
+
+    if isinstance(edge_data, dict):
+        for attrs in edge_data.values():
+            if not isinstance(attrs, dict):
+                continue
+
+            if attrs.get("edge_type") in NAVIGATION_EDGE_TYPES:
+                return True
+
+    return False
+
+
 def graph_path_rejection_reason(
     cfg: nx.MultiDiGraph,
     path: list[str],
@@ -767,6 +1049,15 @@ def graph_path_rejection_reason(
     if missing_edges:
         return f"missing_edges={missing_edges}"
 
+    non_navigation_edges = [
+        (source, target)
+        for source, target in zip(path, path[1:])
+        if not has_navigation_edge(cfg, source, target)
+    ]
+
+    if non_navigation_edges:
+        return f"non_navigation_edges={non_navigation_edges}"
+
     return None
 
 
@@ -774,7 +1065,22 @@ def is_navigation_valid_graph_path(
     cfg: nx.MultiDiGraph,
     path: list[str],
 ) -> bool:
-    return graph_path_rejection_reason(cfg, path) is None
+    if graph_path_rejection_reason(cfg, path) is not None:
+        return False
+
+    source_callable = node_callable_name(cfg, path[0])
+    target_callable = node_callable_name(cfg, path[-1])
+
+    if source_callable is None or target_callable is None:
+        return True
+
+    if source_callable != target_callable:
+        return True
+
+    marker_callables = marker_callables_for_path(cfg, path)
+    marker_callables.discard(source_callable)
+
+    return not marker_callables
 
 
 def find_valid_segment_paths(
@@ -1131,6 +1437,112 @@ def branch_point_control_ei_id(record: FeatureMarkerRecord) -> str:
     return record.node_id
 
 
+def marked_statement_has_control_stmt_type(
+    marked_statement: MarkedStatementMetadata | None,
+    stmt_type: str,
+) -> bool:
+    if marked_statement is None:
+        return False
+
+    return any(
+        control_ei.stmt_type == stmt_type for control_ei in marked_statement.control_eis
+    )
+
+
+def ordered_conditional_targets_for_marked_statement(
+    marked_statement: MarkedStatementMetadata | None,
+) -> list[tuple[str, str]]:
+    if marked_statement is None:
+        return []
+
+    result: list[tuple[str, str]] = []
+    seen_target_eis: set[str] = set()
+
+    for control_ei in marked_statement.control_eis:
+        for target in control_ei.conditional_targets:
+            target_ei = target.get("target_ei")
+            if target_ei is None:
+                continue
+
+            target_text = str(target_ei)
+            if target_text in seen_target_eis:
+                continue
+
+            seen_target_eis.add(target_text)
+            result.append(
+                (
+                    target_text,
+                    str(target.get("target_condition") or ""),
+                )
+            )
+
+    return result
+
+
+def feature_marker_record_with_branch_targets(
+    record: FeatureMarkerRecord,
+    *,
+    selected_target_eis: list[str],
+    selected_conditions: list[str],
+) -> FeatureMarkerRecord:
+    branch_selection = record.branch_selection or FeatureBranchSelection(
+        branch=record.kwargs.get("branch"),
+        control_polarity=parse_control_polarity(record.kwargs.get("control_polarity")),
+        selected_target_eis=[],
+        selected_conditions=[],
+    )
+
+    return replace(
+        record,
+        branch_selection=FeatureBranchSelection(
+            branch=branch_selection.branch,
+            control_polarity=branch_selection.control_polarity,
+            selected_target_eis=selected_target_eis,
+            selected_conditions=selected_conditions,
+        ),
+    )
+
+
+def normalize_match_branch_marker_records(
+    records: list[FeatureMarkerRecord],
+) -> list[FeatureMarkerRecord]:
+    if not records:
+        return records
+
+    first = records[0]
+
+    if not marked_statement_has_control_stmt_type(first.marked_statement, "Match"):
+        return records
+
+    ordered_targets = ordered_conditional_targets_for_marked_statement(
+        first.marked_statement,
+    )
+
+    if len(ordered_targets) != len(records):
+        # Leave the original selection visible rather than guessing silently.
+        return records
+
+    normalized_records: list[FeatureMarkerRecord] = []
+
+    for record, (target_ei, condition) in zip(records, ordered_targets, strict=True):
+        normalized_records.append(
+            feature_marker_record_with_branch_targets(
+                record,
+                selected_target_eis=[target_ei],
+                selected_conditions=[condition] if condition else [],
+            )
+        )
+
+    return normalized_records
+
+
+def normalize_branch_marker_records(
+    records: list[FeatureMarkerRecord],
+) -> list[FeatureMarkerRecord]:
+    records = normalize_match_branch_marker_records(records)
+    return records
+
+
 def build_feature_branch_points(
     feature: FeatureMarkerInventory,
 ) -> list[FeatureBranchPoint]:
@@ -1144,7 +1556,8 @@ def build_feature_branch_points(
 
     branch_points: list[FeatureBranchPoint] = []
 
-    for index, records in enumerate(grouped.values(), start=1):
+    for index, raw_records in enumerate(grouped.values(), start=1):
+        records = normalize_branch_marker_records(raw_records)
         first = records[0]
         control_ei_id = branch_point_control_ei_id(first)
 
@@ -1250,12 +1663,17 @@ def converge_applies_to_case(
     converge_point: FeatureConvergePoint,
     case: FeatureFlowCase,
 ) -> bool:
-    leaf_name = branch_leaf_name(case.active_branch_path)
-
     if not converge_point.source_branches:
         return True
 
-    return leaf_name in converge_point.source_branches
+    active_branches = set(case.active_branch_path)
+    source_branches = set(converge_point.source_branches)
+
+    # Most convergences apply to the current leaf branch.  Nested/disruptive
+    # lineages can carry a more specific leaf while the convergence belongs to
+    # an ancestor branch, e.g. loop_entered::use_value converging through the
+    # loop_entered/loop_skipped loop convergence.
+    return bool(active_branches & source_branches)
 
 
 # =============================================================================
@@ -1332,6 +1750,37 @@ def end_branch_name(end: FeatureMarkerRecord) -> str:
 
     text = str(value).strip()
     return text if text else "main"
+
+
+def conditional_end_branch_names(
+    feature: FeatureMarkerInventory,
+) -> set[str]:
+    result: set[str] = set()
+
+    for conditional_end in feature.conditional_ends:
+        branch_name = end_branch_name(conditional_end)
+        if branch_name != "main":
+            result.add(branch_name)
+
+    return result
+
+
+def branch_marker_applies_to_end(
+    *,
+    branch_marker: FeatureMarkerRecord,
+    end: FeatureMarkerRecord,
+    normal_end_excluded_branches: set[str],
+) -> bool:
+    branch_name = branch_name_for_marker(branch_marker)
+    required_branch = end_branch_name(end)
+
+    if required_branch != "main":
+        return branch_name == required_branch
+
+    if end.marker_name == "FeatureEnd":
+        return branch_name not in normal_end_excluded_branches
+
+    return True
 
 
 def branch_point_marker_for_branch(
@@ -1513,25 +1962,31 @@ def extend_branch_path(
     return *branch_path, branch_name
 
 
-def advance_case_through_branch_point_for_end(
+def advance_case_through_branch_marker(
     graphs: FeatureFlowGraphs,
     *,
     case: FeatureFlowCase,
-    branch_point: FeatureBranchPoint,
-    end: FeatureMarkerRecord,
+    branch_marker: FeatureMarkerRecord,
 ) -> FeatureFlowCase | None:
-    target_eis, branch_name = target_eis_for_end_at_branch_point(
-        end=end,
-        branch_point=branch_point,
-    )
+    branch_name = branch_name_for_marker(branch_marker)
+    target_eis = selected_target_eis_for_branch_marker(branch_marker)
 
     if not target_eis:
         return None
 
+    next_case_branch_path = extend_branch_path(
+        case.case_branch_path,
+        branch_name,
+    )
+    next_active_branch_path = extend_branch_path(
+        case.active_branch_path,
+        branch_name,
+    )
+
     branch_target_segment = trace_feature_path_segment(
         graphs,
         feature_name=case.feature_name,
-        segment_branch_path=case.active_branch_path,
+        segment_branch_path=next_active_branch_path,
         start_eis=list(case.current_eis),
         end_eis=target_eis,
         role=FeaturePathSegmentRole.BRANCH_TARGET,
@@ -1542,15 +1997,10 @@ def advance_case_through_branch_point_for_end(
     if branch_target_segment is None:
         return None
 
-    next_branch_path = extend_branch_path(
-        case.case_branch_path,
-        branch_name,
-    )
-
     return FeatureFlowCase(
         feature_name=case.feature_name,
-        case_branch_path=next_branch_path,
-        active_branch_path=next_branch_path,
+        case_branch_path=next_case_branch_path,
+        active_branch_path=next_active_branch_path,
         current_eis=(branch_target_segment.end_ei,),
         segments=(*case.segments, branch_target_segment),
         status=case.status,
@@ -1558,6 +2008,38 @@ def advance_case_through_branch_point_for_end(
         outcome_kind=case.outcome_kind,
         end_marker_node_id=case.end_marker_node_id,
     )
+
+
+def expand_case_through_branch_point(
+    graphs: FeatureFlowGraphs,
+    *,
+    case: FeatureFlowCase,
+    branch_point: FeatureBranchPoint,
+    end: FeatureMarkerRecord,
+    normal_end_excluded_branches: set[str],
+) -> list[FeatureFlowCase]:
+    expanded_cases: list[FeatureFlowCase] = []
+
+    for branch_marker in branch_point.branch_markers:
+        if not branch_marker_applies_to_end(
+            branch_marker=branch_marker,
+            end=end,
+            normal_end_excluded_branches=normal_end_excluded_branches,
+        ):
+            continue
+
+        expanded_case = advance_case_through_branch_marker(
+            graphs,
+            case=case,
+            branch_marker=branch_marker,
+        )
+
+        if expanded_case is None:
+            continue
+
+        expanded_cases.append(expanded_case)
+
+    return expanded_cases
 
 
 # =============================================================================
@@ -1784,6 +2266,643 @@ def trace_case_to_end_before_branch_point(
     )
 
 
+# =============================================================================
+# Branch-aware event traversal helpers
+# =============================================================================
+
+
+@dataclass(frozen=True)
+class FeatureFlowTraversalEvent:
+    event_kind: str
+    event: FeatureBranchPoint | FeatureConvergePoint | FeatureMarkerRecord
+    segment: FeaturePathSegment
+
+
+def feature_event_endpoint_nodes(
+    *,
+    branch_points: list[FeatureBranchPoint],
+    converge_points: list[FeatureConvergePoint],
+    ends: list[FeatureMarkerRecord],
+) -> set[str]:
+    nodes: set[str] = set()
+
+    for branch_point in branch_points:
+        nodes.add(branch_point.control_ei_id)
+
+    for converge_point in converge_points:
+        nodes.add(converge_point.converge_ei_id)
+
+    for end in ends:
+        nodes.update(marker_end_eis(end))
+
+    return nodes
+
+
+def end_applies_to_case(
+    end: FeatureMarkerRecord,
+    case: FeatureFlowCase,
+) -> bool:
+    required_branch = end_branch_name(end)
+
+    if required_branch == "main":
+        return True
+
+    return branch_leaf_name(case.active_branch_path) == required_branch
+
+
+def branch_point_has_selectable_targets(
+    branch_point: FeatureBranchPoint,
+) -> bool:
+    return any(
+        selected_target_eis_for_branch_marker(branch_marker)
+        for branch_marker in branch_point.branch_markers
+    )
+
+
+def trace_case_to_branch_point_ordered(
+    graphs: FeatureFlowGraphs,
+    *,
+    case: FeatureFlowCase,
+    branch_point: FeatureBranchPoint,
+    event_endpoint_nodes: set[str],
+) -> FeaturePathSegment | None:
+    # A branch point is a semantic event, not an ordinary waypoint.  Once a
+    # case has consumed it, do not allow graph search to route back to it and
+    # expand the same branch again.  This is especially important for try/loop
+    # decompositions where graph edges may make the control EI reachable from
+    # branch-target regions.
+    consumed_nodes = set(assemble_case_path(case))
+    current_nodes = set(case.current_eis)
+    if (
+        branch_point.control_ei_id in consumed_nodes
+        or branch_point.marker_node_id in consumed_nodes
+    ) and not (
+        branch_point.control_ei_id in current_nodes
+        or branch_point.marker_node_id in current_nodes
+    ):
+        return None
+
+    forbidden_nodes = event_endpoint_nodes - {branch_point.control_ei_id}
+
+    return trace_feature_path_segment(
+        graphs,
+        feature_name=case.feature_name,
+        segment_branch_path=case.active_branch_path,
+        start_eis=list(case.current_eis),
+        end_eis=[branch_point.control_ei_id],
+        role=FeaturePathSegmentRole.START_TO_BRANCH,
+        disposition=FeaturePathSegmentDisposition.ACCEPTED,
+        disposition_reason=FeaturePathSegmentDispositionReason.EXACT_GRAPH_PATH,
+        forbidden_nodes=forbidden_nodes,
+    )
+
+
+def trace_case_to_converge_point_ordered(
+    graphs: FeatureFlowGraphs,
+    *,
+    case: FeatureFlowCase,
+    converge_point: FeatureConvergePoint,
+    event_endpoint_nodes: set[str],
+    branch_points: list[FeatureBranchPoint],
+) -> FeaturePathSegment | None:
+    consumed_nodes = set(assemble_case_path(case))
+    current_nodes = set(case.current_eis)
+
+    if not converge_applies_to_case(converge_point, case):
+        return None
+
+    # A branch target is often the convergence anchor itself, especially for
+    # loop-skipped / branch-completion routes. That is a valid next event and
+    # must be consumed as a zero-hop/single-node segment. Only suppress a
+    # convergence point that was consumed earlier and is not the current
+    # location.
+    if (
+        converge_point.converge_ei_id in consumed_nodes
+        or converge_point.marker_node_id in consumed_nodes
+    ) and not (
+        converge_point.converge_ei_id in current_nodes
+        or converge_point.marker_node_id in current_nodes
+    ):
+        return None
+
+    forbidden_nodes = event_endpoint_nodes - {converge_point.converge_ei_id}
+    sibling_forbidden_nodes = forbidden_sibling_branch_region_nodes(
+        graphs.cfg,
+        branch_points=branch_points,
+        case=case,
+        converge_point=converge_point,
+    )
+
+    return trace_feature_path_segment(
+        graphs,
+        feature_name=case.feature_name,
+        segment_branch_path=case.active_branch_path,
+        start_eis=list(case.current_eis),
+        end_eis=[converge_point.converge_ei_id],
+        role=FeaturePathSegmentRole.BRANCH_TO_CONVERGE,
+        disposition=FeaturePathSegmentDisposition.ACCEPTED,
+        disposition_reason=FeaturePathSegmentDispositionReason.EXACT_GRAPH_PATH,
+        forbidden_nodes=forbidden_nodes | sibling_forbidden_nodes,
+    )
+
+
+def trace_case_to_end_ordered(
+    graphs: FeatureFlowGraphs,
+    *,
+    case: FeatureFlowCase,
+    end: FeatureMarkerRecord,
+    event_endpoint_nodes: set[str],
+) -> FeaturePathSegment | None:
+    if not end_applies_to_case(end, case):
+        return None
+
+    end_targets = marker_end_eis(end)
+    forbidden_nodes = event_endpoint_nodes - set(end_targets)
+
+    role = (
+        FeaturePathSegmentRole.TO_CONDITIONAL_END
+        if end.marker_name == "FeatureEndConditional"
+        else FeaturePathSegmentRole.TO_END
+    )
+
+    return trace_feature_path_segment(
+        graphs,
+        feature_name=case.feature_name,
+        segment_branch_path=case.active_branch_path,
+        start_eis=list(case.current_eis),
+        end_eis=end_targets,
+        role=role,
+        disposition=FeaturePathSegmentDisposition.ACCEPTED,
+        disposition_reason=FeaturePathSegmentDispositionReason.EXACT_GRAPH_PATH,
+        forbidden_nodes=forbidden_nodes,
+    )
+
+
+def choose_next_traversal_event(
+    graphs: FeatureFlowGraphs,
+    *,
+    case: FeatureFlowCase,
+    branch_points: list[FeatureBranchPoint],
+    converge_points: list[FeatureConvergePoint],
+    ends: list[FeatureMarkerRecord],
+    event_endpoint_nodes: set[str],
+) -> FeatureFlowTraversalEvent | None:
+    candidates: list[FeatureFlowTraversalEvent] = []
+
+    for branch_point in branch_points:
+        if not branch_point_has_selectable_targets(branch_point):
+            continue
+
+        segment = trace_case_to_branch_point_ordered(
+            graphs,
+            case=case,
+            branch_point=branch_point,
+            event_endpoint_nodes=event_endpoint_nodes,
+        )
+
+        if segment is not None:
+            candidates.append(
+                FeatureFlowTraversalEvent(
+                    event_kind="branch",
+                    event=branch_point,
+                    segment=segment,
+                )
+            )
+
+    for converge_point in converge_points:
+        segment = trace_case_to_converge_point_ordered(
+            graphs,
+            case=case,
+            converge_point=converge_point,
+            event_endpoint_nodes=event_endpoint_nodes,
+            branch_points=branch_points,
+        )
+
+        if segment is not None:
+            candidates.append(
+                FeatureFlowTraversalEvent(
+                    event_kind="converge",
+                    event=converge_point,
+                    segment=segment,
+                )
+            )
+
+    for end in ends:
+        segment = trace_case_to_end_ordered(
+            graphs,
+            case=case,
+            end=end,
+            event_endpoint_nodes=event_endpoint_nodes,
+        )
+
+        if segment is not None:
+            candidates.append(
+                FeatureFlowTraversalEvent(
+                    event_kind="end",
+                    event=end,
+                    segment=segment,
+                )
+            )
+
+    if not candidates:
+        return None
+
+    event_priority = {
+        "branch": 0,
+        "end": 1,
+        "converge": 2,
+    }
+
+    candidates.sort(
+        key=lambda candidate: (
+            len(candidate.segment.path),
+            event_priority.get(candidate.event_kind, 99),
+            parse_ei_sort_key(candidate.segment.end_ei),
+        )
+    )
+
+    return candidates[0]
+
+
+def advance_case_through_branch_marker_ordered(
+    graphs: FeatureFlowGraphs,
+    *,
+    case: FeatureFlowCase,
+    branch_marker: FeatureMarkerRecord,
+    event_endpoint_nodes: set[str],
+) -> FeatureFlowCase | None:
+    branch_name = branch_name_for_marker(branch_marker)
+    target_eis = selected_target_eis_for_branch_marker(branch_marker)
+
+    if not target_eis:
+        return None
+
+    next_case_branch_path = extend_branch_path(
+        case.case_branch_path,
+        branch_name,
+    )
+    next_active_branch_path = extend_branch_path(
+        case.active_branch_path,
+        branch_name,
+    )
+
+    branch_target_segment = trace_feature_path_segment(
+        graphs,
+        feature_name=case.feature_name,
+        segment_branch_path=next_active_branch_path,
+        start_eis=list(case.current_eis),
+        end_eis=target_eis,
+        role=FeaturePathSegmentRole.BRANCH_TARGET,
+        disposition=FeaturePathSegmentDisposition.ACCEPTED,
+        disposition_reason=FeaturePathSegmentDispositionReason.EXACT_GRAPH_PATH,
+        forbidden_nodes=event_endpoint_nodes - set(target_eis),
+    )
+
+    if branch_target_segment is None:
+        return None
+
+    return FeatureFlowCase(
+        feature_name=case.feature_name,
+        case_branch_path=next_case_branch_path,
+        active_branch_path=next_active_branch_path,
+        current_eis=(branch_target_segment.end_ei,),
+        segments=(*case.segments, branch_target_segment),
+        status=case.status,
+        end_kind=case.end_kind,
+        outcome_kind=case.outcome_kind,
+        end_marker_node_id=case.end_marker_node_id,
+    )
+
+
+def expand_case_through_branch_point_ordered(
+    graphs: FeatureFlowGraphs,
+    *,
+    case: FeatureFlowCase,
+    branch_point: FeatureBranchPoint,
+    event_endpoint_nodes: set[str],
+) -> list[FeatureFlowCase]:
+    expanded_cases: list[FeatureFlowCase] = []
+
+    for branch_marker in branch_point.branch_markers:
+        expanded_case = advance_case_through_branch_marker_ordered(
+            graphs,
+            case=case,
+            branch_marker=branch_marker,
+            event_endpoint_nodes=event_endpoint_nodes,
+        )
+
+        if expanded_case is None:
+            continue
+
+        expanded_cases.append(expanded_case)
+
+    return expanded_cases
+
+
+def complete_case_from_end_event(
+    case: FeatureFlowCase,
+    *,
+    end: FeatureMarkerRecord,
+    segment: FeaturePathSegment,
+) -> FeatureFlowCase:
+    end_kind = (
+        FeatureFlowEndKind.FEATURE_END_CONDITIONAL
+        if end.marker_name == "FeatureEndConditional"
+        else FeatureFlowEndKind.FEATURE_END
+    )
+
+    outcome_kind = (
+        FeatureFlowOutcomeKind.CONDITIONAL
+        if end.marker_name == "FeatureEndConditional"
+        else FeatureFlowOutcomeKind.SUCCESS
+    )
+
+    return complete_feature_flow_case(
+        case,
+        end_marker_node_id=end.node_id,
+        end_kind=end_kind,
+        outcome_kind=outcome_kind,
+        current_eis=[segment.end_ei],
+        segment=segment,
+    )
+
+
+def terminal_representative_segment_for_case(
+    graphs: FeatureFlowGraphs,
+    *,
+    case: FeatureFlowCase,
+) -> FeaturePathSegment | None:
+    candidates: list[tuple[str, str]] = []
+
+    for source_ei in case.current_eis:
+        if source_ei not in graphs.cfg:
+            continue
+
+        for _source, target, _key, edge_data in graphs.cfg.out_edges(
+            source_ei,
+            keys=True,
+            data=True,
+        ):
+            if (
+                edge_data.get("edge_type")
+                != "derived_control_route_execution_item_terminal"
+            ):
+                continue
+
+            if edge_data.get("resolved_target_kind") != "terminal_placeholder":
+                continue
+
+            if edge_data.get("route_kind") not in TERMINAL_REPRESENTATIVE_ROUTE_KINDS:
+                continue
+
+            if edge_data.get("exit_kind") not in TERMINAL_REPRESENTATIVE_EXIT_KINDS:
+                continue
+
+            candidates.append(
+                (
+                    str(source_ei),
+                    str(target),
+                )
+            )
+
+    if not candidates:
+        return None
+
+    candidates.sort(
+        key=lambda item: (
+            parse_ei_sort_key(item[0]),
+            parse_ei_sort_key(item[1]),
+        )
+    )
+
+    source_ei, terminal_ei = candidates[0]
+
+    return FeaturePathSegment(
+        feature_name=case.feature_name,
+        segment_branch_path=case.active_branch_path,
+        start_ei=source_ei,
+        end_ei=terminal_ei,
+        path=[source_ei, terminal_ei],
+        role=FeaturePathSegmentRole.TO_CONDITIONAL_END,
+        disposition=FeaturePathSegmentDisposition.ACCEPTED,
+        disposition_reason=FeaturePathSegmentDispositionReason.EXACT_GRAPH_PATH,
+    )
+
+
+def complete_terminal_representative_case(
+    graphs: FeatureFlowGraphs,
+    *,
+    case: FeatureFlowCase,
+) -> FeatureFlowCase | None:
+    segment = terminal_representative_segment_for_case(
+        graphs,
+        case=case,
+    )
+
+    if segment is None:
+        return None
+
+    return complete_feature_flow_case(
+        case,
+        end_marker_node_id=segment.end_ei,
+        end_kind=FeatureFlowEndKind.FEATURE_END_CONDITIONAL,
+        outcome_kind=FeatureFlowOutcomeKind.CONDITIONAL,
+        current_eis=[segment.end_ei],
+        segment=segment,
+    )
+
+
+def case_state_key(case: FeatureFlowCase) -> tuple[Any, ...]:
+    return (
+        case.feature_name,
+        case.case_branch_path,
+        case.active_branch_path,
+        case.current_eis,
+        tuple(feature_path_segment_id(segment) for segment in case.segments),
+    )
+
+
+def fallback_expected_end(
+    ends: list[FeatureMarkerRecord],
+    case: FeatureFlowCase,
+) -> FeatureMarkerRecord | None:
+    for end in ends:
+        if end_applies_to_case(end, case):
+            return end
+
+    return ends[0] if ends else None
+
+
+def trace_feature_flow_cases_for_feature(
+    graphs: FeatureFlowGraphs,
+    *,
+    feature: FeatureMarkerInventory,
+    start: FeatureMarkerRecord,
+    verbose: bool = False,
+) -> FeatureFlowTraceResult:
+    ends = [
+        *feature.ends,
+        *feature.conditional_ends,
+    ]
+
+    if not ends:
+        return FeatureFlowTraceResult(
+            completed_cases=[],
+            unresolved_cases=[],
+        )
+
+    branch_points = build_feature_branch_points(feature)
+    converge_points = build_feature_converge_points(feature)
+    event_endpoint_nodes = feature_event_endpoint_nodes(
+        branch_points=branch_points,
+        converge_points=converge_points,
+        ends=ends,
+    )
+
+    active_cases: list[FeatureFlowCase] = [
+        initial_feature_flow_case(
+            feature_name=feature.feature_name,
+            start_eis=marker_exit_eis(start),
+        )
+    ]
+
+    completed_cases: list[FeatureFlowCase] = []
+    unresolved_cases: list[UnresolvedFeatureFlowCase] = []
+    seen_case_states: set[tuple[Any, ...]] = set()
+
+    max_iterations = 250
+    max_active_cases = 500
+    iterations = 0
+
+    while active_cases:
+        iterations += 1
+        if iterations > max_iterations:
+            for case in active_cases:
+                expected_end = fallback_expected_end(ends, case)
+                if expected_end is not None:
+                    unresolved_cases.append(
+                        unresolved_case_for_end_failure(
+                            case,
+                            end=expected_end,
+                        )
+                    )
+            break
+
+        next_active_cases: list[FeatureFlowCase] = []
+
+        for case in active_cases:
+            state_key = case_state_key(case)
+            if state_key in seen_case_states:
+                continue
+            seen_case_states.add(state_key)
+
+            terminal_case = complete_terminal_representative_case(
+                graphs,
+                case=case,
+            )
+            if terminal_case is not None:
+                completed_cases.append(terminal_case)
+                continue
+
+            next_event = choose_next_traversal_event(
+                graphs,
+                case=case,
+                branch_points=branch_points,
+                converge_points=converge_points,
+                ends=ends,
+                event_endpoint_nodes=event_endpoint_nodes,
+            )
+
+            if next_event is None:
+                expected_end = fallback_expected_end(ends, case)
+                if expected_end is not None:
+                    unresolved_cases.append(
+                        unresolved_case_for_end_failure(
+                            case,
+                            end=expected_end,
+                        )
+                    )
+                continue
+
+            if next_event.event_kind == "branch":
+                branch_point = next_event.event
+                if not isinstance(branch_point, FeatureBranchPoint):
+                    continue
+
+                case_at_branch_point = append_segment_to_case(
+                    case,
+                    next_event.segment,
+                    current_eis=[next_event.segment.end_ei],
+                )
+
+                expanded_cases = expand_case_through_branch_point_ordered(
+                    graphs,
+                    case=case_at_branch_point,
+                    branch_point=branch_point,
+                    event_endpoint_nodes=event_endpoint_nodes,
+                )
+
+                if not expanded_cases:
+                    expected_end = fallback_expected_end(ends, case_at_branch_point)
+                    if expected_end is not None:
+                        unresolved_cases.append(
+                            unresolved_case_for_end_failure(
+                                case_at_branch_point,
+                                end=expected_end,
+                            )
+                        )
+                    continue
+
+                next_active_cases.extend(expanded_cases)
+                continue
+
+            if next_event.event_kind == "converge":
+                converge_point = next_event.event
+                if not isinstance(converge_point, FeatureConvergePoint):
+                    continue
+
+                converged_case = trace_case_to_converge_point(
+                    case=case,
+                    converge_point=converge_point,
+                    segment=next_event.segment,
+                )
+                next_active_cases.append(converged_case)
+                continue
+
+            if next_event.event_kind == "end":
+                end = next_event.event
+                if not isinstance(end, FeatureMarkerRecord):
+                    continue
+
+                completed_cases.append(
+                    complete_case_from_end_event(
+                        case,
+                        end=end,
+                        segment=next_event.segment,
+                    )
+                )
+                continue
+
+        if len(next_active_cases) > max_active_cases:
+            for case in next_active_cases[max_active_cases:]:
+                expected_end = fallback_expected_end(ends, case)
+                if expected_end is not None:
+                    unresolved_cases.append(
+                        unresolved_case_for_end_failure(
+                            case,
+                            end=expected_end,
+                        )
+                    )
+            next_active_cases = next_active_cases[:max_active_cases]
+
+        active_cases = next_active_cases
+
+    return FeatureFlowTraceResult(
+        completed_cases=completed_cases,
+        unresolved_cases=unresolved_cases,
+    )
+
+
 def marker_start_eis(record: FeatureMarkerRecord) -> list[str]:
     return [record.node_id]
 
@@ -1796,225 +2915,15 @@ def trace_feature_flow_cases_to_end(
     end: FeatureMarkerRecord,
     verbose: bool = False,
 ) -> FeatureFlowTraceResult:
-    cases = [
-        initial_feature_flow_case(
-            feature_name=feature.feature_name,
-            start_eis=marker_start_eis(start),
-        )
-    ]
-
-    branch_points = build_feature_branch_points(feature)
-    converge_points = build_feature_converge_points(feature)
-
-    completed_cases: list[FeatureFlowCase] = []
-    unresolved_cases: list[UnresolvedFeatureFlowCase] = []
-
-    if not branch_points:
-        completed_case = trace_case_to_end(
-            graphs,
-            case=cases[0],
-            end=end,
-        )
-
-        if completed_case is not None:
-            return FeatureFlowTraceResult(
-                completed_cases=[completed_case],
-                unresolved_cases=[],
-            )
-
-        if verbose:
-            debug_print_end_path_failure(
-                graphs,
-                case=cases[0],
-                end=end,
-            )
-
-        return FeatureFlowTraceResult(
-            completed_cases=[],
-            unresolved_cases=[
-                unresolved_case_for_end_failure(
-                    cases[0],
-                    end=end,
-                )
-            ],
-        )
-
-    for branch_point in branch_points:
-        cases_after_converge: list[FeatureFlowCase] = []
-
-        for case in cases:
-            converge_result = trace_nearest_converge_point_for_case(
-                graphs,
-                case=case,
-                converge_points=converge_points,
-                branch_points=branch_points,
-            )
-
-            if converge_result is None:
-                cases_after_converge.append(case)
-                continue
-
-            converge_point, converge_segment = converge_result
-
-            converged_case = trace_case_to_converge_point(
-                case=case,
-                converge_point=converge_point,
-                segment=converge_segment,
-            )
-
-            cases_after_converge.append(converged_case)
-
-        cases_still_active: list[FeatureFlowCase] = []
-
-        for case in cases_after_converge:
-            completed_case = trace_case_to_end_before_branch_point(
-                graphs,
-                case=case,
-                end=end,
-                branch_point=branch_point,
-            )
-
-            if completed_case is not None:
-                completed_cases.append(completed_case)
-                continue
-
-            cases_still_active.append(case)
-
-        if not cases_still_active:
-            return FeatureFlowTraceResult(
-                completed_cases=completed_cases,
-                unresolved_cases=[],
-            )
-
-        cases_reaching_branch_point: list[FeatureFlowCase] = []
-
-        for case in cases_still_active:
-            case_at_branch_point = trace_case_to_branch_point(
-                graphs,
-                case=case,
-                branch_point=branch_point,
-            )
-
-            if case_at_branch_point is None:
-                completed_case = trace_case_to_end(
-                    graphs,
-                    case=case,
-                    end=end,
-                )
-
-                if completed_case is not None:
-                    completed_cases.append(completed_case)
-                    continue
-
-                unresolved_cases.append(
-                    unresolved_case_for_end_failure(
-                        case,
-                        end=end,
-                    )
-                )
-
-                if verbose:
-                    debug_print_end_path_failure(
-                        graphs,
-                        case=case,
-                        end=end,
-                    )
-
-                continue
-
-            cases_reaching_branch_point.append(case_at_branch_point)
-
-        next_cases: list[FeatureFlowCase] = []
-
-        for case in cases_reaching_branch_point:
-            advanced_case = advance_case_through_branch_point_for_end(
-                graphs,
-                case=case,
-                branch_point=branch_point,
-                end=end,
-            )
-
-            if advanced_case is None:
-                completed_case = trace_case_to_end(
-                    graphs,
-                    case=case,
-                    end=end,
-                )
-
-                if completed_case is not None:
-                    completed_cases.append(completed_case)
-                    continue
-
-                unresolved_cases.append(
-                    unresolved_case_for_end_failure(
-                        case,
-                        end=end,
-                    )
-                )
-
-                if verbose:
-                    debug_print_end_path_failure(
-                        graphs,
-                        case=case,
-                        end=end,
-                    )
-
-                continue
-
-            next_cases.append(advanced_case)
-
-        cases = next_cases
-
-        if not cases:
-            return FeatureFlowTraceResult(
-                completed_cases=completed_cases,
-                unresolved_cases=unresolved_cases,
-            )
-
-    for case in cases:
-        converge_result = trace_nearest_converge_point_for_case(
-            graphs,
-            case=case,
-            converge_points=converge_points,
-            branch_points=branch_points,
-        )
-
-        if converge_result is not None:
-            converge_point, converge_segment = converge_result
-
-            case = trace_case_to_converge_point(
-                case=case,
-                converge_point=converge_point,
-                segment=converge_segment,
-            )
-
-        completed_case = trace_case_to_end(
-            graphs,
-            case=case,
-            end=end,
-        )
-
-        if completed_case is not None:
-            completed_cases.append(completed_case)
-            continue
-
-        unresolved_cases.append(
-            unresolved_case_for_end_failure(
-                case,
-                end=end,
-            )
-        )
-
-        if verbose:
-            debug_print_end_path_failure(
-                graphs,
-                case=case,
-                end=end,
-            )
-
-    return FeatureFlowTraceResult(
-        completed_cases=completed_cases,
-        unresolved_cases=unresolved_cases,
+    # Compatibility wrapper for older callers. The branch-aware engine traces all
+    # feature ends together so conditional ends can act as ordered events instead
+    # of being treated as separate global destinations.
+    del end
+    return trace_feature_flow_cases_for_feature(
+        graphs,
+        feature=feature,
+        start=start,
+        verbose=verbose,
     )
 
 
@@ -2051,17 +2960,15 @@ def trace_feature_flow_cases(
                 f"ends={len(ends)}"
             )
 
-        for end in ends:
-            result = trace_feature_flow_cases_to_end(
-                graphs,
-                feature=feature,
-                start=start,
-                end=end,
-                verbose=verbose,
-            )
+        result = trace_feature_flow_cases_for_feature(
+            graphs,
+            feature=feature,
+            start=start,
+            verbose=verbose,
+        )
 
-            completed_cases.extend(result.completed_cases)
-            unresolved_cases.extend(result.unresolved_cases)
+        completed_cases.extend(result.completed_cases)
+        unresolved_cases.extend(result.unresolved_cases)
 
     return FeatureFlowTraceResult(
         completed_cases=completed_cases,

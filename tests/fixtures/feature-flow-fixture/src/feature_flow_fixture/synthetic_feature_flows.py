@@ -64,68 +64,84 @@ def finish(value: str) -> dict[str, str]:
     }
 
 
+def fixture_finish(value: str) -> dict[str, str]:
+    return {
+        "status": "ok",
+        "value": value,
+    }
+
+
 ################################################################################
-##  Flow tests: if/elif/else
+##  Flow tests: if / else branch convergence
 ################################################################################
 
 
-def synthetic_branch_multiply_feature(raw: str) -> dict[str, str]:
-    # :: FeatureStart | name=synthetic_branch_multiply
-    value = normalize_input(raw)
+def fixture_if_branch_converge(value: int) -> dict[str, str]:
+    # :: FeatureStart | name=fixture_if_branch_converge
+    result = "unset"
 
-    first_branch = choose_first_branch(value)
-
-    # :: FeatureBranch | name=synthetic_branch_multiply | branch=a | control_polarity=true
-    # :: FeatureBranch | name=synthetic_branch_multiply | branch=b | control_polarity=false
-    if first_branch == "a":
-        first_result = handle_a(value)
+    # :: FeatureBranch | name=fixture_if_branch_converge | branch=positive | control_polarity=true
+    # :: FeatureBranch | name=fixture_if_branch_converge | branch=non_positive | control_polarity=false
+    if value > 0:
+        result = "positive"
     else:
-        first_result = handle_b(value)
+        result = "non-positive"
 
-    # :: FeatureConverge | name=synthetic_branch_multiply | branches=a,b | into=main
-    after_first_converge = f"first:{first_result}"
+    # :: FeatureConverge | name=fixture_if_branch_converge | branches=positive,non_positive | into=main
+    converged = f"if:{result}"
 
-    second_branch = choose_second_branch(after_first_converge)
+    # :: FeatureEnd | name=fixture_if_branch_converge
+    return fixture_finish(converged)
 
-    # :: FeatureBranch | name=synthetic_branch_multiply | branch=c | control_polarity=true
-    # :: FeatureBranch | name=synthetic_branch_multiply | branch=d | control_polarity=false
-    if second_branch == "c":
-        second_result = handle_c(after_first_converge)
+
+def fixture_if_branch_conditional_end(value: int) -> dict[str, str]:
+    # :: FeatureStart | name=fixture_if_branch_conditional_end
+    result = "unset"
+
+    # :: FeatureBranch | name=fixture_if_branch_conditional_end | branch=valid | control_polarity=true
+    # :: FeatureBranch | name=fixture_if_branch_conditional_end | branch=invalid | control_polarity=false
+    if value > 0:
+        result = f"valid:{value}"
     else:
-        second_result = handle_d(after_first_converge)
+        # :: FeatureEndConditional | name=fixture_if_branch_conditional_end | branch=invalid | on_condition=non_positive_value
+        return fixture_finish("invalid")
 
-    # :: FeatureConverge | name=synthetic_branch_multiply | branches=c,d | into=main
-    after_second_converge = f"second:{second_result}"
+    # :: FeatureConverge | name=fixture_if_branch_conditional_end | branches=valid | into=main
+    converged = f"accepted:{result}"
 
-    # :: FeatureEnd | name=synthetic_branch_multiply
-    return finish(after_second_converge)
+    # :: FeatureEnd | name=fixture_if_branch_conditional_end
+    return fixture_finish(converged)
 
 
-def synthetic_nested_branch_feature(raw: str) -> dict[str, str]:
-    # :: FeatureStart | name=synthetic_nested_branch
-    value = normalize_input(raw)
+################################################################################
+##  Flow tests: nested if branch lineage
+################################################################################
 
-    first_branch = choose_first_branch(value)
 
-    # :: FeatureBranch | name=synthetic_nested_branch | branch=a | control_polarity=true
-    # :: FeatureBranch | name=synthetic_nested_branch | branch=b | control_polarity=false
-    if first_branch == "a":
-        nested_branch = choose_second_branch(value)
+def fixture_nested_if_branch_converge(value: int) -> dict[str, str]:
+    # :: FeatureStart | name=fixture_nested_if_branch_converge
+    result = "unset"
 
-        # :: FeatureBranch | name=synthetic_nested_branch | branch=a_c | control_polarity=true
-        # :: FeatureBranch | name=synthetic_nested_branch | branch=a_d | control_polarity=false
-        if nested_branch == "c":
-            branch_result = handle_c(handle_a(value))
+    # :: FeatureBranch | name=fixture_nested_if_branch_converge | branch=positive | control_polarity=true
+    # :: FeatureBranch | name=fixture_nested_if_branch_converge | branch=non_positive | control_polarity=false
+    if value > 0:
+        # :: FeatureBranch | name=fixture_nested_if_branch_converge | branch=large | control_polarity=true
+        # :: FeatureBranch | name=fixture_nested_if_branch_converge | branch=small | control_polarity=false
+        if value > 10:
+            result = "large-positive"
         else:
-            branch_result = handle_d(handle_a(value))
+            result = "small-positive"
+
+        # :: FeatureConverge | name=fixture_nested_if_branch_converge | branches=large,small | into=positive
+        result = f"positive:{result}"
     else:
-        branch_result = handle_b(value)
+        result = "non-positive"
 
-    # :: FeatureConverge | name=synthetic_nested_branch | branches=a_c,a_d,b | into=main
-    converged = f"nested:{branch_result}"
+    # :: FeatureConverge | name=fixture_nested_if_branch_converge | branches=positive,non_positive | into=main
+    converged = f"nested-if:{result}"
 
-    # :: FeatureEnd | name=synthetic_nested_branch
-    return finish(converged)
+    # :: FeatureEnd | name=fixture_nested_if_branch_converge
+    return fixture_finish(converged)
 
 
 ################################################################################
@@ -133,328 +149,325 @@ def synthetic_nested_branch_feature(raw: str) -> dict[str, str]:
 ################################################################################
 
 
-def synthetic_match_feature(value: str) -> dict[str, str]:
-    # :: FeatureStart | name=synthetic_match
-    normalized = normalize_input(value)
+def fixture_match_branch_converge(value: str) -> dict[str, str]:
+    # :: FeatureStart | name=fixture_match_branch_converge
+    normalized = value.strip().lower()
 
+    # Match cases are all modeled as matched outcomes when a wildcard case exists.
+    # These markers intentionally sit before the match statement, not before case labels.
+    # :: FeatureBranch | name=fixture_match_branch_converge | branch=alpha | control_polarity=true | comment="case alpha"
+    # :: FeatureBranch | name=fixture_match_branch_converge | branch=betaish | control_polarity=true | comment="case beta or bravo"
+    # :: FeatureBranch | name=fixture_match_branch_converge | branch=guarded_x | control_polarity=true | comment="guarded x case"
+    # :: FeatureBranch | name=fixture_match_branch_converge | branch=default | control_polarity=true | comment="wildcard case"
     match normalized:
-        # :: FeatureBranch | name=synthetic_match | branch=alpha
         case "alpha":
-            result = handle_a(normalized)
-        # :: FeatureBranch | name=synthetic_match | branch=betaish
+            result = "alpha"
         case "beta" | "bravo":
-            result = handle_b(normalized)
-        # :: FeatureBranch | name=synthetic_match | branch=guarded_x
+            result = "betaish"
         case other if other.startswith("x"):
-            result = handle_c(other)
-        # :: FeatureBranch | name=synthetic_match | branch=default
+            result = f"guarded:{other}"
         case _:
-            result = handle_d(normalized)
+            result = "default"
 
-    # :: FeatureConverge | name=synthetic_match | branches=alpha,betaish,guarded_x,default | into=main
+    # :: FeatureConverge | name=fixture_match_branch_converge | branches=alpha,betaish,guarded_x,default | into=main
     converged = f"match:{result}"
 
-    # :: FeatureEnd | name=synthetic_match
-    return finish(converged)
+    # :: FeatureEnd | name=fixture_match_branch_converge
+    return fixture_finish(converged)
 
 
 ################################################################################
-##  Flow tests: loop completion and disruption
+##  Flow tests: for loop entry and zero-iteration branch
 ################################################################################
 
 
-def synthetic_for_loop_feature(values: list[str]) -> dict[str, str]:
-    # :: FeatureStart | name=synthetic_for_loop
-    result = "empty"
+def fixture_for_loop_entry_converge(values: list[str]) -> dict[str, str]:
+    # :: FeatureStart | name=fixture_for_loop_entry_converge
+    total = 0
 
-    # :: FeatureBranch | name=synthetic_for_loop | branch=loop_body | control_polarity=true
-    # :: FeatureBranch | name=synthetic_for_loop | branch=loop_else | control_polarity=false
+    # :: FeatureBranch | name=fixture_for_loop_entry_converge | branch=loop_entered | control_polarity=true
+    # :: FeatureBranch | name=fixture_for_loop_entry_converge | branch=loop_skipped | control_polarity=false
     for value in values:
-        # :: FeatureBranch | name=synthetic_for_loop | branch=loop_break | control_polarity=true
-        # :: FeatureBranch | name=synthetic_for_loop | branch=not_break | control_polarity=false
+        total += len(value)
+
+    # :: FeatureConverge | name=fixture_for_loop_entry_converge | branches=loop_entered,loop_skipped | into=main
+    converged = f"for:{total}"
+
+    # :: FeatureEnd | name=fixture_for_loop_entry_converge
+    return fixture_finish(converged)
+
+
+################################################################################
+##  Flow tests: for loop break / continue disruptions
+################################################################################
+
+
+def fixture_for_loop_disruption_branches(values: list[str]) -> dict[str, str]:
+    # :: FeatureStart | name=fixture_for_loop_disruption_branches
+    total = 0
+
+    # :: FeatureBranch | name=fixture_for_loop_disruption_branches | branch=loop_entered | control_polarity=true
+    # :: FeatureBranch | name=fixture_for_loop_disruption_branches | branch=loop_skipped | control_polarity=false
+    for value in values:
+        # :: FeatureBranch | name=fixture_for_loop_disruption_branches | branch=break_requested | control_polarity=true
+        # :: FeatureBranch | name=fixture_for_loop_disruption_branches | branch=no_break | control_polarity=false
         if value == "stop":
-            result = "stopped"
+            # :: FeatureEndConditional | name=fixture_for_loop_disruption_branches | branch=break_requested | on_condition=loop_break
             break
 
-        # :: FeatureBranch | name=synthetic_for_loop | branch=loop_continue | control_polarity=true
-        # :: FeatureBranch | name=synthetic_for_loop | branch=loop_consume | control_polarity=false
-        if value == "skip":
-            result = "skipped"
+        # :: FeatureConverge | name=fixture_for_loop_disruption_branches | branches=no_break | into=loop_entered
+        checked_value = value
+
+        # :: FeatureBranch | name=fixture_for_loop_disruption_branches | branch=continue_requested | control_polarity=true
+        # :: FeatureBranch | name=fixture_for_loop_disruption_branches | branch=consume_value | control_polarity=false
+        if checked_value == "skip":
+            # :: FeatureEndConditional | name=fixture_for_loop_disruption_branches | branch=continue_requested | on_condition=loop_continue
             continue
 
-        result = f"seen:{value}"
-    else:
-        result = "completed"
+        # :: FeatureConverge | name=fixture_for_loop_disruption_branches | branches=consume_value | into=loop_entered
+        total += len(checked_value)
 
-    # :: FeatureConverge | name=synthetic_for_loop | branches=loop_break,loop_continue,loop_consume,loop_else | into=main
-    converged = f"for:{result}"
+    # :: FeatureConverge | name=fixture_for_loop_disruption_branches | branches=loop_entered,loop_skipped | into=main
+    converged = f"for-disruptions:{total}"
 
-    # :: FeatureEnd | name=synthetic_for_loop
-    return finish(converged)
+    # :: FeatureEnd | name=fixture_for_loop_disruption_branches
+    return fixture_finish(converged)
 
 
-def synthetic_while_loop_feature(limit: int) -> dict[str, str]:
-    # :: FeatureStart | name=synthetic_while_loop
+################################################################################
+##  Flow tests: while loop entry and zero-iteration branch
+################################################################################
+
+
+def fixture_while_loop_entry_converge(limit: int) -> dict[str, str]:
+    # :: FeatureStart | name=fixture_while_loop_entry_converge
     count = 0
-    result = "initial"
 
-    # :: FeatureBranch | name=synthetic_while_loop | branch=loop_body | control_polarity=true
-    # :: FeatureBranch | name=synthetic_while_loop | branch=loop_else | control_polarity=false
+    # :: FeatureBranch | name=fixture_while_loop_entry_converge | branch=loop_entered | control_polarity=true
+    # :: FeatureBranch | name=fixture_while_loop_entry_converge | branch=loop_skipped | control_polarity=false
     while count < limit:
         count += 1
 
-        # :: FeatureBranch | name=synthetic_while_loop | branch=loop_continue | control_polarity=true
-        # :: FeatureBranch | name=synthetic_while_loop | branch=not_continue | control_polarity=false
-        if count == 2:
-            result = "continued"
-            continue
+    # :: FeatureConverge | name=fixture_while_loop_entry_converge | branches=loop_entered,loop_skipped | into=main
+    converged = f"while:{count}"
 
-        # :: FeatureBranch | name=synthetic_while_loop | branch=loop_break | control_polarity=true
-        # :: FeatureBranch | name=synthetic_while_loop | branch=loop_consume | control_polarity=false
-        if count == 4:
-            result = "stopped"
-            break
-
-        result = f"seen:{count}"
-    else:
-        result = "exhausted"
-
-    # :: FeatureConverge | name=synthetic_while_loop | branches=loop_continue,loop_break,loop_consume,loop_else | into=main
-    converged = f"while:{result}"
-
-    # :: FeatureEnd | name=synthetic_while_loop
-    return finish(converged)
+    # :: FeatureEnd | name=fixture_while_loop_entry_converge
+    return fixture_finish(converged)
 
 
-def synthetic_nested_loop_feature(values: list[list[int]]) -> dict[str, str]:
-    # :: FeatureStart | name=synthetic_nested_loop
+################################################################################
+##  Flow tests: while loop break / continue disruptions
+################################################################################
+
+
+def fixture_while_loop_disruption_branches(limit: int) -> dict[str, str]:
+    # :: FeatureStart | name=fixture_while_loop_disruption_branches
+    count = 0
     total = 0
 
-    # :: FeatureBranch | name=synthetic_nested_loop | branch=outer_body | control_polarity=true
-    # :: FeatureBranch | name=synthetic_nested_loop | branch=outer_empty | control_polarity=false
+    # :: FeatureBranch | name=fixture_while_loop_disruption_branches | branch=loop_entered | control_polarity=true
+    # :: FeatureBranch | name=fixture_while_loop_disruption_branches | branch=loop_skipped | control_polarity=false
+    while count < limit:
+        count += 1
+
+        # :: FeatureBranch | name=fixture_while_loop_disruption_branches | branch=continue_requested | control_polarity=true
+        # :: FeatureBranch | name=fixture_while_loop_disruption_branches | branch=no_continue | control_polarity=false
+        if count == 2:
+            # :: FeatureEndConditional | name=fixture_while_loop_disruption_branches | branch=continue_requested | on_condition=loop_continue
+            continue
+
+        # :: FeatureConverge | name=fixture_while_loop_disruption_branches | branches=no_continue | into=loop_entered
+        checked_count = count
+
+        # :: FeatureBranch | name=fixture_while_loop_disruption_branches | branch=break_requested | control_polarity=true
+        # :: FeatureBranch | name=fixture_while_loop_disruption_branches | branch=consume_count | control_polarity=false
+        if checked_count == 4:
+            # :: FeatureEndConditional | name=fixture_while_loop_disruption_branches | branch=break_requested | on_condition=loop_break
+            break
+
+        # :: FeatureConverge | name=fixture_while_loop_disruption_branches | branches=consume_count | into=loop_entered
+        total += checked_count
+
+    # :: FeatureConverge | name=fixture_while_loop_disruption_branches | branches=loop_entered,loop_skipped | into=main
+    converged = f"while-disruptions:{total}"
+
+    # :: FeatureEnd | name=fixture_while_loop_disruption_branches
+    return fixture_finish(converged)
+
+
+################################################################################
+##  Flow tests: nested loop lineage
+################################################################################
+
+
+def fixture_nested_loop_converge(values: list[list[int]]) -> dict[str, str]:
+    # :: FeatureStart | name=fixture_nested_loop_converge
+    total = 0
+
+    # :: FeatureBranch | name=fixture_nested_loop_converge | branch=outer_entered | control_polarity=true
+    # :: FeatureBranch | name=fixture_nested_loop_converge | branch=outer_skipped | control_polarity=false
     for row in values:
-        # :: FeatureBranch | name=synthetic_nested_loop | branch=inner_body | control_polarity=true
-        # :: FeatureBranch | name=synthetic_nested_loop | branch=inner_empty | control_polarity=false
+        # :: FeatureBranch | name=fixture_nested_loop_converge | branch=inner_entered | control_polarity=true
+        # :: FeatureBranch | name=fixture_nested_loop_converge | branch=inner_skipped | control_polarity=false
         for item in row:
-            # :: FeatureBranch | name=synthetic_nested_loop | branch=inner_continue | control_polarity=true
-            # :: FeatureBranch | name=synthetic_nested_loop | branch=not_inner_continue | control_polarity=false
-            if item < 0:
-                continue
-
-            # :: FeatureBranch | name=synthetic_nested_loop | branch=inner_break | control_polarity=true
-            # :: FeatureBranch | name=synthetic_nested_loop | branch=inner_consume | control_polarity=false
-            if item == 0:
-                break
-
             total += item
 
-        # :: FeatureConverge | name=synthetic_nested_loop | branches=inner_continue,inner_break,inner_consume,inner_empty | into=outer_body
+        # :: FeatureConverge | name=fixture_nested_loop_converge | branches=inner_entered,inner_skipped | into=outer_entered
         total += 100
 
-    # :: FeatureConverge | name=synthetic_nested_loop | branches=outer_body,outer_empty | into=main
+    # :: FeatureConverge | name=fixture_nested_loop_converge | branches=outer_entered,outer_skipped | into=main
     converged = f"nested-loop:{total}"
 
-    # :: FeatureEnd | name=synthetic_nested_loop
-    return finish(converged)
+    # :: FeatureEnd | name=fixture_nested_loop_converge
+    return fixture_finish(converged)
 
 
 ################################################################################
-##  Flow tests: Try / except / else / finally
+##  Flow tests: try / except / else / finally
 ################################################################################
 
 
-def synthetic_try_except_else_finally_feature(value: str) -> dict[str, str]:
-    # :: FeatureStart | name=synthetic_try_except_else_finally
+def fixture_try_except_else_finally_trace(value: str) -> dict[str, str]:
+    # :: FeatureStart | name=fixture_try_except_else_finally_trace
     result = "unset"
 
+    # :: FeatureBranch | name=fixture_try_except_else_finally_trace | branch=try_success
+    # :: FeatureBranch | name=fixture_try_except_else_finally_trace | branch=value_error
+    # :: FeatureBranch | name=fixture_try_except_else_finally_trace | branch=type_error
     try:
-        # :: FeatureBranch | name=synthetic_try_except_else_finally | branch=try_body
-        normalized = value.strip()
-
-        # :: FeatureBranch | name=synthetic_try_except_else_finally | branch=direct_value | control_polarity=true
-        # :: FeatureBranch | name=synthetic_try_except_else_finally | branch=parse_attempt | control_polarity=false
-        if normalized == "value":
-            result = "direct-value"
-        else:
-            parsed = int(normalized)
-            result = f"parsed:{parsed}"
+        parsed = int(value)
 
     except ValueError:
-        # :: FeatureBranch | name=synthetic_try_except_else_finally | branch=value_error
         result = "value-error"
 
     except TypeError:
-        # :: FeatureBranch | name=synthetic_try_except_else_finally | branch=type_error
         result = "type-error"
 
     else:
-        # :: FeatureBranch | name=synthetic_try_except_else_finally | branch=try_else
-        result = f"else:{result}"
+        result = f"parsed:{parsed}"
 
     finally:
-        # :: FeatureTrace | name=synthetic_try_except_else_finally
         result = f"finally:{result}"
 
-    # :: FeatureConverge | name=synthetic_try_except_else_finally | branches=try_body,direct_value,parse_attempt,value_error,type_error,try_else | into=main
-    converged = f"try:{result}"
+    # :: FeatureConverge | name=fixture_try_except_else_finally_trace | branches=try_success,value_error,type_error | into=main
+    converged = result
 
-    # :: FeatureEnd | name=synthetic_try_except_else_finally
-    return finish(converged)
-
-
-def synthetic_try_finally_resume_feature(value: int) -> dict[str, str]:
-    # :: FeatureStart | name=synthetic_try_finally_resume
-    result = value
-
-    # :: FeatureBranch | name=synthetic_try_finally_resume | branch=try_body
-    try:
-        result += 1
-
-    finally:
-        # :: FeatureTrace | name=synthetic_try_finally_resume
-        result += 10
-
-    # :: FeatureConverge | name=synthetic_try_finally_resume | branches=try_body | into=main
-    result += 100
-
-    # :: FeatureEnd | name=synthetic_try_finally_resume
-    return finish(str(result))
+    # :: FeatureEnd | name=fixture_try_except_else_finally_trace
+    return fixture_finish(converged)
 
 
-def synthetic_try_direct_disruption_feature(value: int) -> dict[str, str]:
-    # :: FeatureStart | name=synthetic_try_direct_disruption
+def fixture_try_with_inner_if_branch(value: str) -> dict[str, str]:
+    # :: FeatureStart | name=fixture_try_with_inner_if_branch
     result = "unset"
 
+    # :: FeatureBranch | name=fixture_try_with_inner_if_branch | branch=try_success
+    # :: FeatureBranch | name=fixture_try_with_inner_if_branch | branch=value_error
     try:
-        # :: FeatureBranch | name=synthetic_try_direct_disruption | branch=zero | control_polarity=true
-        # :: FeatureBranch | name=synthetic_try_direct_disruption | branch=nonzero | control_polarity=false
-        if value == 0:
-            raise ValueError("zero")
+        normalized = value.strip()
 
-        result = f"value:{value}"
+        # :: FeatureBranch | name=fixture_try_with_inner_if_branch | branch=direct_value | control_polarity=true
+        # :: FeatureBranch | name=fixture_try_with_inner_if_branch | branch=parse_value | control_polarity=false
+        if normalized == "value":
+            result = "direct-value"
+        else:
+            result = f"parsed:{int(normalized)}"
+
+        # :: FeatureConverge | name=fixture_try_with_inner_if_branch | branches=direct_value,parse_value | into=try_success
+        result = f"try:{result}"
 
     except ValueError:
-        # :: FeatureBranch | name=synthetic_try_direct_disruption | branch=value_error
-        result = "wrapped"
+        result = "value-error"
 
     finally:
-        # :: FeatureTrace | name=synthetic_try_direct_disruption
         result = f"finally:{result}"
 
-    # :: FeatureConverge | name=synthetic_try_direct_disruption | branches=zero,nonzero,value_error | into=main
-    converged = f"try-direct:{result}"
+    # :: FeatureConverge | name=fixture_try_with_inner_if_branch | branches=try_success,value_error | into=main
+    converged = result
 
-    # :: FeatureEnd | name=synthetic_try_direct_disruption
-    return finish(converged)
+    # :: FeatureEnd | name=fixture_try_with_inner_if_branch
+    return fixture_finish(converged)
 
 
 ################################################################################
-##  Flow tests: With + disruption
+##  Flow tests: with statement and post-with branch
 ################################################################################
 
 
-def synthetic_with_feature(path: str) -> dict[str, str]:
-    # :: FeatureStart | name=synthetic_with
+def fixture_with_trace_and_content_branch(path: str) -> dict[str, str]:
+    # :: FeatureStart | name=fixture_with_trace_and_content_branch
     handle: BufferedReader
 
-    # :: FeatureTrace | name=synthetic_with
+    # :: FeatureTrace | name=fixture_with_trace_and_content_branch | comment="with statement entered"
     with open(path, encoding="utf-8") as handle:
-        # :: FeatureBranch | name=synthetic_with | branch=with_body
+        # :: FeatureTrace | name=fixture_with_trace_and_content_branch | comment="with body entered"
         content = handle.read()
 
-    # :: FeatureBranch | name=synthetic_with | branch=has_content | control_polarity=true
-    # :: FeatureBranch | name=synthetic_with | branch=empty | control_polarity=false
+    # :: FeatureBranch | name=fixture_with_trace_and_content_branch | branch=has_content | control_polarity=true
+    # :: FeatureBranch | name=fixture_with_trace_and_content_branch | branch=empty_content | control_polarity=false
     if content:
         result = "has-content"
     else:
         result = "empty"
 
-    # :: FeatureConverge | name=synthetic_with | branches=with_body,has_content,empty | into=main
+    # :: FeatureConverge | name=fixture_with_trace_and_content_branch | branches=has_content,empty_content | into=main
     converged = f"with:{result}"
 
-    # :: FeatureEnd | name=synthetic_with
-    return finish(converged)
+    # :: FeatureEnd | name=fixture_with_trace_and_content_branch
+    return fixture_finish(converged)
 
 
-def synthetic_with_disruption_feature(path, mode: str) -> dict[str, str]:
-    # :: FeatureStart | name=synthetic_with_disruption
-    handle: BufferedReader
+################################################################################
+##  Flow tests: mixed control without pretending try/with regions are branches
+################################################################################
+
+
+def fixture_mixed_control_feature(values: list[str], path: str) -> dict[str, str]:
+    # :: FeatureStart | name=fixture_mixed_control_feature
     result = "unset"
-
-    # :: FeatureBranch | name=synthetic_with_disruption | branch=raise_mode | control_polarity=true
-    # :: FeatureBranch | name=synthetic_with_disruption | branch=read_mode | control_polarity=false
-    if mode == "raise":
-        try:
-            # :: FeatureTrace | name=synthetic_with_disruption
-            with path.open("r") as handle:
-                # :: FeatureBranch | name=synthetic_with_disruption | branch=with_raise_body
-                handle.read()
-                raise RuntimeError("forced failure")
-
-        except RuntimeError:
-            # :: FeatureBranch | name=synthetic_with_disruption | branch=runtime_error
-            result = "raised"
-
-    else:
-        # :: FeatureTrace | name=synthetic_with_disruption
-        with path.open("r") as handle:
-            # :: FeatureBranch | name=synthetic_with_disruption | branch=with_read_body
-            result = handle.read()
-
-    # :: FeatureConverge | name=synthetic_with_disruption | branches=raise_mode,read_mode,with_raise_body,runtime_error,with_read_body | into=main
-    converged = f"with-disruption:{result}"
-
-    # :: FeatureEnd | name=synthetic_with_disruption
-    return finish(converged)
-
-
-def synthetic_with_loop_disruption_feature(values: list[str], path) -> dict[str, str]:
-    # :: FeatureStart | name=synthetic_with_loop_disruption
-    total = 0
     handle: BufferedReader
 
-    for value in values:
-        # :: FeatureTrace | name=synthetic_with_loop_disruption
-        with path.open("r") as handle:
-            # :: FeatureBranch | name=synthetic_with_loop_disruption | branch=with_body
-            handle.read()
+    # :: FeatureBranch | name=fixture_mixed_control_feature | branch=try_success
+    # :: FeatureBranch | name=fixture_mixed_control_feature | branch=os_error
+    try:
+        total = 0
 
-            # :: FeatureBranch | name=synthetic_with_loop_disruption | branch=loop_continue | control_polarity=true
-            # :: FeatureBranch | name=synthetic_with_loop_disruption | branch=not_continue | control_polarity=false
+        # :: FeatureBranch | name=fixture_mixed_control_feature | branch=loop_entered | control_polarity=true
+        # :: FeatureBranch | name=fixture_mixed_control_feature | branch=loop_skipped | control_polarity=false
+        for value in values:
+            # :: FeatureBranch | name=fixture_mixed_control_feature | branch=skip_value | control_polarity=true
+            # :: FeatureBranch | name=fixture_mixed_control_feature | branch=use_value | control_polarity=false
             if value == "skip":
                 continue
 
-            # :: FeatureBranch | name=synthetic_with_loop_disruption | branch=loop_break | control_polarity=true
-            # :: FeatureBranch | name=synthetic_with_loop_disruption | branch=loop_consume | control_polarity=false
-            if value == "stop":
-                break
+            total += len(value)
 
-            total += 1
+        # :: FeatureConverge | name=fixture_mixed_control_feature | branches=loop_entered,loop_skipped | into=try_success
+        loop_result = total
 
-    # :: FeatureConverge | name=synthetic_with_loop_disruption | branches=with_body,loop_continue,not_continue,loop_break,loop_consume | into=main
-    converged = f"with-loop:{total}"
+        with open(path, encoding="utf-8") as handle:
+            content = handle.read()
 
-    # :: FeatureEnd | name=synthetic_with_loop_disruption
-    return finish(converged)
+        # :: FeatureBranch | name=fixture_mixed_control_feature | branch=has_content | control_polarity=true
+        # :: FeatureBranch | name=fixture_mixed_control_feature | branch=empty_content | control_polarity=false
+        if content:
+            result = f"content:{loop_result}"
+        else:
+            result = f"empty:{loop_result}"
 
+        # :: FeatureConverge | name=fixture_mixed_control_feature | branches=has_content,empty_content | into=try_success
+        result = f"mixed:{result}"
 
-################################################################################
-##  Flow tests: interunit call
-################################################################################
+    except OSError:
+        result = "os-error"
 
+    finally:
+        result = f"finally:{result}"
 
-def synthetic_interunit_call_feature(
-    dependency: SyntheticDependency,
-    value: str,
-) -> dict[str, str]:
-    # :: FeatureStart | name=synthetic_interunit_call
-    normalized = normalize_input(value)
+    # :: FeatureConverge | name=fixture_mixed_control_feature | branches=try_success,os_error | into=main
+    converged = result
 
-    # :: FeatureTrace | name=synthetic_interunit_call | operation=dependency_transform
-    transformed = dependency.transform(normalized)
-
-    # :: FeatureEnd | name=synthetic_interunit_call
-    return finish(transformed)
+    # :: FeatureEnd | name=fixture_mixed_control_feature
+    return fixture_finish(converged)
 
 
 ################################################################################

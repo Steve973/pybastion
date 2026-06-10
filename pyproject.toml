@@ -22,31 +22,52 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Testing",
-    "Topic :: Software Development :: Quality Assurance"
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+    "pybastion-common==0.1.0",
+    "pybastion-unit==0.1.0",
+    "pybastion-integration==0.1.0",
+    "networkx==3.4.2",
+    "pyyaml>=6.0.3,<7.0",
+    "radon>=6.0.1",
+    "vulture>=2.14",
+    "z3-solver>=4.15.8.0",
 ]
 
-[tool.poetry]
-package-mode = true
-packages = [{ include = "pybastion", from = "src" }]
+[dependency-groups]
+dev = [
+    "black>=24.0.0",
+    "mypy>=1.19.1",
+    "pytest>=8.0.0",
+    "ruff>=0.1.0",
+]
 
-[tool.poetry.dependencies]
-pybastion-common =      { path = "pybastion-common", develop = true }
-pybastion-unit =        { path = "pybastion-unit", develop = true }
-pybastion-integration = { path = "pybastion-integration", develop = true }
-
-[tool.poetry.group.dev.dependencies]
-pytest = ">=8.0.0"
-black = ">=24.0.0"
-ruff = ">=0.1.0"
-
-[tool.poetry.scripts]
+[project.scripts]
 pybastion = "pybastion.cli:main"
 pybastion-unit = "pybastion_unit.cli:main"
 pybastion-integration = "pybastion_integration.cli:main"
 
+[tool.uv]
+build-constraint-dependencies = [
+    "uv_build>=0.11.20,<0.12",
+]
+
+[tool.uv.sources]
+pybastion-common = { workspace = true }
+pybastion-unit = { workspace = true }
+pybastion-integration = { workspace = true }
+
+[tool.uv.workspace]
+members = [
+    "pybastion-common",
+    "pybastion-unit",
+    "pybastion-integration",
+]
+
 [build-system]
-requires = ["poetry-core>=2.4.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["uv_build>=0.11.20,<0.12"]
+build-backend = "uv_build"
 
 [tool.pytest.ini_options]
 testpaths = [

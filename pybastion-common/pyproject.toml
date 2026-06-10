@@ -5,7 +5,7 @@ description = "Common/shared code for pybastion"
 authors = [
     { name = "Steve Storck", email = "steve973@gmail.com" }
 ]
-readme = "../README.md"
+readme = { text = "# pybastion-common\n\nCommon/shared code for pybastion.\n", content-type = "text/markdown" }
 license = "MIT"
 requires-python = ">=3.11,<4.0"
 classifiers = [
@@ -22,21 +22,16 @@ classifiers = [
     "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Testing",
-    "Topic :: Software Development :: Quality Assurance"
+    "Topic :: Software Development :: Quality Assurance",
 ]
 
-[tool.poetry]
-packages = [
-    { include = "pybastion_common" }
+dependencies = [
+    "z3-solver",
 ]
 
-[tool.poetry.dependencies]
-python = ">=3.11,<4.0"
-z3-solver = ">=4.15.8.0"
-
-[tool.poetry-monoranger-plugin]
-enabled = true
+[tool.uv.build-backend]
+module-root = ""
 
 [build-system]
-requires = ["poetry-core>=2.4.0,<3.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["uv_build"]
+build-backend = "uv_build"

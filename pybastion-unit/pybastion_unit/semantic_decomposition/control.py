@@ -80,8 +80,6 @@ def _collect_loop_transfer_routes(
     owner_id: str,
     body: list[ast.stmt],
     source_region_id: str,
-    decision_region_id: str,
-    decision_line: int,
     loop_exit_line: int | None,
 ) -> list[ControlRoute]:
     routes: list[ControlRoute] = []
@@ -93,8 +91,6 @@ def _collect_loop_transfer_routes(
                 owner_id=owner_id,
                 kind=ControlRouteKind.LOOP_CONTINUE,
                 source_region_id=current_source_region_id,
-                target_region_id=decision_region_id,
-                target_line=decision_line,
                 exit_kind=ExitKind.CONTINUE,
                 synthetic=True,
             )
@@ -972,8 +968,6 @@ class ForDecomposer(ControlOwnerDecomposer):
                 owner_id=owner_id,
                 body=stmt.body,
                 source_region_id=body_region_id,
-                decision_region_id=condition_region_id,
-                decision_line=stmt.lineno,
                 loop_exit_line=continuation_target,
             )
         )
@@ -985,20 +979,6 @@ class ForDecomposer(ControlOwnerDecomposer):
                 body=stmt.body,
             )
         )
-
-        if not _body_cannot_complete_normally(stmt.body):
-            routes.append(
-                ControlRoute(
-                    id=_route_id(owner_id, "body_next_iteration"),
-                    owner_id=owner_id,
-                    kind=ControlRouteKind.LOOP_ITERATION,
-                    source_region_id=body_region_id,
-                    target_region_id=condition_region_id,
-                    target_line=stmt.lineno,
-                    exit_kind=ExitKind.NORMAL,
-                    synthetic=True,
-                )
-            )
 
         return ControlStatementDecomposition(
             description=f"{source_construct} statement at line {stmt.lineno}",
@@ -1212,8 +1192,6 @@ class WhileDecomposer(ControlOwnerDecomposer):
                 owner_id=owner_id,
                 body=stmt.body,
                 source_region_id=body_region_id,
-                decision_region_id=condition_region_id,
-                decision_line=stmt.lineno,
                 loop_exit_line=continuation_target,
             )
         )
@@ -1225,20 +1203,6 @@ class WhileDecomposer(ControlOwnerDecomposer):
                 body=stmt.body,
             )
         )
-
-        if not _body_cannot_complete_normally(stmt.body):
-            routes.append(
-                ControlRoute(
-                    id=_route_id(owner_id, "body_next_iteration"),
-                    owner_id=owner_id,
-                    kind=ControlRouteKind.LOOP_ITERATION,
-                    source_region_id=body_region_id,
-                    target_region_id=condition_region_id,
-                    target_line=stmt.lineno,
-                    exit_kind=ExitKind.NORMAL,
-                    synthetic=True,
-                )
-            )
 
         return ControlStatementDecomposition(
             description=f"while statement at line {stmt.lineno}",
