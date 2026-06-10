@@ -28,8 +28,6 @@ classifiers = [
 dependencies = [
     "pybastion-common",
     "pyyaml",
-    "radon",
-    "vulture",
     "z3-solver",
 ]
 
