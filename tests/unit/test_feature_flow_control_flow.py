@@ -273,7 +273,8 @@ def test_loop_direct_disruptions_emit_continue_and_break_routes(
 
     assert len(continue_routes) == 1
     assert continue_routes[0].get("exit_kind") == "continue"
-    assert continue_routes[0].get("target_region_id") == f"{for_owner_id}:iterator"
+    assert continue_routes[0].get("target_region_id") is None
+    assert continue_routes[0].get("target_line") is None
 
     assert len(break_routes) == 1
     assert break_routes[0].get("exit_kind") == "break"
@@ -310,7 +311,8 @@ def test_nested_loop_disruptions_use_nested_if_region_as_source(
     ]
 
     assert len(continue_routes) == 1
-    assert continue_routes[0].get("target_region_id").endswith(":iterator")
+    assert continue_routes[0].get("target_region_id") is None
+    assert continue_routes[0].get("target_line") is None
     assert continue_routes[0].get("exit_kind") == "continue"
 
     assert len(for_break_routes) == 1
@@ -470,7 +472,8 @@ def test_nested_match_loop_disruptions_use_match_case_region_as_source(
 
     assert len(continue_routes) == 1
     assert continue_routes[0].get("exit_kind") == "continue"
-    assert continue_routes[0].get("target_region_id") == f"{loop_owner_id}:iterator"
+    assert continue_routes[0].get("target_region_id") is None
+    assert continue_routes[0].get("target_line") is None
 
     assert len(break_routes) == 1
     assert break_routes[0].get("exit_kind") == "break"
@@ -517,18 +520,16 @@ def test_nested_try_loop_disruptions_use_nested_and_handler_regions_as_source(
 
     assert len(nested_if_continue_routes) == 1
     assert nested_if_continue_routes[0].get("exit_kind") == "continue"
-    assert nested_if_continue_routes[0].get("target_region_id") == (
-        f"{loop_owner_id}:iterator"
-    )
+    assert nested_if_continue_routes[0].get("target_region_id") is None
+    assert nested_if_continue_routes[0].get("target_line") is None
 
     assert len(nested_if_break_routes) == 1
     assert nested_if_break_routes[0].get("exit_kind") == "break"
 
     assert len(handler_continue_routes) == 1
     assert handler_continue_routes[0].get("exit_kind") == "continue"
-    assert handler_continue_routes[0].get("target_region_id") == (
-        f"{loop_owner_id}:iterator"
-    )
+    assert handler_continue_routes[0].get("target_region_id") is None
+    assert handler_continue_routes[0].get("target_line") is None
 
 
 def test_nested_with_loop_disruptions_use_nested_if_regions_as_source(
@@ -572,9 +573,8 @@ def test_nested_with_loop_disruptions_use_nested_if_regions_as_source(
 
     assert len(nested_if_continue_routes) == 1
     assert nested_if_continue_routes[0].get("exit_kind") == "continue"
-    assert nested_if_continue_routes[0].get("target_region_id") == (
-        f"{loop_owner_id}:iterator"
-    )
+    assert nested_if_continue_routes[0].get("target_region_id") is None
+    assert nested_if_continue_routes[0].get("target_line") is None
 
     assert len(nested_if_break_routes) == 1
     assert nested_if_break_routes[0].get("exit_kind") == "break"
@@ -625,9 +625,8 @@ def test_nested_loop_transfers_bind_to_inner_loop_not_outer_loop(
 
     assert len(inner_continue_routes) == 1
     assert inner_continue_routes[0].get("exit_kind") == "continue"
-    assert inner_continue_routes[0].get("target_region_id") == (
-        f"{inner_loop_owner_id}:iterator"
-    )
+    assert inner_continue_routes[0].get("target_region_id") is None
+    assert inner_continue_routes[0].get("target_line") is None
 
     assert len(inner_break_routes) == 1
     assert inner_break_routes[0].get("exit_kind") == "break"
