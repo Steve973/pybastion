@@ -228,7 +228,7 @@ def get_stage_output(stage: int) -> Path:
             return resolve_path(
                 _get_stage_value(
                     "stage3_output",
-                    "stage3-integration-test-specs.yaml",
+                    "integration-test-specs.yaml",
                 ),
                 base=output_dir,
             )

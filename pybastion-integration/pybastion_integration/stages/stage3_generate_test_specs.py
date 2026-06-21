@@ -967,6 +967,10 @@ def build_spec(
 # =============================================================================
 
 
+def typed_stage_output_path(base_output: Path, spec_type: str) -> Path:
+    return base_output.with_name(f"{spec_type}-{base_output.name}")
+
+
 def config_stage_output(stage: int) -> Path | None:
     getter = getattr(config, "get_stage_output", None)
     if getter is None:
@@ -1070,9 +1074,6 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Target root: {args.target_root}")
 
     input_path = args.input or config_stage_output(1)
-    inventories_root = args.inventories_root or config_inventories_root()
-    output_path = args.output or config_stage_output(3)
-
     if input_path is None:
         print(
             "ERROR: --input is required when config.get_stage_output(1) is unavailable",
@@ -1080,13 +1081,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    if output_path is None:
-        print(
-            "ERROR: --output is required when config.get_stage_output(3) is unavailable",
-            file=sys.stderr,
-        )
-        return 1
-
+    inventories_root = args.inventories_root or config_inventories_root()
     if inventories_root is None:
         print(
             "ERROR: --inventories-root is required when config.get_inventories_root() is unavailable",
@@ -1094,17 +1089,26 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    input_path = Path(input_path)
-    output_path = Path(output_path)
-    inventories_root = Path(inventories_root)
+    base_output_path = args.output or config_stage_output(3)
+    if base_output_path is None:
+        print(
+            "ERROR: --output is required when config.get_stage_output(3) is unavailable",
+            file=sys.stderr,
+        )
+        return 1
 
+    input_path = Path(input_path)
     if not input_path.exists():
         print(f"ERROR: Stage 1 graph not found: {input_path}", file=sys.stderr)
         return 1
 
+    inventories_root = Path(inventories_root)
     if not inventories_root.exists():
         print(f"ERROR: Inventories root not found: {inventories_root}", file=sys.stderr)
         return 1
+
+    seam_output_path = typed_stage_output_path(base_output_path, "seam")
+    feature_output_path = typed_stage_output_path(base_output_path, "feature")
 
     graph_format = infer_graph_format(input_path, args.graph_format)
 
@@ -1215,12 +1219,15 @@ def main(argv: list[str] | None = None) -> int:
         "test_specs": specs,
     }
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "w", encoding="utf-8") as f:
+    base_output_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(base_output_path, "w", encoding="utf-8") as f:
         yaml.dump(output_data, f, **yaml_dump_options())
 
     print(
-        f"\n✓ Generated {len(specs)} integration seam test specification(s) → {output_path}"
+        f"\n✓ Generated {len(specs)} integration seam test specification(s) → {seam_output_path}"
+    )
+    print(
+        f"\n✓ Generated {len(specs)} integration feature test specification(s) → {feature_output_path}"
     )
     print(f"  Inventory seam sources:    {len(seams)}")
     print(f"  Graph-backed seams:        {graph_backed_seams}")

@@ -20,6 +20,9 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from pybastion_integration import config
+from pybastion_integration.stages.stage3_generate_test_specs import (
+    typed_stage_output_path,
+)
 
 TOOL_ROOT = Path(__file__).resolve().parent
 STAGES_DIR = TOOL_ROOT / "stages"
@@ -70,6 +73,14 @@ def build_paths() -> dict[str, Path]:
         "stage1_output": config.get_stage_output(1),
         "stage2_output": config.get_stage_output(2),
         "stage3_output": config.get_stage_output(3),
+        "stage3_seam_output": typed_stage_output_path(
+            config.get_stage_output(3),
+            "seam",
+        ),
+        "stage3_feature_output": typed_stage_output_path(
+            config.get_stage_output(3),
+            "feature",
+        ),
         "stage2_marker_inventory_output": config.get_stage2_marker_inventory_output(),
         "stage2_branch_points_output": config.get_stage2_branch_points_output(),
         "stage2_converge_points_output": config.get_stage2_converge_points_output(),
@@ -142,7 +153,7 @@ def build_stage_cmd(
                 "--target-root",
                 str(target_root),
                 "--input",
-                str(paths["stage3_output"]),
+                str(paths["stage3_seam_output"]),
                 "--output-dir",
                 str(paths["spec_split_output_dir"]),
             ]
