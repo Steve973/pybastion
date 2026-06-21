@@ -278,7 +278,12 @@ def clean_outputs(
         )
 
     if 3 in stages_to_run:
-        files_to_remove.append(paths["stage3_output"])
+        files_to_remove.extend(
+            [
+                paths["stage3_seam_output"],
+                paths["stage3_feature_output"],
+            ]
+        )
 
     if 4 in stages_to_run:
         split_dir = paths["spec_split_output_dir"]
@@ -331,9 +336,9 @@ def validate_prerequisites(
     if (
         4 in stages_to_run
         and 3 not in stages_to_run
-        and not paths["stage3_output"].exists()
+        and not paths["stage3_seam_output"].exists()
     ):
-        errors.append(f"Stage 4 input not found: {paths['stage3_output']}")
+        errors.append(f"Stage 4 input not found: {paths['stage3_seam_output']}")
 
     if check_graph and not paths["graph_checker_script"].exists():
         errors.append(
@@ -576,7 +581,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             print(f"Feature branch points: {paths['stage2_branch_points_output']}")
             print(f"Feature converge points: {paths['stage2_converge_points_output']}")
-        print(f"Integration specs: {paths['stage3_output']}")
+        print(f"Seam integration specs: {paths['stage3_seam_output']}")
+        print(f"Feature integration specs: {paths['stage3_feature_output']}")
         print(f"Running stages: {stages_to_run}")
         print(f"Graph format: {graph_format}")
         print(f"Graph checker enabled: {check_graph}")
@@ -634,7 +640,7 @@ def main(argv: list[str] | None = None) -> int:
         final_output: Path | str = {
             1: paths["stage1_output"],
             2: paths["stage2_output"],
-            3: paths["stage3_output"],
+            3: f"{paths['stage3_seam_output']}, {paths['stage3_feature_output']}",
             4: str(paths["spec_split_output_dir"] / "*.yaml"),
         }[final_stage]
         print(f"\nFinal output: {final_output}")

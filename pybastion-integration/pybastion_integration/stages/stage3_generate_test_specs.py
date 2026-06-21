@@ -1220,15 +1220,15 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     base_output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(base_output_path, "w", encoding="utf-8") as f:
+    with open(seam_output_path, "w", encoding="utf-8") as f:
         yaml.dump(output_data, f, **yaml_dump_options())
 
     print(
         f"\n✓ Generated {len(specs)} integration seam test specification(s) → {seam_output_path}"
     )
-    print(
-        f"\n✓ Generated {len(specs)} integration feature test specification(s) → {feature_output_path}"
-    )
+    # print(
+    #     f"\n✓ Generated {len(specs)} integration feature test specification(s) → {feature_output_path}"
+    # )
     print(f"  Inventory seam sources:    {len(seams)}")
     print(f"  Graph-backed seams:        {graph_backed_seams}")
     print(f"  Inventory-only seams:      {inventory_only_seams}")
