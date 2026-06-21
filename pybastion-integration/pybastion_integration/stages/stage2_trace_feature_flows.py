@@ -3492,7 +3492,10 @@ def write_feature_flow_cases(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Inspect feature-flow markers from PyBastion inventory YAML files."
+        description=(
+            "Trace completed feature-flow cases from PyBastion inventory YAML "
+            "files and the Stage 1 EI CFG."
+        )
     )
     parser.add_argument(
         "--inventory-root",
@@ -3504,12 +3507,13 @@ def main() -> int:
         "--output",
         type=Path,
         required=True,
-        help="Output YAML path.",
+        help="Primary Stage 2 feature-flow cases YAML output path.",
     )
     parser.add_argument(
         "--cfg",
         type=Path,
-        help="Optional stage1 EI CFG pickle for feature flow path probing.",
+        required=True,
+        help="Stage 1 EI CFG pickle or YAML used for feature-flow path tracing.",
     )
     parser.add_argument(
         "--cfg-format",
@@ -3518,19 +3522,14 @@ def main() -> int:
         help="CFG format. Inferred from --cfg extension when omitted.",
     )
     parser.add_argument(
-        "--branch-points-output",
-        type=Path,
-        help="Optional feature branch point topology YAML output path.",
-    )
-    parser.add_argument(
-        "--summarize-flow-cases",
-        action="store_true",
-        help="Print a console summary of expanded feature flow cases.",
-    )
-    parser.add_argument(
         "--marker-inventory-output",
         type=Path,
         help="Optional marker inventory YAML output path.",
+    )
+    parser.add_argument(
+        "--branch-points-output",
+        type=Path,
+        help="Optional feature branch point topology YAML output path.",
     )
     parser.add_argument(
         "--converge-points-output",
@@ -3540,7 +3539,15 @@ def main() -> int:
     parser.add_argument(
         "--emit-all-output",
         action="store_true",
-        help="Emit all feature flow output data files.",
+        help=(
+            "Emit optional Stage 2 diagnostic/support outputs. Each optional "
+            "output is written only when its explicit output path is also provided."
+        ),
+    )
+    parser.add_argument(
+        "--summarize-flow-cases",
+        action="store_true",
+        help="Print a console summary of expanded feature flow cases.",
     )
     parser.add_argument(
         "-v",
@@ -3555,10 +3562,17 @@ def main() -> int:
     inventories = build_feature_marker_inventory_from_paths(inventory_paths)
 
     marker_inventory_output = feature_marker_inventory_to_dict(inventories)
-    args.marker_inventory_output.parent.mkdir(parents=True, exist_ok=True)
+    marker_count = sum(
+        feature["summary"]["total_markers"]
+        for feature in marker_inventory_output["features"]
+    )
+
+    print(f"Features: {marker_inventory_output['feature_count']}")
+    print(f"Markers: {marker_count}")
 
     if args.emit_all_output and args.marker_inventory_output:
-        args.output.write_text(
+        args.marker_inventory_output.parent.mkdir(parents=True, exist_ok=True)
+        args.marker_inventory_output.write_text(
             yaml.dump(
                 marker_inventory_output,
                 sort_keys=False,
@@ -3568,14 +3582,7 @@ def main() -> int:
             encoding="utf-8",
         )
 
-    marker_count = sum(
-        feature["summary"]["total_markers"]
-        for feature in marker_inventory_output["features"]
-    )
-
-    print(f"Feature marker inventory written to {args.output}")
-    print(f"Features: {marker_inventory_output['feature_count']}")
-    print(f"Markers: {marker_count}")
+        print(f"Feature marker inventory written to {args.marker_inventory_output}")
 
     if args.emit_all_output and args.branch_points_output:
         branch_points_output = write_feature_branch_points(
@@ -3607,25 +3614,25 @@ def main() -> int:
 
     graphs = load_graph(args.cfg, args.cfg_format)
 
-    if args.summarize_flow_cases:
-        if args.cfg is None or graphs is None:
-            raise ValueError("--summarize-flow-cases requires --cfg")
+    if graphs is None:
+        raise ValueError(f"Could not load Stage 1 EI CFG from {args.cfg}")
 
+    if args.summarize_flow_cases:
         summarize_feature_flow_cases(
             graphs,
             inventories,
         )
 
-    if graphs is not None and args.output:
-        case_output = write_feature_flow_cases(
-            graphs=graphs,
-            inventories=inventories,
-            output_path=args.output,
-            verbose=args.verbose,
-        )
+    case_output = write_feature_flow_cases(
+        graphs=graphs,
+        inventories=inventories,
+        output_path=args.output,
+        verbose=args.verbose,
+    )
 
-        print(f"Feature flow cases written to {args.output}")
-        print(f"Feature flow cases: {case_output['case_count']}")
+    print(f"Feature flow cases written to {args.output}")
+    print(f"Feature flow cases: {case_output['case_count']}")
+    print(f"Unresolved feature flow cases: {case_output['unresolved_case_count']}")
 
     return 0
 

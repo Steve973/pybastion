@@ -1,26 +1,28 @@
 #!/usr/bin/env python3
 """
-Stage 2: Generate Integration Seam Test Specifications
+Stage 3: Generate Integration Test Specifications
 
-Input:
-  - Stage 1 inventory-based call graph
-    - pickle output from build_full_call_graph_from_inventory.py, or
-    - YAML node-link output from build_full_call_graph_from_inventory.py
+Inputs:
+  - Stage 1 inventory-backed EI call graph
   - Unit inventory files
+  - Stage 2 completed feature-flow cases
 
-Output:
-  - Integration seam test specifications for downstream AI test generation
+Outputs:
+  - Seam-scoped integration test specifications
+  - Feature-flow-scoped integration test specifications
 
-For each integration seam:
-  - Reads execution paths from the unit inventory integration candidate
-  - Categorizes paths into: happy_path, error_handling, edge_cases, alternative_flows
-  - Reduces paths to representative paths to avoid redundant test scenarios
-  - Identifies fixture requirements from prior integration candidates or collapsed
-    mechanical/utility operation nodes along the selected path
-  - Produces one spec per seam
+Seam-scoped specs describe integration obligations at unit boundaries. They
+provide enough inventory-backed path, source, target, fixture, and uncertainty
+context to write tests proving that adjacent units work together across a seam.
 
-This stage is intentionally seam-oriented. It does not trace full feature flows.
-Feature flow tracing belongs to a later stage driven by feature flow markers.
+Feature-flow-scoped specs describe end-to-end feature obligations discovered by
+Stage 2. They consume completed feature-flow cases directly and preserve the
+case identity, branch path, end condition, path evidence, integration-relevant
+operations, fixture constraints, and remaining uncertainty needed to write
+integration tests for the described feature behavior.
+
+Stage 3 must not recompute feature-flow paths. Feature-flow spec generation uses
+the completed Stage 2 feature-flow cases as its path authority.
 """
 
 from __future__ import annotations
@@ -1024,7 +1026,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "--output",
         type=Path,
         default=None,
-        help="Output file. Defaults to config.get_stage_output(2) when available.",
+        help="Output file. Defaults to config.get_stage_output(3) when available.",
     )
     parser.add_argument(
         "--target-root",
@@ -1069,7 +1071,7 @@ def main(argv: list[str] | None = None) -> int:
 
     input_path = args.input or config_stage_output(1)
     inventories_root = args.inventories_root or config_inventories_root()
-    output_path = args.output or config_stage_output(2)
+    output_path = args.output or config_stage_output(3)
 
     if input_path is None:
         print(
@@ -1080,7 +1082,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if output_path is None:
         print(
-            "ERROR: --output is required when config.get_stage_output(2) is unavailable",
+            "ERROR: --output is required when config.get_stage_output(3) is unavailable",
             file=sys.stderr,
         )
         return 1
