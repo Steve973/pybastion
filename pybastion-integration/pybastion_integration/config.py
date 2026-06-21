@@ -4,8 +4,9 @@ Configuration loader for the pybastion integration analysis pipeline.
 The current pipeline is inventory-first:
 
   Stage 1: Build the EI-level call graph from inventory files
-  Stage 2: Generate integration seam test specifications from the graph
-  Stage 3: Split integration seam specs by source-unit -> target-unit pair
+  Stage 2: Trace feature-flow cases from feature markers and the EI CFG
+  Stage 3: Generate integration test specifications
+  Stage 4: Split integration test specs
 
 Path configuration uses a parent-relative model rather than placeholder
 substitution. Absolute paths are used as-is. Relative child paths are resolved
@@ -15,7 +16,6 @@ against their owning parent path.
 from __future__ import annotations
 
 import argparse
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -197,8 +197,7 @@ def get_stage1_format() -> str:
     value = _get_stage_value("stage1_format", "pickle").strip().lower()
     if value not in {"pickle", "yaml"}:
         raise ValueError(
-            f"Invalid stages.stage1_format: {value!r}; "
-            "expected 'pickle' or 'yaml'"
+            f"Invalid stages.stage1_format: {value!r}; expected 'pickle' or 'yaml'"
         )
     return value
 
@@ -221,20 +220,20 @@ def get_stage_output(stage: int) -> Path:
             return resolve_path(
                 _get_stage_value(
                     "stage2_output",
-                    "stage2-integration-test-specs.yaml",
+                    "stage2-feature-flow-cases.yaml",
                 ),
                 base=output_dir,
             )
         case 3:
-            return get_spec_split_output_dir()
-        case 4:
             return resolve_path(
                 _get_stage_value(
-                    "stage4_output",
-                    "stage4-feature-flow-cases.yaml",
+                    "stage3_output",
+                    "stage3-integration-test-specs.yaml",
                 ),
                 base=output_dir,
             )
+        case 4:
+            return get_spec_split_output_dir()
         case _:
             raise ValueError(f"Unsupported stage: {stage}")
 
@@ -243,37 +242,37 @@ def get_stage_input(stage: int) -> Path:
     if stage not in {2, 3, 4}:
         raise ValueError(f"Stage must be 2, 3, or 4 (got {stage})")
 
-    if stage == 4:
+    if stage in {2, 3}:
         return get_stage_output(1)
 
-    return get_stage_output(stage - 1)
+    return get_stage_output(3)
 
 
-def get_stage4_marker_inventory_output() -> Path:
+def get_stage2_marker_inventory_output() -> Path:
     return resolve_path(
         _get_stage_value(
-            "stage4_marker_inventory_output",
-            "stage4-feature-marker-inventory.yaml",
+            "stage2_marker_inventory_output",
+            "stage2-feature-marker-inventory.yaml",
         ),
         base=get_integration_output_dir(),
     )
 
 
-def get_stage4_branch_points_output() -> Path:
+def get_stage2_branch_points_output() -> Path:
     return resolve_path(
         _get_stage_value(
-            "stage4_branch_points_output",
-            "stage4-feature-branch-points.yaml",
+            "stage2_branch_points_output",
+            "stage2-feature-branch-points.yaml",
         ),
         base=get_integration_output_dir(),
     )
 
 
-def get_stage4_converge_points_output() -> Path:
+def get_stage2_converge_points_output() -> Path:
     return resolve_path(
         _get_stage_value(
-            "stage4_converge_points_output",
-            "stage4-feature-converge-points.yaml",
+            "stage2_converge_points_output",
+            "stage2-feature-converge-points.yaml",
         ),
         base=get_integration_output_dir(),
     )
@@ -402,17 +401,18 @@ def validate_config() -> list[str]:
             f"a YAML file: {stage1_output}"
         )
 
-    stage4_output = get_stage_output(4)
-    if stage4_output.suffix not in {".yaml", ".yml"}:
-        errors.append(
-            "stage4_output does not look like a YAML file: "
-            f"{stage4_output}"
-        )
+    stage2_output = get_stage_output(2)
+    if stage2_output.suffix not in {".yaml", ".yml"}:
+        errors.append(f"stage2_output does not look like a YAML file: {stage2_output}")
+
+    stage3_output = get_stage_output(3)
+    if stage3_output.suffix not in {".yaml", ".yml"}:
+        errors.append(f"stage3_output does not look like a YAML file: {stage3_output}")
 
     if get_stage1_format() != "pickle":
         errors.append(
-            "Stage 4 currently requires stages.stage1_format = 'pickle' "
-            "because feature flow tracing loads the EI CFG pickle."
+            "Stage 2 currently requires stages.stage1_format = 'pickle' "
+            "because feature-flow tracing loads the EI CFG pickle."
         )
 
     return errors
@@ -428,11 +428,11 @@ def print_config_summary() -> None:
     print(f"  Stage 1 output:       {get_stage_output(1)}")
     print(f"  Stage 1 format:       {get_stage1_format()}")
     print(f"  Stage 2 output:       {get_stage_output(2)}")
-    print(f"  Stage 3 output dir:   {get_stage_output(3)}")
-    print(f"  Stage 4 output:       {get_stage_output(4)}")
-    print(f"  Stage 4 inventory:    {get_stage4_marker_inventory_output()}")
-    print(f"  Stage 4 branches:     {get_stage4_branch_points_output()}")
-    print(f"  Stage 4 converges:    {get_stage4_converge_points_output()}")
+    print(f"  Stage 2 inventory:    {get_stage2_marker_inventory_output()}")
+    print(f"  Stage 2 branches:     {get_stage2_branch_points_output()}")
+    print(f"  Stage 2 converges:    {get_stage2_converge_points_output()}")
+    print(f"  Stage 3 output:       {get_stage_output(3)}")
+    print(f"  Stage 4 output dir:   {get_stage_output(4)}")
     print(f"  Graph checker:        {graph_checker_enabled()}")
     print(f"  Graph checker script: {get_graph_checker_script()}")
     print(f"  Graph check report:   {get_graph_checker_report()}")

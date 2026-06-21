@@ -3528,14 +3528,19 @@ def main() -> int:
         help="Print a console summary of expanded feature flow cases.",
     )
     parser.add_argument(
-        "--case-output",
+        "--marker-inventory-output",
         type=Path,
-        help="Optional segment-assembled feature flow case YAML output path.",
+        help="Optional marker inventory YAML output path.",
     )
     parser.add_argument(
         "--converge-points-output",
         type=Path,
         help="Optional feature converge point topology YAML output path.",
+    )
+    parser.add_argument(
+        "--emit-all-output",
+        action="store_true",
+        help="Emit all feature flow output data files.",
     )
     parser.add_argument(
         "-v",
@@ -3549,28 +3554,30 @@ def main() -> int:
     inventory_paths = find_inventory_files(args.inventory_root)
     inventories = build_feature_marker_inventory_from_paths(inventory_paths)
 
-    output = feature_marker_inventory_to_dict(inventories)
+    marker_inventory_output = feature_marker_inventory_to_dict(inventories)
+    args.marker_inventory_output.parent.mkdir(parents=True, exist_ok=True)
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    args.output.write_text(
-        yaml.dump(
-            output,
-            sort_keys=False,
-            allow_unicode=True,
-            width=float("inf"),
-        ),
-        encoding="utf-8",
-    )
+    if args.emit_all_output and args.marker_inventory_output:
+        args.output.write_text(
+            yaml.dump(
+                marker_inventory_output,
+                sort_keys=False,
+                allow_unicode=True,
+                width=float("inf"),
+            ),
+            encoding="utf-8",
+        )
 
     marker_count = sum(
-        feature["summary"]["total_markers"] for feature in output["features"]
+        feature["summary"]["total_markers"]
+        for feature in marker_inventory_output["features"]
     )
 
     print(f"Feature marker inventory written to {args.output}")
-    print(f"Features: {output['feature_count']}")
+    print(f"Features: {marker_inventory_output['feature_count']}")
     print(f"Markers: {marker_count}")
 
-    if args.branch_points_output:
+    if args.emit_all_output and args.branch_points_output:
         branch_points_output = write_feature_branch_points(
             inventories=inventories,
             output_path=args.branch_points_output,
@@ -3584,7 +3591,7 @@ def main() -> int:
         print(f"Feature branch points written to {args.branch_points_output}")
         print(f"Branch points: {branch_point_count}")
 
-    if args.converge_points_output:
+    if args.emit_all_output and args.converge_points_output:
         converge_points_output = write_feature_converge_points(
             inventories=inventories,
             output_path=args.converge_points_output,
@@ -3609,15 +3616,15 @@ def main() -> int:
             inventories,
         )
 
-    if graphs is not None and args.case_output:
+    if graphs is not None and args.output:
         case_output = write_feature_flow_cases(
             graphs=graphs,
             inventories=inventories,
-            output_path=args.case_output,
+            output_path=args.output,
             verbose=args.verbose,
         )
 
-        print(f"Feature flow cases written to {args.case_output}")
+        print(f"Feature flow cases written to {args.output}")
         print(f"Feature flow cases: {case_output['case_count']}")
 
     return 0

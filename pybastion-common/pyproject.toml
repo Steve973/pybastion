@@ -26,7 +26,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "z3-solver",
+    "z3-solver>=4.16.0.0",
 ]
 
 [tool.uv.build-backend]

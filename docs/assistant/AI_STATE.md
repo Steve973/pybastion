@@ -1,283 +1,220 @@
-# AI_STATE.md — PyBastion Feature Flow Debug Bookmark
+# AI_STATE.md — PyBastion Integration Pipeline Current Work
 
-## Current status
+## Current objective
 
-The known PyBastion feature-flow tracing breakage for the synthetic feature-flow fixture is fixed.
+Finish the reorganized PyBastion integration analysis pipeline and prepare it to generate useful integration-test
+specification artifacts from inventory, graph, seam, and feature-flow analysis.
 
-The previous remaining issue was:
-
-```text
-fixture_mixed_control_feature::main::try_success::loop_entered::skip_value
-```
-
-That case was correctly no longer flowing into downstream branches, but Stage 4 was still reporting it unresolved instead of completing it as a terminal/conditional representative feature-flow case.
-
-That Stage 4 issue has now been fixed.
-
-Current regenerated feature-flow result:
-
-```yaml
-completed_cases: 40
-unresolved_cases: 0
-```
+This file should describe only the current implementation state and remaining work. Broader architecture belongs in
+`AI_CONTEXT.md`.
 
 ---
 
-## Non-negotiable model invariants
+## Current pipeline stages
 
-These remain active and must not be violated.
-
-### Loops are flattened
-
-PyBastion does not model runtime loop cycling in feature-flow artifacts.
-
-A loop may produce finite representative cases such as:
+The integration pipeline is conceptually ordered as:
 
 ```text
-loop_skipped
-loop_entered
-continue_requested / skip_value
-break_requested
-normal consume/use path
+Stage 1: Build EI call graph
+Stage 2: Trace feature-flow cases
+Stage 3: Generate integration test specs
+Stage 4: Split integration test specs
 ```
 
-It must not restore runtime loop behavior such as:
+The important dependency order is:
 
 ```text
-continue -> loop iterator/control
-body completion -> loop iterator/control
-break -> loop iterator/control
+unit inventories
+  -> Stage 1 graph
+  -> Stage 2 feature-flow cases
+  -> Stage 3 integration specs
+  -> Stage 4 split spec files
 ```
 
-A graph is only an artifact. It must not override the documented flattened model.
-
-### Feature tracing is branch-state traversal, not generic graph shortest path
-
-Stage 4 must preserve case identity through branch selection and convergence.
-
-Convergence resumes traversal location, but it does not erase branch lineage.
-
-Branch groups multiply only the active cases that reach them.
-
-### Inventory is authoritative
-
-Stage 4 should consume the inventory and graph as modeled artifacts. It must not rediscover raw source structure or reinterpret flattened control as runtime control.
+Feature-flow tracing should happen before final integration spec generation because feature-flow-scoped specs need
+completed feature-flow case paths.
 
 ---
 
-## What was fixed earlier
+## Current output files
 
-The decomposer loop-backedge bug was already fixed in `control.py`.
-
-The bad previous behavior was that loop routes reintroduced runtime-style cycling:
-
-```text
-continue -> loop decision / iterator
-body_next_iteration -> loop decision / iterator
-```
-
-That caused Stage 4 to produce invalid cases such as:
+Normal pipeline output should stay small.
+Current intended normal output is:
 
 ```text
-main::try_success::loop_entered::skip_value::has_content
-main::try_success::loop_entered::skip_value::empty_content
+stage1-ei-cfg.pkl
+stage2-feature-flow-cases.yaml
+stage3 integration spec output
+specs/
 ```
 
-The decomposer fix removed those invalid loop backedges.
-
-Post-regeneration checks showed:
+Stage 2 should not always emit all diagnostic/support files.
+Stage 2 support outputs are optional, and mostly for debugging:
 
 ```text
-body_next_iteration routes: 0
-derived EI loop_continue backedges: 0
-loop_continue routes resolve to terminal placeholders, not loop control
+stage2-feature-marker-inventory.yaml
+stage2-feature-branch-points.yaml
+stage2-feature-converge-points.yaml
 ```
 
-The graph now preserves the flattened-loop model for this defect.
+These should only be emitted when both conditions are true:
+
+```text
+--emit-all-output is present on the command line
+and
+the corresponding output path is explicitly provided
+```
+
+Do not make Stage 2 invent extra output paths by itself.
 
 ---
 
-## Final Stage 4 fix now applied
+## Stage 2 current contract
 
-The final remaining issue was in Stage 4 case finalization.
-
-When an active case landed on a terminal loop-disruption representative EI, Stage 4 attempted to find a normal feature end. Since no normal end path existed, it emitted:
-
-```text
-unresolved: main::try_success::loop_entered::skip_value
-```
-
-The correct behavior is to complete that representative case at the terminal placeholder already present in the graph.
-
-The applied Stage 4 fix recognizes terminal representative graph edges where:
-
-```python
-edge_type == "derived_control_route_execution_item_terminal"
-resolved_target_kind == "terminal_placeholder"
-route_kind in {"loop_continue", "loop_break"}
-exit_kind in {"continue", "break"}
-```
-
-When such an edge exists from the current EI, Stage 4 completes the case as:
+Stage 2 primary output is feature-flow cases.
+The main Stage 2 output must be:
 
 ```text
-end_kind: feature_end_conditional
-outcome_kind: conditional
+--output <stage2-feature-flow-cases.yaml>
 ```
 
-This is intentionally narrow.
-
-It does not:
+The marker inventory, branch points, and converge points are support/debug artifacts only.
+They must not be treated as the main Stage 2 product.
+The Stage 2 script has been adjusted so optional diagnostic outputs require:
 
 ```text
-restore loop cycling
-make continue flow to downstream branches
-treat all terminal placeholders as valid feature ends
-change schemas
-change graph construction
-change decomposer behavior
-change try/with behavior
+--emit-all-output
 ```
+
+plus explicit output paths.
+
+The main driver also accepts `--emit-all-output`. Currently, that flag only applies to Stage 2 feature-flow tracing.
 
 ---
 
-## Current validated result
+## Fixed defects that should not be reopened
 
-After the Stage 4 fix and artifact regeneration:
-
-```yaml
-completed_cases: 40
-unresolved_cases: 0
-```
-
-The newly completed case is:
-
-```text
-fixture_mixed_control_feature::main::try_success::loop_entered::skip_value::end::UA48866E495_F022::control_terminal::for_436_route_continue_440_0
-```
-
-The case now terminates at:
-
-```text
-UA48866E495_F022::control_terminal::for_436_route_continue_440_0
-```
-
-Bad downstream expansions remain absent:
-
-```text
-skip_value::has_content
-skip_value::empty_content
-continue_requested::has_content
-continue_requested::empty_content
-break_requested::has_content
-break_requested::empty_content
-```
-
-Note: branch names such as `continue_requested` and `break_requested` may still appear in legitimate completed fixture cases. That is expected. The invalid pattern is only when terminal disruption branches continue into unrelated downstream branches.
-
----
-
-## Current fixture case-shape summary
-
-The regenerated synthetic fixture produced this case distribution:
-
-```text
-fixture_if_branch_converge                    2
-fixture_if_branch_conditional_end             2
-fixture_match_branch_converge                 4
-fixture_for_loop_entry_converge               2
-fixture_while_loop_entry_converge             2
-fixture_for_loop_disruption_branches          4
-fixture_while_loop_disruption_branches        4
-fixture_nested_if_branch_converge             3
-fixture_nested_loop_converge                  3
-fixture_try_except_else_finally_trace         3
-fixture_try_with_inner_if_branch              3
-fixture_with_trace_and_content_branch         2
-fixture_mixed_control_feature                 6
-```
-
-The mixed-control feature now has the expected shape:
-
-```text
-main::os_error
-main::try_success::loop_entered::skip_value
-main::try_success::loop_entered::use_value::empty_content
-main::try_success::loop_entered::use_value::has_content
-main::try_success::loop_skipped::empty_content
-main::try_success::loop_skipped::has_content
-```
-
----
-
-## What is safe to say
-
-For the supplied synthetic feature-flow fixture, graph, inventory, and Stage 4 code:
-
-```text
-The known flattened-loop disruption bug is fixed.
-The Stage 4 unresolved skip_value case is fixed.
-The old bad downstream expansion is absent.
-The regenerated synthetic fixture now hits the expected 40 completed / 0 unresolved result.
-The case artifact is structurally consistent.
-```
-
-Do not claim the entire feature-flow engine is globally perfect.
-
-This fix validates the known bug and this fixture. Broader confidence requires running the wider fixture suite and adding golden expected case-ID regression tests.
-
----
-
-## Recommended regression tests
-
-Add or update a golden regression test for the synthetic feature-flow fixture.
-
-Minimum assertions:
-
-```text
-completed_cases == 40
-unresolved_cases == 0
-```
-
-Stronger assertions:
-
-```text
-actual_case_ids == expected_case_ids
-```
-
-Also assert absence of invalid downstream terminal-disruption expansions:
-
-```text
-skip_value::has_content
-skip_value::empty_content
-continue_requested::has_content
-continue_requested::empty_content
-break_requested::has_content
-break_requested::empty_content
-```
-
-And assert presence of the completed terminal representative case:
-
-```text
-fixture_mixed_control_feature::main::try_success::loop_entered::skip_value::end::UA48866E495_F022::control_terminal::for_436_route_continue_440_0
-```
-
----
-
-## What not to do next
-
-Do not continue changing Stage 4 unless a new fixture or regression proves a separate defect.
+The prior flattened-loop feature-flow defect is fixed.
 
 Do not restore loop backedges.
 
-Do not add broad terminal-placeholder completion behavior.
+Do not reintroduce runtime loop cycling into the flattened model.
 
-Do not make `continue` or `break` flow to downstream feature branches.
+Terminal representative loop-disruption cases such as `continue` and `break` should complete as terminal/conditional
+representative cases. They must not flow into downstream unrelated branches.
 
-Do not change graph-builder behavior for this issue.
+Expected feature-flow tracing status for the synthetic fixture remains:
 
-Do not change decomposer behavior for this issue.
+```text
+completed_cases: 40
+unresolved_cases: 0
+```
 
-Do not change schema for this issue.
+Bad branch expansion patterns should remain absent:
 
-The next sensible step is to commit the narrow Stage 4 fix and the regenerated/updated regression expectations.
+```text
+skip_value::has_content
+skip_value::empty_content
+```
+
+---
+
+## Remaining Work – The Immediate Next Step
+
+* Stage 3 should generate integration test specification artifacts after feature-flow tracing is complete.
+
+* Stage 3 should preserve two distinct integration-test specification outputs:
+
+  * seam-scoped specs (complete)
+  * feature-flow-scoped specs
+
+* These outputs are conceptually separate and have different testing goals.
+
+### Seam specs vs. feature-flow specs
+
+Seam specs aim to provide ample information to test seam boundaries without mocking either unit on either side of the
+seam. Seams are important, and testing them shows that each edge works as expected. 
+
+Feature flow specs aim to provide ample information to test entire features from end to end:
+
+- with as little mocking as possible
+- to ensure that the feature works as intended
+- across the normal, conditional, and error cases that can be encountered
+
+Feature-flow specs should cover the completed feature cases discovered by Stage 2, including normal cases, conditional
+cases, and error/disruption cases that the feature can encounter.
+
+Feature-flow specs answer:
+
+```text
+What completed feature flow exists, what path does it take, what outcome should it produce, and what integration-level
+test should verify that the feature works as intended?
+```
+
+At a high, conceptual level, we can summarize the distinction as:
+- **seam specs**: used to write tests to verify that adjacent units can work together
+- **feature flow specs**: used to write tests to verify the described and intended system functionality
+
+**Note** that the integration seam spec work has been completed and is included here for reference and contrast to the
+feature-flow specs. Do not change, enhance, or otherwise modify the existing seam spec generation.
+
+### Stage 3 feature-flow spec generation
+
+Feature-flow-scoped specs should be created from completed feature-flow cases in:
+
+```text
+stage2-feature-flow-cases.yaml
+```
+
+Use the feature-flow case paths that Stage 2 already produced.
+
+Do not recompute any feature-flow paths by any means or technique; if you suspect that something is wrong or missing,
+report it and ask how to proceed.
+
+For each completed feature-flow case, preserve:
+
+```text
+feature name
+case ID
+case branch path
+active branch path
+outcome
+end kind
+end marker / terminal marker
+segment IDs
+assembled EI path / path evidence
+integration-relevant EIs and operations on the path
+inventory-backed fixture requirements or constraints
+```
+
+The feature-flow spec should be centered on the feature case, not on seam specs.
+
+Seam specs may be used as reference material if useful, but feature-flow specs should not be modeled as wrappers around
+seam specs or as references to seam specs.
+
+The shared substrate is the inventory, graph, EIs, and completed feature-flow case paths.
+
+Output files remain distinct per integration spec type:
+
+```text
+integration-seam-test-specs.yaml
+integration-feature-test-specs.yaml
+```
+
+---
+
+## Stick strictly to the task at hand
+
+- Do not broaden behavior while finishing this pass
+
+- Do not add speculative enrichment.
+
+- Do not invent test fixtures, inputs, assertions, or expected values that are not directly supported by inventory/spec
+  artifacts.
+
+- Do not change loop, try, with, match, or branch semantics unless a specific failing artifact proves a separate defect,
+  and you have discussed and designed this with the meatsuit software dude.
+
+- Only change what is strictly necessary to get feature integration specs accurate and correct.
+
+- Only do the work that has been communicated to, and approved by, His Bipedal Excellence, AKA the human.

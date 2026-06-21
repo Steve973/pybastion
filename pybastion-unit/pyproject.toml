@@ -27,13 +27,13 @@ classifiers = [
 
 dependencies = [
     "pybastion-common",
-    "pyyaml",
-    "z3-solver",
+    "pyyaml>=6.0.3,<7.0",
+    "z3-solver>=4.16.0.0",
 ]
 
 [dependency-groups]
 dev = [
-    "mypy",
+    "mypy>=2.1.0",
 ]
 
 [project.scripts]
