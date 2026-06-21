@@ -122,6 +122,8 @@ def build_stage_cmd(
                 "--output",
                 str(paths["stage2_output"]),
             ]
+            if emit_all_output:
+                cmd.append("--emit-all-output")
         case 3:
             cmd += [
                 "--target-root",
@@ -135,8 +137,6 @@ def build_stage_cmd(
                 "--output",
                 str(paths["stage3_output"]),
             ]
-            if emit_all_output:
-                cmd.append("--emit-all-output")
         case 4:
             cmd += [
                 "--target-root",
